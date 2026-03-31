@@ -1,5 +1,7 @@
 """Django Ninja API endpoints for webhooks."""
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 from typing import TYPE_CHECKING, Any
