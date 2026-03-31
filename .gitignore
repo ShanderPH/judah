@@ -34,7 +34,8 @@ staticfiles/
 .env
 .env.local
 .env.*.local
-!.env.example
+.env.production
+.env.staging
 
 # Virtual environments
 .venv/

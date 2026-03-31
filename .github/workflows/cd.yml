@@ -1,0 +1,37 @@
+name: CD — Deploy Production
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify deploy start
+        run: echo "Deploying JUDAH $(git describe --tags --always) to production..."
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag judah:${{ github.sha }} \
+            --tag judah:latest \
+            --file Dockerfile \
+            .
+
+      - name: Run pre-deploy migrations check
+        run: echo "Migrations check — implement with production DATABASE_URL secret"
+
+      - name: Deploy
+        run: echo "Deploy step — configure with your hosting provider (Railway, Fly.io, ECS, etc.)"
