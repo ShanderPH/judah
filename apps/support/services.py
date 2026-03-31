@@ -1,15 +1,12 @@
 """Business logic for support/helpdesk app."""
 
 import contextlib
-from typing import TYPE_CHECKING
 
 import structlog
 
 from apps.support.models import Queue, Ticket
+from apps.support.schemas import CreateTicketRequest, UpdateTicketRequest
 from common.exceptions import NotFoundError
-
-if TYPE_CHECKING:
-    from apps.support.schemas import CreateTicketRequest, UpdateTicketRequest
 
 logger = structlog.get_logger(__name__)
 

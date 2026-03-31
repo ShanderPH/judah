@@ -1,5 +1,8 @@
 """Django Ninja API endpoints for analytics."""
 
+from __future__ import annotations
+
+from datetime import date
 from typing import TYPE_CHECKING
 
 from ninja import Router
@@ -10,8 +13,6 @@ from common.exceptions import NotFoundError
 from common.pagination import StandardPagination, paginate
 
 if TYPE_CHECKING:
-    from datetime import date
-
     from apps.analytics.models import DailyReport
 
 router = Router()

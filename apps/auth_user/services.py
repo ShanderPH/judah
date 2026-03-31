@@ -1,16 +1,12 @@
 """Business logic for auth_user app."""
 
-from typing import TYPE_CHECKING
-
 import structlog
 from django.contrib.auth import authenticate
 from django.contrib.auth.hashers import check_password
 
 from apps.auth_user.models import User
+from apps.auth_user.schemas import ChangePasswordRequest, RegisterRequest, UpdateProfileRequest
 from common.exceptions import ConflictError, NotFoundError, UnauthorizedError, ValidationError
-
-if TYPE_CHECKING:
-    from apps.auth_user.schemas import ChangePasswordRequest, RegisterRequest, UpdateProfileRequest
 
 logger = structlog.get_logger(__name__)
 

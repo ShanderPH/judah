@@ -1,11 +1,8 @@
 """Pydantic v2 schemas for support endpoints."""
 
-from typing import TYPE_CHECKING
+from datetime import datetime
 
 from ninja import Schema
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 
 class QueueResponse(Schema):
