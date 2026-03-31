@@ -150,6 +150,32 @@ CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_SOFT_TIME_LIMIT = 300
 CELERY_TASK_TIME_LIMIT = 600
 
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    # Sync HubSpot N1 team members daily at 06:00 AM (São Paulo)
+    "sync-hubspot-team-members-daily": {
+        "task": "support.task_sync_hubspot_team_members",
+        "schedule": crontab(hour=6, minute=0),
+    },
+    # Aggregate queue metrics daily at 00:05 AM (São Paulo)
+    "aggregate-queue-metrics-daily": {
+        "task": "support.task_aggregate_queue_metrics",
+        "schedule": crontab(hour=0, minute=5),
+    },
+    # Poll HubSpot agent availability every 3 minutes
+    "poll-hubspot-agent-status": {
+        "task": "support.task_poll_hubspot_agent_status",
+        "schedule": 180,  # seconds
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Auto-assignment configuration
+# ---------------------------------------------------------------------------
+
+HUBSPOT_N1_TEAM_ID = config("HUBSPOT_N1_TEAM_ID", default="8")
+
 # --- Internationalization ---
 
 LANGUAGE_CODE = "pt-br"

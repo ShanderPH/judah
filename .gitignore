@@ -82,3 +82,5 @@ node_modules/
 
 # OS
 Thumbs.db
+
+/.claude
