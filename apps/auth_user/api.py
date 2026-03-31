@@ -1,5 +1,7 @@
 """Django Ninja API endpoints for auth_user."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from ninja import Router

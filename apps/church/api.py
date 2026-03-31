@@ -1,5 +1,7 @@
 """Django Ninja API endpoints for church."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from ninja import Router
