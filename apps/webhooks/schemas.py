@@ -1,12 +1,10 @@
 """Pydantic v2 schemas for webhook endpoints."""
 
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import Any
 
 from ninja import Schema
 from pydantic import Field
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 
 class WebhookEventResponse(Schema):
