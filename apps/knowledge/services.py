@@ -2,7 +2,7 @@
 
 import structlog
 
-from apps.knowledge.models import Article, Category
+from apps.knowledge.models import Article
 from apps.knowledge.schemas import SearchResultItem
 from common.exceptions import NotFoundError
 
@@ -17,8 +17,8 @@ def get_article_by_slug(slug: str) -> Article:
     """
     try:
         return Article.objects.select_related("category").get(slug=slug, status=Article.Status.PUBLISHED)
-    except Article.DoesNotExist:
-        raise NotFoundError(f"Article '{slug}' not found.")
+    except Article.DoesNotExist as err:
+        raise NotFoundError(f"Article '{slug}' not found.") from err
 
 
 def list_published_articles(category_slug: str | None = None) -> list[Article]:
@@ -41,7 +41,6 @@ def semantic_search(query: str, top_k: int = 5, category_slug: str | None = None
         List of SearchResultItem ordered by relevance score.
     """
     from apps.integrations.pinecone_client.client import get_pinecone_client
-    from apps.integrations.supabase_client.client import get_supabase_client
 
     try:
         pinecone = get_pinecone_client()

@@ -51,7 +51,7 @@ def compute_daily_report(report_date: date) -> DailyReport:
     from apps.support.models import Ticket
 
     day_start = report_date
-    day_end = report_date + timedelta(days=1)
+    report_date + timedelta(days=1)
 
     opened = Ticket.objects.filter(created_at__date=day_start).count()
     resolved = Ticket.objects.filter(

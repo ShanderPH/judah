@@ -1,6 +1,6 @@
 """Health check endpoint for JUDAH."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ninja import Router
 
@@ -35,7 +35,7 @@ def health_check(request) -> dict:
 
     return {
         "status": "healthy" if all_ok else "degraded",
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
         "version": "1.0.0",
         "checks": checks,
     }

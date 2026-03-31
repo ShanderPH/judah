@@ -12,7 +12,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
@@ -40,7 +39,14 @@ class Migration(migrations.Migration):
                 ("internal_user_id", models.BigIntegerField(blank=True, null=True)),
                 ("team", models.TextField(blank=True, null=True)),
                 ("manager_email", models.TextField(blank=True, null=True)),
-                ("status_enum", models.CharField(choices=[("online", "Online"), ("away", "Away"), ("offline", "Offline"), ("busy", "Busy")], default="away", max_length=20)),
+                (
+                    "status_enum",
+                    models.CharField(
+                        choices=[("online", "Online"), ("away", "Away"), ("offline", "Offline"), ("busy", "Busy")],
+                        default="away",
+                        max_length=20,
+                    ),
+                ),
                 ("current_simultaneous_chats", models.BigIntegerField(default=0)),
                 ("max_simultaneous_chats", models.IntegerField(default=5)),
                 ("auto_assign_enabled", models.BooleanField(default=True)),
@@ -79,7 +85,15 @@ class Migration(migrations.Migration):
             name="AgentStatusHistory",
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ("agent", models.ForeignKey(db_column="agent_id", on_delete=django.db.models.deletion.CASCADE, related_name="status_history", to="support.agent")),
+                (
+                    "agent",
+                    models.ForeignKey(
+                        db_column="agent_id",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="status_history",
+                        to="support.agent",
+                    ),
+                ),
                 ("old_status", models.CharField(blank=True, max_length=20, null=True)),
                 ("new_status", models.CharField(max_length=20)),
                 ("changed_at", models.DateTimeField(auto_now_add=True)),
@@ -105,9 +119,15 @@ class Migration(migrations.Migration):
                 ("csat", models.BigIntegerField(default=0)),
                 ("total_chats", models.IntegerField(default=0)),
                 ("chats_closed", models.IntegerField(default=0)),
-                ("first_response_time_avg_min", models.DecimalField(blank=True, decimal_places=2, max_digits=10, null=True)),
+                (
+                    "first_response_time_avg_min",
+                    models.DecimalField(blank=True, decimal_places=2, max_digits=10, null=True),
+                ),
                 ("resolution_rate", models.DecimalField(blank=True, decimal_places=2, max_digits=5, null=True)),
-                ("customer_satisfaction_avg", models.DecimalField(blank=True, decimal_places=2, max_digits=5, null=True)),
+                (
+                    "customer_satisfaction_avg",
+                    models.DecimalField(blank=True, decimal_places=2, max_digits=5, null=True),
+                ),
                 ("last_time_updated", models.DateTimeField()),
                 ("created_at", models.DateTimeField(auto_now_add=True, null=True)),
             ],
@@ -117,7 +137,15 @@ class Migration(migrations.Migration):
             name="TicketJiraAssociation",
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ("ticket", models.ForeignKey(db_column="ticket_id", on_delete=django.db.models.deletion.CASCADE, related_name="jira_associations", to="support.ticket")),
+                (
+                    "ticket",
+                    models.ForeignKey(
+                        db_column="ticket_id",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="jira_associations",
+                        to="support.ticket",
+                    ),
+                ),
                 ("jira_issue_id", models.UUIDField(db_index=True)),
                 ("linked_at", models.DateTimeField(auto_now_add=True)),
                 ("association_active", models.BooleanField(default=True)),

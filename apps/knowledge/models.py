@@ -22,7 +22,7 @@ class Category(models.Model):
 
     class Meta:
         db_table = "kb_categories"
-        ordering = ["position", "name"]
+        ordering = ["position", "name"]  # noqa: RUF012
         verbose_name_plural = "categories"
 
     def __str__(self) -> str:
@@ -66,8 +66,8 @@ class Article(models.Model):
 
     class Meta:
         db_table = "kb_articles"
-        ordering = ["-updated_at"]
-        indexes = [
+        ordering = ["-updated_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
             models.Index(fields=["state", "category_hubspot_id"]),
         ]
 
@@ -90,8 +90,8 @@ class ArticleChunk(models.Model):
 
     class Meta:
         db_table = "kb_article_chunks"
-        ordering = ["article", "chunk_index"]
-        unique_together = [("article", "chunk_index")]
+        ordering = ["article", "chunk_index"]  # noqa: RUF012
+        unique_together = [("article", "chunk_index")]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.article_hubspot_id} — chunk {self.chunk_index}"
@@ -115,7 +115,7 @@ class KBSyncLog(models.Model):
 
     class Meta:
         db_table = "kb_sync_logs"
-        ordering = ["-started_at"]
+        ordering = ["-started_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.sync_type} [{self.status}] @ {self.started_at}"

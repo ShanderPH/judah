@@ -57,8 +57,8 @@ def chat_with_agent(payload: ChatRequest) -> ChatResponse:
     Returns:
         ChatResponse with the agent's reply and metadata.
     """
-    from apps.ai_agents.agents.salomao import salomao_agent
     from apps.ai_agents.agents.heimdall import heimdall_agent
+    from apps.ai_agents.agents.salomao import salomao_agent
 
     session = get_or_create_session(
         session_id=payload.session_id,

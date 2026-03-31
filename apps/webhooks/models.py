@@ -26,8 +26,8 @@ class WebhookEvent(models.Model):
 
     class Meta:
         db_table = "webhook_events"
-        ordering = ["-received_at"]
-        indexes = [
+        ordering = ["-received_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
             models.Index(fields=["event_type", "processed"]),
         ]
 
@@ -45,7 +45,7 @@ class DeadLetterQueue(models.Model):
 
     class Meta:
         db_table = "webhook_dead_letters"
-        ordering = ["-created_at"]
+        ordering = ["-created_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"DLQ: {self.event}"

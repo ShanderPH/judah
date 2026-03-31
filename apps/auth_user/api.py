@@ -1,10 +1,10 @@
 """Django Ninja API endpoints for auth_user."""
 
+from typing import TYPE_CHECKING
+
 from ninja import Router
-from ninja_jwt.controller import NinjaJWTDefaultController
 from ninja_jwt.tokens import RefreshToken
 
-from apps.auth_user.models import User
 from apps.auth_user.schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -21,6 +21,9 @@ from apps.auth_user.services import (
     update_profile,
 )
 from common.exceptions import UnauthorizedError
+
+if TYPE_CHECKING:
+    from apps.auth_user.models import User
 
 router = Router()
 

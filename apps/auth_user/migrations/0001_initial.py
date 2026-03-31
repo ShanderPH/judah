@@ -9,7 +9,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
@@ -31,35 +30,44 @@ class Migration(migrations.Migration):
                 ("is_staff", models.BooleanField(default=False)),
                 ("is_active", models.BooleanField(default=True)),
                 ("date_joined", models.DateTimeField(default=django.utils.timezone.now)),
-                ("role", models.CharField(
-                    choices=[
-                        ("admin", "Admin"),
-                        ("manager", "Manager"),
-                        ("agent", "Agent"),
-                        ("viewer", "Viewer"),
-                    ],
-                    default="viewer",
-                    max_length=20,
-                )),
+                (
+                    "role",
+                    models.CharField(
+                        choices=[
+                            ("admin", "Admin"),
+                            ("manager", "Manager"),
+                            ("agent", "Agent"),
+                            ("viewer", "Viewer"),
+                        ],
+                        default="viewer",
+                        max_length=20,
+                    ),
+                ),
                 ("avatar_url", models.URLField(blank=True, null=True)),
                 ("hubspot_owner_id", models.CharField(blank=True, max_length=50, null=True)),
                 ("is_ai_agent", models.BooleanField(default=False)),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
                 ("updated_at", models.DateTimeField(auto_now=True)),
-                ("groups", models.ManyToManyField(
-                    blank=True,
-                    related_name="auth_user_set",
-                    related_query_name="user",
-                    to="auth.group",
-                    verbose_name="groups",
-                )),
-                ("user_permissions", models.ManyToManyField(
-                    blank=True,
-                    related_name="auth_user_set",
-                    related_query_name="user",
-                    to="auth.permission",
-                    verbose_name="user permissions",
-                )),
+                (
+                    "groups",
+                    models.ManyToManyField(
+                        blank=True,
+                        related_name="auth_user_set",
+                        related_query_name="user",
+                        to="auth.group",
+                        verbose_name="groups",
+                    ),
+                ),
+                (
+                    "user_permissions",
+                    models.ManyToManyField(
+                        blank=True,
+                        related_name="auth_user_set",
+                        related_query_name="user",
+                        to="auth.permission",
+                        verbose_name="user permissions",
+                    ),
+                ),
             ],
             options={
                 "db_table": "auth_users",

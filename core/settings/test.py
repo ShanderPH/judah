@@ -2,9 +2,9 @@
 
 from decouple import config
 
-from .base import *  # noqa: F401, F403
+from .base import *
 
-SECRET_KEY = "test-secret-key-not-for-production"  # noqa: S105
+SECRET_KEY = "test-secret-key-not-for-production"
 
 DEBUG = False
 

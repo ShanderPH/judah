@@ -1,11 +1,15 @@
 """Django Ninja API endpoints for support."""
 
+from typing import TYPE_CHECKING
+
 from ninja import Router
 
-from apps.support.models import Ticket
 from apps.support.schemas import CreateTicketRequest, TicketListResponse, TicketResponse, UpdateTicketRequest
 from apps.support.services import create_ticket, get_ticket, list_tickets, update_ticket
 from common.pagination import StandardPagination, paginate
+
+if TYPE_CHECKING:
+    from apps.support.models import Ticket
 
 router = Router()
 

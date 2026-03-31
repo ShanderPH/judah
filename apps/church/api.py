@@ -1,11 +1,15 @@
 """Django Ninja API endpoints for church."""
 
+from typing import TYPE_CHECKING
+
 from ninja import Router
 
-from apps.church.models import Church
 from apps.church.schemas import ChurchListResponse, ChurchResponse
 from apps.church.services import get_church_by_id, list_active_churches
 from common.pagination import StandardPagination, paginate
+
+if TYPE_CHECKING:
+    from apps.church.models import Church
 
 router = Router()
 

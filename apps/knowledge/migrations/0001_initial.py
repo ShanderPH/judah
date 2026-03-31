@@ -12,7 +12,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
@@ -33,7 +32,11 @@ class Migration(migrations.Migration):
                 ("created_at", models.DateTimeField(auto_now_add=True, null=True)),
                 ("updated_at", models.DateTimeField(auto_now=True, null=True)),
             ],
-            options={"db_table": "kb_categories", "ordering": ["position", "name"], "verbose_name_plural": "categories"},
+            options={
+                "db_table": "kb_categories",
+                "ordering": ["position", "name"],
+                "verbose_name_plural": "categories",
+            },
         ),
         migrations.CreateModel(
             name="Article",
@@ -76,7 +79,16 @@ class Migration(migrations.Migration):
             name="ArticleChunk",
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ("article", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name="chunks", to="knowledge.article")),
+                (
+                    "article",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="chunks",
+                        to="knowledge.article",
+                    ),
+                ),
                 ("article_hubspot_id", models.CharField(db_index=True, max_length=255)),
                 ("pinecone_id", models.CharField(db_index=True, max_length=255, unique=True)),
                 ("chunk_index", models.IntegerField()),

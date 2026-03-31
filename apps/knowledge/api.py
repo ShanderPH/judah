@@ -1,11 +1,15 @@
 """Django Ninja API endpoints for knowledge base."""
 
+from typing import TYPE_CHECKING
+
 from ninja import Router
 
-from apps.knowledge.models import Article
 from apps.knowledge.schemas import ArticleListResponse, ArticleResponse, SearchRequest, SearchResultItem
 from apps.knowledge.services import get_article_by_slug, list_published_articles, semantic_search
 from common.pagination import StandardPagination, paginate
+
+if TYPE_CHECKING:
+    from apps.knowledge.models import Article
 
 router = Router()
 

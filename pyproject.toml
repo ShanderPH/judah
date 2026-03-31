@@ -28,6 +28,10 @@ select = [
 ]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/*.py" = ["RUF012", "N815", "E501"]
+"core/settings/*.py" = ["F403", "F405"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["apps", "core", "common"]
 

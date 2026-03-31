@@ -2,14 +2,15 @@
 
 import hashlib
 import hmac
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from django.http import HttpRequest
 from ninja import Router
 
-from apps.webhooks.schemas import WebhookEventResponse
 from apps.webhooks.services import process_webhook_event, record_webhook_event
+
+if TYPE_CHECKING:
+    from django.http import HttpRequest
 
 logger = structlog.get_logger(__name__)
 
@@ -31,10 +32,9 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
     """Receive and queue HubSpot CRM webhook events."""
     from django.conf import settings
 
-    if settings.HUBSPOT_APP_SECRET:
-        if not _verify_hubspot_signature(request, settings.HUBSPOT_APP_SECRET):
-            logger.warning("hubspot_webhook_invalid_signature")
-            return 202, {"status": "ignored", "reason": "invalid signature"}
+    if settings.HUBSPOT_APP_SECRET and not _verify_hubspot_signature(request, settings.HUBSPOT_APP_SECRET):
+        logger.warning("hubspot_webhook_invalid_signature")
+        return 202, {"status": "ignored", "reason": "invalid signature"}
 
     events_queued = 0
     for item in payload:

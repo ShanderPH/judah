@@ -10,7 +10,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
@@ -48,20 +47,26 @@ class Migration(migrations.Migration):
                 ("external_id", models.CharField(db_index=True, max_length=100, unique=True)),
                 ("hubspot_company_id", models.CharField(blank=True, max_length=50, null=True)),
                 ("name", models.CharField(max_length=500)),
-                ("plan", models.ForeignKey(
-                    blank=True,
-                    null=True,
-                    on_delete=django.db.models.deletion.SET_NULL,
-                    related_name="churches",
-                    to="church.plan",
-                )),
-                ("gateway", models.ForeignKey(
-                    blank=True,
-                    null=True,
-                    on_delete=django.db.models.deletion.SET_NULL,
-                    related_name="churches",
-                    to="church.gateway",
-                )),
+                (
+                    "plan",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="churches",
+                        to="church.plan",
+                    ),
+                ),
+                (
+                    "gateway",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="churches",
+                        to="church.gateway",
+                    ),
+                ),
                 ("is_active", models.BooleanField(default=True)),
                 ("members_count", models.IntegerField(default=0)),
                 ("city", models.CharField(blank=True, max_length=200, null=True)),

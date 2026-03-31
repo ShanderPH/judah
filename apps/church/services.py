@@ -16,8 +16,8 @@ def get_church_by_external_id(external_id: str) -> Church:
     """
     try:
         return Church.objects.select_related("plan", "gateway").get(external_id=external_id)
-    except Church.DoesNotExist:
-        raise NotFoundError(f"Church with external_id={external_id} not found.")
+    except Church.DoesNotExist as err:
+        raise NotFoundError(f"Church with external_id={external_id} not found.") from err
 
 
 def get_church_by_id(church_id: int) -> Church:
@@ -28,8 +28,8 @@ def get_church_by_id(church_id: int) -> Church:
     """
     try:
         return Church.objects.select_related("plan", "gateway").get(pk=church_id)
-    except Church.DoesNotExist:
-        raise NotFoundError(f"Church with id={church_id} not found.")
+    except Church.DoesNotExist as err:
+        raise NotFoundError(f"Church with id={church_id} not found.") from err
 
 
 def list_active_churches() -> list[Church]:

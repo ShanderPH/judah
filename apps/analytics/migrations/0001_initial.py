@@ -5,13 +5,12 @@ were created via create_judah_new_tables migration in Supabase.
 Run with: python manage.py migrate analytics --fake-initial
 """
 
+import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
-import django.db.models.deletion
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
@@ -23,18 +22,21 @@ class Migration(migrations.Migration):
             name="Metric",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False)),
-                ("metric_type", models.CharField(
-                    choices=[
-                        ("ticket_volume", "Ticket Volume"),
-                        ("resolution_time", "Avg Resolution Time"),
-                        ("first_response", "Avg First Response"),
-                        ("sla_breach_rate", "SLA Breach Rate"),
-                        ("agent_satisfaction", "Agent Satisfaction"),
-                        ("ai_deflection_rate", "AI Deflection Rate"),
-                    ],
-                    db_index=True,
-                    max_length=50,
-                )),
+                (
+                    "metric_type",
+                    models.CharField(
+                        choices=[
+                            ("ticket_volume", "Ticket Volume"),
+                            ("resolution_time", "Avg Resolution Time"),
+                            ("first_response", "Avg First Response"),
+                            ("sla_breach_rate", "SLA Breach Rate"),
+                            ("agent_satisfaction", "Agent Satisfaction"),
+                            ("ai_deflection_rate", "AI Deflection Rate"),
+                        ],
+                        db_index=True,
+                        max_length=50,
+                    ),
+                ),
                 ("date", models.DateField(db_index=True)),
                 ("value", models.FloatField()),
                 ("dimensions", models.JSONField(blank=True, default=dict)),
@@ -65,11 +67,14 @@ class Migration(migrations.Migration):
             name="AgentPerformance",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False)),
-                ("agent", models.ForeignKey(
-                    on_delete=django.db.models.deletion.CASCADE,
-                    related_name="performance_records",
-                    to=settings.AUTH_USER_MODEL,
-                )),
+                (
+                    "agent",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="performance_records",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
                 ("date", models.DateField(db_index=True)),
                 ("tickets_handled", models.PositiveIntegerField(default=0)),
                 ("tickets_resolved", models.PositiveIntegerField(default=0)),

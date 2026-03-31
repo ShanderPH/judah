@@ -12,7 +12,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
@@ -23,11 +22,14 @@ class Migration(migrations.Migration):
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
                 ("session_id", models.CharField(db_index=True, max_length=100, unique=True)),
-                ("agent_type", models.CharField(
-                    choices=[("salomao", "Salomão"), ("heimdall", "Heimdall")],
-                    default="salomao",
-                    max_length=20,
-                )),
+                (
+                    "agent_type",
+                    models.CharField(
+                        choices=[("salomao", "Salomão"), ("heimdall", "Heimdall")],
+                        default="salomao",
+                        max_length=20,
+                    ),
+                ),
                 ("user_identifier", models.CharField(blank=True, db_index=True, max_length=255)),
                 ("channel", models.CharField(blank=True, max_length=50)),
                 ("hubspot_contact_id", models.CharField(blank=True, db_index=True, max_length=50)),
@@ -43,11 +45,14 @@ class Migration(migrations.Migration):
             name="AgentMemory",
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ("session", models.ForeignKey(
-                    on_delete=django.db.models.deletion.CASCADE,
-                    related_name="memories",
-                    to="ai_agents.agentsession",
-                )),
+                (
+                    "session",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="memories",
+                        to="ai_agents.agentsession",
+                    ),
+                ),
                 ("key", models.CharField(max_length=200)),
                 ("value", models.TextField()),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
@@ -59,15 +64,21 @@ class Migration(migrations.Migration):
             name="AgentTrace",
             fields=[
                 ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ("session", models.ForeignKey(
-                    on_delete=django.db.models.deletion.CASCADE,
-                    related_name="traces",
-                    to="ai_agents.agentsession",
-                )),
-                ("role", models.CharField(
-                    choices=[("user", "User"), ("assistant", "Assistant"), ("tool", "Tool")],
-                    max_length=20,
-                )),
+                (
+                    "session",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="traces",
+                        to="ai_agents.agentsession",
+                    ),
+                ),
+                (
+                    "role",
+                    models.CharField(
+                        choices=[("user", "User"), ("assistant", "Assistant"), ("tool", "Tool")],
+                        max_length=20,
+                    ),
+                ),
                 ("content", models.TextField()),
                 ("tool_name", models.CharField(blank=True, max_length=100)),
                 ("tool_input", models.JSONField(blank=True, null=True)),

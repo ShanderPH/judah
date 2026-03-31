@@ -23,7 +23,7 @@ class AgentSession(models.Model):
 
     class Meta:
         db_table = "agent_sessions"
-        ordering = ["-created_at"]
+        ordering = ["-created_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.agent_type} — {self.session_id}"
@@ -40,7 +40,7 @@ class AgentMemory(models.Model):
 
     class Meta:
         db_table = "agent_memories"
-        unique_together = [("session", "key")]
+        unique_together = [("session", "key")]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.session.session_id} — {self.key}"
@@ -66,7 +66,7 @@ class AgentTrace(models.Model):
 
     class Meta:
         db_table = "agent_traces"
-        ordering = ["session", "created_at"]
+        ordering = ["session", "created_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.session.session_id} — {self.role}"

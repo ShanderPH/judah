@@ -1,8 +1,11 @@
 """Pydantic v2 schemas for analytics endpoints."""
 
-from datetime import date
+from typing import TYPE_CHECKING
 
 from ninja import Schema
+
+if TYPE_CHECKING:
+    from datetime import date
 
 
 class DailyReportResponse(Schema):

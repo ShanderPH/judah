@@ -28,7 +28,7 @@ class User(AbstractUser):
 
     class Meta:
         db_table = "auth_users"
-        ordering = ["-created_at"]
+        ordering = ["-created_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.get_full_name()} ({self.role})"

@@ -17,7 +17,7 @@ class Queue(models.Model):
 
     class Meta:
         db_table = "queue_settings"
-        ordering = ["name"]
+        ordering = ["name"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return self.name
@@ -57,7 +57,7 @@ class Agent(models.Model):
 
     class Meta:
         db_table = "agents"
-        ordering = ["name"]
+        ordering = ["name"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return self.name
@@ -84,8 +84,8 @@ class Ticket(models.Model):
 
     class Meta:
         db_table = "tickets"
-        ordering = ["-created_at"]
-        indexes = [
+        ordering = ["-created_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
             models.Index(fields=["status", "priority"]),
             models.Index(fields=["ticket_church", "status"]),
         ]
@@ -108,7 +108,7 @@ class AgentStatusHistory(models.Model):
 
     class Meta:
         db_table = "agent_status_history"
-        ordering = ["-changed_at"]
+        ordering = ["-changed_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.agent.name}: {self.old_status} → {self.new_status}"
@@ -138,17 +138,19 @@ class AgentMetrics(models.Model):
 
     class Meta:
         db_table = "agent_metrics"
-        ordering = ["-last_time_updated"]
+        ordering = ["-last_time_updated"]  # noqa: RUF012
 
     def __str__(self) -> str:
-        return f"Metrics agent_id={self.agent_id} ({self.period_start}–{self.period_end})"
+        return f"Metrics agent_id={self.agent_id} ({self.period_start}-{self.period_end})"
 
 
 class TicketJiraAssociation(models.Model):
     """Links a ticket to a Jira issue."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name="jira_associations", db_column="ticket_id")
+    ticket = models.ForeignKey(
+        Ticket, on_delete=models.CASCADE, related_name="jira_associations", db_column="ticket_id"
+    )
     jira_issue_id = models.UUIDField(db_index=True)
     linked_at = models.DateTimeField(auto_now_add=True)
     association_active = models.BooleanField(default=True)
