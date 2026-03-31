@@ -17,7 +17,7 @@ logger = structlog.get_logger(__name__)
 def make_cache_key(prefix: str, *args: Any, **kwargs: Any) -> str:
     """Generate a deterministic cache key from a prefix and arguments."""
     raw = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True, default=str)
-    digest = hashlib.md5(raw.encode()).hexdigest()
+    digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
     return f"{prefix}:{digest}"
 
 

@@ -8,6 +8,7 @@ python-decouple>=3.8
 # Database
 supabase>=2.12.0
 psycopg[binary]>=3.2.0
+dj-database-url>=2.3.0
 
 # Cache & Async
 redis>=5.2.0
