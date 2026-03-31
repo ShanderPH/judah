@@ -84,9 +84,6 @@ ASGI_APPLICATION = "core.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "OPTIONS": {
-            "pool": True,
-        },
     }
 }
 
@@ -95,7 +92,6 @@ if _database_url:
     import dj_database_url  # type: ignore[import-untyped]
 
     DATABASES["default"] = dj_database_url.parse(_database_url)
-    DATABASES["default"]["OPTIONS"] = {"pool": True}
 
 # --- Auth ---
 

@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def generate_uuid() -> str:
@@ -12,7 +12,7 @@ def generate_uuid() -> str:
 
 def utcnow() -> datetime:
     """Return the current UTC datetime (timezone-aware)."""
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 def slugify(text: str) -> str:

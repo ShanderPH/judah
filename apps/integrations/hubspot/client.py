@@ -4,7 +4,6 @@ from typing import Any
 
 import structlog
 from hubspot import HubSpot
-from hubspot.crm.contacts import SimplePublicObjectInputForCreate as ContactInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
 
 from common.circuit_breaker import CircuitBreaker
@@ -63,13 +62,7 @@ class HubSpotClient:
             from hubspot.crm.contacts import PublicObjectSearchRequest
 
             search_request = PublicObjectSearchRequest(
-                filter_groups=[
-                    {
-                        "filters": [
-                            {"propertyName": "email", "operator": "EQ", "value": email}
-                        ]
-                    }
-                ],
+                filter_groups=[{"filters": [{"propertyName": "email", "operator": "EQ", "value": email}]}],
                 properties=["firstname", "lastname", "company", "lifecyclestage"],
             )
             response = _circuit_breaker.call(

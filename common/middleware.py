@@ -1,11 +1,15 @@
 """Custom middlewares for JUDAH."""
 
+from __future__ import annotations
+
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from django.http import HttpRequest, HttpResponse
+
+if TYPE_CHECKING:
+    from django.http import HttpRequest, HttpResponse
 
 logger = structlog.get_logger(__name__)
 

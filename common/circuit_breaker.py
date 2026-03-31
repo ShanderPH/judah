@@ -1,13 +1,15 @@
 """Circuit breaker implementation for external API calls."""
 
 import time
-from collections.abc import Callable
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from common.exceptions import CircuitOpenError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = structlog.get_logger(__name__)
 

@@ -15,7 +15,8 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ("username", "email", "first_name", "last_name", "hubspot_owner_id")
     ordering = ("-created_at",)
 
-    fieldsets = UserAdmin.fieldsets + (  # type: ignore[operator]
+    fieldsets = (  # type: ignore[assignment]
+        *UserAdmin.fieldsets,
         (
             "JUDAH",
             {
@@ -29,7 +30,8 @@ class CustomUserAdmin(UserAdmin):
         ),
     )
 
-    add_fieldsets = UserAdmin.add_fieldsets + (  # type: ignore[operator]
+    add_fieldsets = (  # type: ignore[assignment]
+        *UserAdmin.add_fieldsets,
         (
             "JUDAH",
             {

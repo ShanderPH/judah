@@ -1,8 +1,5 @@
 """Supabase client singleton for JUDAH."""
 
-from functools import lru_cache
-from typing import Any
-
 import structlog
 from supabase import Client, create_client
 

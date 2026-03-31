@@ -1,6 +1,5 @@
 """Rate limiting middleware for JUDAH."""
 
-import time
 from typing import Any
 
 import structlog

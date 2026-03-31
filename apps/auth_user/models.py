@@ -27,8 +27,8 @@ class User(AbstractUser):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "users"
-        ordering = ["-created_at"]
+        db_table = "auth_users"
+        ordering = ["-created_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.get_full_name()} ({self.role})"

@@ -19,7 +19,7 @@ class JiraClient:
     def __init__(self, server: str, email: str, token: str) -> None:
         self._jira = JIRA(
             server=server,
-            basic_auth=(email, token),
+            basic_auth=(email, token),  # nosec B106
         )
 
     def search_issues(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:

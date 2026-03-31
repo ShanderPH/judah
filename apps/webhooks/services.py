@@ -1,6 +1,6 @@
 """Business logic for webhook processing."""
 
-from datetime import timezone
+from datetime import UTC
 
 import structlog
 
@@ -59,7 +59,7 @@ def process_webhook_event(event_id: int) -> bool:
             handle_jira_event(event)
 
         event.status = WebhookEvent.Status.PROCESSED
-        event.processed_at = datetime.now(tz=timezone.utc)
+        event.processed_at = datetime.now(tz=UTC)
         event.save(update_fields=["status", "processed_at"])
         logger.info("webhook_event_processed", event_id=event.pk)
         return True

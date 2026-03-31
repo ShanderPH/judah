@@ -33,7 +33,9 @@ class PineconeClient:
             logger.error("pinecone_upsert_failed", error=str(exc))
             raise
 
-    def search(self, query: str, top_k: int = 5, namespace: str = "", filter: dict | None = None) -> list[dict[str, Any]]:
+    def search(
+        self, query: str, top_k: int = 5, namespace: str = "", filter: dict | None = None
+    ) -> list[dict[str, Any]]:
         """Perform a semantic search by embedding the query and querying the index.
 
         Args:
@@ -45,9 +47,8 @@ class PineconeClient:
         Returns:
             List of match dicts with id, score, and metadata.
         """
-        from openai import OpenAI
-
         from django.conf import settings
+        from openai import OpenAI
 
         embedding_client = OpenAI(api_key=settings.OPENAI_API_KEY)
         embedding_response = embedding_client.embeddings.create(
@@ -91,9 +92,8 @@ def get_pinecone_client() -> PineconeClient:
     """
     global _pinecone_index
     if _pinecone_index is None:
-        from pinecone import Pinecone
-
         from django.conf import settings
+        from pinecone import Pinecone
 
         pc = Pinecone(api_key=settings.PINECONE_API_KEY)
         _pinecone_index = pc.Index(settings.PINECONE_INDEX_NAME)

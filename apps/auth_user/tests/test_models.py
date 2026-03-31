@@ -45,7 +45,7 @@ class TestUserModel:
     @pytest.mark.django_db
     def test_user_meta_db_table(self) -> None:
         """User model should use the 'users' table."""
-        assert User._meta.db_table == "users"
+        assert User._meta.db_table == "auth_users"
 
     @pytest.mark.django_db
     def test_unique_username(self) -> None:

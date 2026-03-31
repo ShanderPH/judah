@@ -15,7 +15,7 @@ class Plan(models.Model):
 
     class Meta:
         db_table = "plans"
-        ordering = ["name"]
+        ordering = ["name"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return self.name
@@ -31,7 +31,7 @@ class Gateway(models.Model):
 
     class Meta:
         db_table = "gateways"
-        ordering = ["name"]
+        ordering = ["name"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return self.name
@@ -56,8 +56,8 @@ class Church(models.Model):
 
     class Meta:
         db_table = "churches"
-        ordering = ["name"]
-        indexes = [
+        ordering = ["name"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
             models.Index(fields=["is_active", "country"]),
         ]
 
