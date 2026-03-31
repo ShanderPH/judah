@@ -1,0 +1,58 @@
+[project]
+name = "judah"
+version = "1.0.0"
+description = "JUDAH — Backend unificado da InChurch"
+requires-python = ">=3.14"
+license = {text = "Proprietary"}
+authors = [
+    {name = "InChurch Engineering Team"},
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+src = ["apps", "core", "common"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "SIM",
+    "TCH",
+    "RUF",
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["apps", "core", "common"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "core.settings.test"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers -p no:warnings"
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks integration tests",
+]
+
+[tool.coverage.run]
+source = ["apps", "common"]
+omit = ["*/tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

@@ -1,0 +1,39 @@
+# Core
+Django>=5.2,<5.3
+django-ninja==1.6.2
+django-ninja-jwt>=5.4.0
+django-cors-headers>=4.6.0
+python-decouple>=3.8
+
+# Database
+supabase>=2.12.0
+psycopg[binary]>=3.2.0
+
+# Cache & Async
+redis>=5.2.0
+celery[redis]>=5.4.0
+django-celery-beat>=2.7.0
+
+# AI & Agents
+agno>=2.5.0
+openai>=1.60.0
+anthropic>=0.40.0
+pinecone>=6.0.0
+
+# Integrations
+hubspot-api-client>=10.0.0
+jira>=3.8.0
+httpx>=0.28.0
+
+# Server
+uvicorn[standard]>=0.34.0
+gunicorn>=23.0.0
+whitenoise>=6.8.0
+
+# Observability
+sentry-sdk[django,celery]>=2.19.0
+structlog>=24.4.0
+
+# Utils
+Pillow>=11.0.0
+orjson>=3.10.0
