@@ -16,9 +16,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # Paths whose request logs are suppressed (health checks / probes).
-_SILENT_PATHS: frozenset[str] = frozenset(
-    {"/api/v1/health/", "/health/", "/ping/", "/readyz/", "/livez/"}
-)
+_SILENT_PATHS: frozenset[str] = frozenset({"/api/v1/health/", "/health/", "/ping/", "/readyz/", "/livez/"})
 
 
 class RequestLoggingMiddleware:

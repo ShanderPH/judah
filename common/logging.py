@@ -257,9 +257,7 @@ class HealthCheckFilter(logging.Filter):
     Suppressed paths: /api/v1/health/, /health/, /ping/, /readyz/, /livez/
     """
 
-    _SUPPRESSED: frozenset[str] = frozenset(
-        {"/api/v1/health/", "/health/", "/ping/", "/readyz/", "/livez/"}
-    )
+    _SUPPRESSED: frozenset[str] = frozenset({"/api/v1/health/", "/health/", "/ping/", "/readyz/", "/livez/"})
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
