@@ -251,9 +251,7 @@ def handle_ticket_closed(
 
     # If the ticket is still pending (never assigned), remove it from the queue
     # so it is not assigned after closure.
-    pending_conv = NewConversation.objects.filter(
-        hubspot_ticket_id=hubspot_ticket_id, is_pending=True
-    ).first()
+    pending_conv = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id, is_pending=True).first()
     if pending_conv:
         pending_conv.is_pending = False
         pending_conv.save(update_fields=["is_pending", "updated_at"])
@@ -326,9 +324,7 @@ def assign_pending_tickets() -> dict:
     """
     from apps.support.queue_service import get_eligible_agents
 
-    pending = list(
-        NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at")
-    )
+    pending = list(NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at"))
     total = len(pending)
 
     if not total:
