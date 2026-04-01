@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -80,9 +80,7 @@ class TestTaskPollHubspotAgentStatus:
         assert result["updated"] == 0
 
     def test_skips_users_without_email(self) -> None:
-        mock_users = [
-            {"user_id": "u10", "email": "", "availability_status": "available", "status_enum": "online"}
-        ]
+        mock_users = [{"user_id": "u10", "email": "", "availability_status": "available", "status_enum": "online"}]
         with patch("apps.integrations.hubspot.client.get_hubspot_client") as mock_client_fn:
             mock_client_fn.return_value.get_all_owners_availability.return_value = mock_users
             result = task_poll_hubspot_agent_status()

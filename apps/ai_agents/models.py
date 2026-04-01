@@ -1,5 +1,7 @@
 """Models for AI agents domain."""
 
+import uuid
+
 from django.db import models
 
 
@@ -10,6 +12,7 @@ class AgentSession(models.Model):
         SALOMAO = "salomao", "Salomão"
         HEIMDALL = "heimdall", "Heimdall"
 
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session_id = models.CharField(max_length=100, unique=True, db_index=True)
     agent_type = models.CharField(max_length=20, choices=AgentType.choices, default=AgentType.SALOMAO)
     user_identifier = models.CharField(max_length=255, blank=True, db_index=True)
@@ -32,6 +35,7 @@ class AgentSession(models.Model):
 class AgentMemory(models.Model):
     """Persisted memory entry for an agent session."""
 
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(AgentSession, on_delete=models.CASCADE, related_name="memories")
     key = models.CharField(max_length=200)
     value = models.TextField()
@@ -48,6 +52,8 @@ class AgentMemory(models.Model):
 
 class AgentTrace(models.Model):
     """Execution trace for a single agent turn (request/response pair)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class Role(models.TextChoices):
         USER = "user", "User"

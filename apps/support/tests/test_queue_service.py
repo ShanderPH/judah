@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone as dt_tz
+from datetime import UTC, datetime
 
 import pytest
 from django.utils import timezone
@@ -95,7 +95,7 @@ class TestSelectNextAgent:
         _make_agent(
             "OldAgent",
             1,
-            last_assignment_at=datetime(2026, 1, 1, tzinfo=dt_tz.utc),
+            last_assignment_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
         _make_agent("NeverAssigned", 2, last_assignment_at=None)
 
@@ -123,7 +123,7 @@ class TestSelectNextAgent:
         assert selected.pk == agent.pk
 
     def test_prefers_agent_with_fewer_chats(self) -> None:
-        old = datetime(2025, 6, 1, tzinfo=dt_tz.utc)
+        old = datetime(2025, 6, 1, tzinfo=UTC)
         _make_agent("BusyAgent", 1, chats=3, last_assignment_at=old)
         _make_agent("FreeAgent", 2, chats=0, last_assignment_at=old)
 
@@ -165,14 +165,14 @@ class TestGetLastAssignedOwnerId:
             agent_name="Agent A",
             hubspot_owner_id=111,
             assignment_type="auto",
-            assigned_at=datetime(2026, 3, 1, 10, 0, tzinfo=dt_tz.utc),
+            assigned_at=datetime(2026, 3, 1, 10, 0, tzinfo=UTC),
         )
         AssignmentLog.objects.create(
             ticket_id="T002",
             agent_name="Agent B",
             hubspot_owner_id=222,
             assignment_type="auto",
-            assigned_at=datetime(2026, 3, 1, 11, 0, tzinfo=dt_tz.utc),
+            assigned_at=datetime(2026, 3, 1, 11, 0, tzinfo=UTC),
         )
 
         result = get_last_assigned_owner_id()

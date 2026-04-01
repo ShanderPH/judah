@@ -16,8 +16,9 @@ Priority rules (1 = highest importance):
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import structlog
-from datetime import timezone as dt_tz
 from django.utils import timezone
 
 from apps.support.models import Agent
@@ -80,13 +81,13 @@ def select_next_agent(last_assigned_hubspot_owner_id: int | None = None) -> Agen
 
     # Rule 3 + 4: Sort by (last_assignment_at ASC, current_simultaneous_chats ASC)
     # NULL last_assignment_at means never assigned → highest priority → sort None as epoch 0.
-    _epoch = timezone.datetime(2000, 1, 1, tzinfo=dt_tz.utc)
+    _epoch = timezone.datetime(2000, 1, 1, tzinfo=UTC)
 
     def _sort_key(agent: Agent) -> tuple:
         last = agent.last_assignment_at or _epoch
         # Make timezone-aware if naive (handles legacy data)
         if timezone.is_naive(last):
-            last = timezone.make_aware(last, timezone.utc)
+            last = timezone.make_aware(last, UTC)
         return (last, agent.current_simultaneous_chats)
 
     candidates.sort(key=_sort_key)
