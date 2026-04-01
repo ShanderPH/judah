@@ -174,8 +174,8 @@ def task_sync_novo_stage_tickets(self) -> dict:
 
     Fetches all tickets currently in stage ``939275049`` (NOVO) from HubSpot
     and creates ``NewConversation`` records for those not yet tracked locally.
-    Does NOT perform any assignment — tickets stay ``is_pending=True`` until
-    an eligible agent comes online.
+    Does NOT perform any assignment — tickets will be picked up automatically
+    once an eligible agent comes online.
 
     Designed to run daily at 08:00 (America/Sao_Paulo) and also callable
     on-demand via the ``POST /api/v1/support/queue/sync-novo/`` endpoint.

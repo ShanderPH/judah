@@ -201,7 +201,6 @@ class TestGetQueueStatus:
             hubspot_ticket_id="T001",
             pipeline_id="636459134",
             entered_queue_at=timezone.now(),
-            is_pending=True,
         )
 
         status = get_queue_status()
