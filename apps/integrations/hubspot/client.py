@@ -1,9 +1,12 @@
 """HubSpot API client for JUDAH."""
 
+from __future__ import annotations
+
 from typing import Any
 
 import structlog
 from hubspot import HubSpot
+from hubspot.crm.tickets import SimplePublicObjectInput as TicketUpdateInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
 
 from common.circuit_breaker import CircuitBreaker
@@ -13,11 +16,21 @@ logger = structlog.get_logger(__name__)
 
 _circuit_breaker = CircuitBreaker(name="hubspot", failure_threshold=5, recovery_timeout=60)
 
+# Pipeline constants
+SUPPORT_PIPELINE_ID = "636459134"
+STAGE_NOVO_ID = "939275049"
+STAGE_CLOSED_ID = "939275052"
+
+# HubSpot team IDs for N1 support
+HUBSPOT_TEAM_N1_ID = "8"  # 8.1 N1 sub-team
+HUBSPOT_TEAM_SUPORTE_ID = "8"  # 08. Suporte parent team
+
 
 class HubSpotClient:
     """Typed wrapper for the HubSpot API covering tickets, contacts, and conversations."""
 
     def __init__(self, access_token: str) -> None:
+        self._access_token = access_token
         self._client = HubSpot(access_token=access_token)
 
     def get_ticket(self, ticket_id: str) -> dict[str, Any]:
@@ -111,6 +124,194 @@ class HubSpotClient:
             return {"id": ticket.id, "subject": subject}
         except Exception as exc:
             logger.error("hubspot_create_ticket_failed", subject=subject, error=str(exc))
+            raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def get_ticket_details(self, ticket_id: str, properties: list[str] | None = None) -> dict[str, Any]:
+        """Fetch a HubSpot ticket with extended properties for assignment validation.
+
+        Args:
+            ticket_id: The numeric HubSpot ticket ID.
+            properties: List of property names to fetch. Defaults to assignment-relevant set.
+
+        Returns:
+            Dict with ticket properties.
+
+        Raises:
+            ExternalServiceError: On API failure.
+        """
+        default_props = [
+            "subject",
+            "hs_ticket_priority",
+            "hs_pipeline",
+            "hs_pipeline_stage",
+            "hubspot_owner_id",
+            "hs_v2_date_entered_939275049",
+            "hs_v2_date_entered_939275052",
+            "hs_lastcontacted",
+            "firstname",
+            "email",
+        ]
+        fetch_props = properties or default_props
+        try:
+            ticket = _circuit_breaker.call(
+                self._client.crm.tickets.basic_api.get_by_id,
+                ticket_id,
+                properties=fetch_props,
+            )
+            props = ticket.properties or {}
+            return {
+                "id": ticket.id,
+                "subject": props.get("subject", ""),
+                "priority": props.get("hs_ticket_priority", ""),
+                "pipeline": props.get("hs_pipeline", ""),
+                "stage": props.get("hs_pipeline_stage", ""),
+                "owner_id": props.get("hubspot_owner_id") or "",
+                "contact_name": props.get("firstname", ""),
+                "contact_email": props.get("email", ""),
+            }
+        except Exception as exc:
+            logger.error("hubspot_get_ticket_details_failed", ticket_id=ticket_id, error=str(exc))
+            raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def assign_ticket_owner(self, ticket_id: str, owner_id: int) -> dict[str, Any]:
+        """Assign a HubSpot ticket to an owner (agent) by their owner ID.
+
+        This is the authoritative way to assign a ticket via HubSpot CRM API.
+        It updates the ``hubspot_owner_id`` property of the ticket.
+
+        Args:
+            ticket_id: The numeric HubSpot ticket ID.
+            owner_id: The HubSpot owner ID of the agent to assign.
+
+        Returns:
+            Dict with updated ticket id and owner_id.
+
+        Raises:
+            ExternalServiceError: On API failure.
+        """
+        try:
+            update_input = TicketUpdateInput(properties={"hubspot_owner_id": str(owner_id)})
+            ticket = _circuit_breaker.call(
+                self._client.crm.tickets.basic_api.update,
+                ticket_id,
+                simple_public_object_input=update_input,
+            )
+            logger.info("hubspot_ticket_owner_assigned", ticket_id=ticket_id, owner_id=owner_id)
+            return {
+                "id": ticket.id,
+                "owner_id": owner_id,
+            }
+        except Exception as exc:
+            logger.error(
+                "hubspot_assign_ticket_owner_failed",
+                ticket_id=ticket_id,
+                owner_id=owner_id,
+                error=str(exc),
+            )
+            raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def get_owner_details(self, owner_id: int) -> dict[str, Any]:
+        """Fetch owner details by owner ID.
+
+        Args:
+            owner_id: The HubSpot owner ID.
+
+        Returns:
+            Dict with owner properties or empty dict if not found.
+        """
+        try:
+            owner = _circuit_breaker.call(
+                self._client.crm.owners.owners_api.get_by_id,
+                owner_id=owner_id,
+            )
+            return {
+                "id": owner.id,
+                "email": getattr(owner, "email", ""),
+                "first_name": getattr(owner, "first_name", ""),
+                "last_name": getattr(owner, "last_name", ""),
+                "user_id": getattr(owner, "user_id", None),
+                "teams": [{"id": t.id, "name": t.name} for t in (getattr(owner, "teams", None) or [])],
+            }
+        except Exception as exc:
+            logger.warning("hubspot_get_owner_details_failed", owner_id=owner_id, error=str(exc))
+            return {}
+
+    def get_team_members(self, team_id: str) -> list[dict[str, Any]]:
+        """Fetch all owners that belong to a HubSpot team.
+
+        Args:
+            team_id: The HubSpot team ID.
+
+        Returns:
+            List of owner dicts with id, email, first_name, last_name.
+        """
+        try:
+            result = _circuit_breaker.call(
+                self._client.crm.owners.owners_api.get_page,
+                limit=100,
+            )
+            members = []
+            for owner in result.results or []:
+                owner_teams = getattr(owner, "teams", None) or []
+                if any(str(getattr(t, "id", "")) == str(team_id) for t in owner_teams):
+                    members.append(
+                        {
+                            "id": owner.id,
+                            "email": getattr(owner, "email", ""),
+                            "first_name": getattr(owner, "first_name", ""),
+                            "last_name": getattr(owner, "last_name", ""),
+                        }
+                    )
+            logger.info("hubspot_team_members_fetched", team_id=team_id, count=len(members))
+            return members
+        except Exception as exc:
+            logger.error("hubspot_get_team_members_failed", team_id=team_id, error=str(exc))
+            raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def get_all_owners_availability(self) -> list[dict[str, Any]]:
+        """Fetch all HubSpot users with their current availability status.
+
+        Uses the HubSpot Settings Users API (``GET /settings/v3/users``) which
+        exposes the ``hs_availability_status`` property:
+          - ``"available"`` → mapped to ``"online"``
+          - ``"away"`` / anything else → mapped to ``"away"``
+
+        Returns:
+            List of dicts with ``user_id``, ``email``, ``availability_status``,
+            ``status_enum`` keys.
+
+        Raises:
+            ExternalServiceError: On API failure.
+        """
+        import requests  # local import to avoid cold-start overhead
+
+        try:
+            headers = {"Authorization": f"Bearer {self._access_token}"}
+            response = _circuit_breaker.call(
+                requests.get,
+                "https://api.hubapi.com/settings/v3/users",
+                headers=headers,
+                params={"limit": 100},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            result = []
+            for user in data.get("results", []):
+                availability = user.get("hs_availability_status") or "available"
+                result.append(
+                    {
+                        "user_id": user.get("id"),
+                        "email": user.get("email", ""),
+                        "availability_status": availability,
+                        "status_enum": "online" if availability == "available" else "away",
+                    }
+                )
+            logger.info("hubspot_owners_availability_fetched", count=len(result))
+            return result
+        except Exception as exc:
+            logger.error("hubspot_get_owners_availability_failed", error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
 
 

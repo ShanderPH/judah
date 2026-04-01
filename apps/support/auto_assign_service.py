@@ -1,0 +1,352 @@
+"""Auto-assignment service — orchestrates ticket validation and assignment.
+
+Flow:
+  1. Webhook fires when ``hs_v2_date_entered_939275049`` changes (ticket → NOVO stage).
+  2. ``process_new_ticket_event`` validates the ticket and enqueues it in
+     ``new_conversations``.
+  3. ``attempt_auto_assign`` selects the next eligible agent via ``queue_service``
+     and updates HubSpot + local DB atomically.
+  4. When a ticket is closed (``hs_v2_date_entered_939275052``),
+     ``handle_ticket_closed`` calculates handle time and updates metrics.
+
+Validation rules before assignment:
+  - Ticket must belong to pipeline ``636459134``.
+  - Ticket must have no current owner (``hubspot_owner_id`` is null/empty).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import structlog
+from django.db import transaction
+from django.utils import timezone
+
+from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
+from apps.support.models import (
+    Agent,
+    AssignedConversation,
+    AssignmentLog,
+    NewConversation,
+)
+from apps.support.queue_service import (
+    decrement_agent_chat_count,
+    get_last_assigned_owner_id,
+    increment_agent_chat_count,
+    select_next_agent,
+)
+from common.exceptions import ExternalServiceError
+
+logger = structlog.get_logger(__name__)
+
+
+def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
+    """Parse a HubSpot millisecond-epoch timestamp into a UTC datetime."""
+    if not value:
+        return None
+    try:
+        ms = int(value)
+        return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    except ValueError, TypeError, OSError:
+        return None
+
+
+def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | None = None) -> bool:
+    """Handle a ticket entering the NOVO stage.
+
+    Validates the ticket, enqueues it in ``new_conversations``, and
+    immediately attempts automatic assignment.
+
+    Args:
+        hubspot_ticket_id: The HubSpot ticket ID (string).
+        entered_at_ms: The value of ``hs_v2_date_entered_939275049``
+            (millisecond timestamp from HubSpot). Used as the
+            ``entered_queue_at`` timestamp for wait-time metering.
+
+    Returns:
+        True if the ticket was successfully assigned, False otherwise.
+    """
+    logger.info("auto_assign_new_ticket_event", ticket_id=hubspot_ticket_id)
+
+    # Fetch ticket details from HubSpot
+    try:
+        client = get_hubspot_client()
+        ticket_data = client.get_ticket_details(hubspot_ticket_id)
+    except ExternalServiceError:
+        logger.error("auto_assign_hubspot_fetch_failed", ticket_id=hubspot_ticket_id)
+        return False
+
+    # Validate ticket is eligible for assignment
+    if not _is_ticket_eligible(ticket_data):
+        return False
+
+    entered_queue_at = _parse_hubspot_timestamp(entered_at_ms) or timezone.now()
+
+    # Enqueue in new_conversations (idempotent)
+    new_conv, created = NewConversation.objects.get_or_create(
+        hubspot_ticket_id=hubspot_ticket_id,
+        defaults={
+            "pipeline_id": ticket_data.get("pipeline", SUPPORT_PIPELINE_ID),
+            "contact_name": ticket_data.get("contact_name") or "",
+            "contact_email": ticket_data.get("contact_email") or "",
+            "priority": ticket_data.get("priority") or "",
+            "subject": ticket_data.get("subject") or "",
+            "entered_queue_at": entered_queue_at,
+            "is_pending": True,
+        },
+    )
+    if not created:
+        logger.info("auto_assign_ticket_already_queued", ticket_id=hubspot_ticket_id)
+        if not new_conv.is_pending:
+            return False
+
+    return attempt_auto_assign(new_conv, ticket_data)
+
+
+def _is_ticket_eligible(ticket_data: dict) -> bool:
+    """Validate that a ticket meets all prerequisites for auto-assignment.
+
+    Rules:
+      1. Must belong to pipeline ``636459134``.
+      2. Must have no current owner.
+
+    Args:
+        ticket_data: Dict from ``HubSpotClient.get_ticket_details``.
+
+    Returns:
+        True if eligible, False otherwise.
+    """
+    ticket_id = ticket_data.get("id", "?")
+    pipeline = ticket_data.get("pipeline", "")
+    owner_id = ticket_data.get("owner_id", "")
+
+    if str(pipeline) != SUPPORT_PIPELINE_ID:
+        logger.info(
+            "auto_assign_ticket_wrong_pipeline",
+            ticket_id=ticket_id,
+            pipeline=pipeline,
+        )
+        return False
+
+    if owner_id and str(owner_id).strip() not in ("", "None", "null"):
+        logger.info(
+            "auto_assign_ticket_already_has_owner",
+            ticket_id=ticket_id,
+            owner_id=owner_id,
+        )
+        return False
+
+    return True
+
+
+def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = None) -> bool:
+    """Try to assign a pending NewConversation to the next eligible agent.
+
+    This is idempotent — if the conversation is already assigned it returns False.
+
+    Args:
+        new_conv: The NewConversation instance to assign.
+        ticket_data: Optional pre-fetched ticket data dict. If None, will be
+            fetched from HubSpot.
+
+    Returns:
+        True if assignment succeeded, False otherwise.
+    """
+    if not new_conv.is_pending:
+        return False
+
+    # Select next agent (Rule 1-4)
+    last_owner_id = get_last_assigned_owner_id()
+    agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
+
+    if agent is None:
+        logger.warning("auto_assign_no_agent_available", ticket_id=new_conv.hubspot_ticket_id)
+        return False
+
+    # Assign via HubSpot API
+    try:
+        client = get_hubspot_client()
+        client.assign_ticket_owner(new_conv.hubspot_ticket_id, agent.hubspot_owner_id)
+    except ExternalServiceError:
+        logger.error(
+            "auto_assign_hubspot_update_failed",
+            ticket_id=new_conv.hubspot_ticket_id,
+            agent_id=str(agent.id),
+        )
+        return False
+
+    # Persist changes atomically in local DB
+    now = timezone.now()
+    wait_seconds: Decimal | None = None
+    if new_conv.entered_queue_at:
+        delta = now - new_conv.entered_queue_at
+        wait_seconds = Decimal(str(round(delta.total_seconds(), 2)))
+
+    with transaction.atomic():
+        # Mark new_conversation as assigned
+        new_conv.is_pending = False
+        new_conv.save(update_fields=["is_pending", "updated_at"])
+
+        # Create or update assigned_conversation record
+        AssignedConversation.objects.update_or_create(
+            hubspot_ticket_id=new_conv.hubspot_ticket_id,
+            defaults={
+                "agent": agent,
+                "hubspot_owner_id": agent.hubspot_owner_id,
+                "agent_name": agent.name,
+                "pipeline_id": new_conv.pipeline_id,
+                "entered_queue_at": new_conv.entered_queue_at,
+                "assigned_at": now,
+                "queue_wait_seconds": wait_seconds,
+                "contact_name": new_conv.contact_name,
+                "contact_email": new_conv.contact_email,
+                "priority": new_conv.priority,
+                "subject": new_conv.subject,
+            },
+        )
+
+        # Write to assignment_logs
+        AssignmentLog.objects.create(
+            ticket_id=new_conv.hubspot_ticket_id,
+            agent=agent,
+            agent_name=agent.name,
+            hubspot_owner_id=agent.hubspot_owner_id,
+            assignment_type="auto",
+            pipeline_id=new_conv.pipeline_id,
+            entered_queue_at=new_conv.entered_queue_at,
+            queue_wait_seconds=wait_seconds,
+        )
+
+        # Update agent chat counter
+        increment_agent_chat_count(agent)
+
+    logger.info(
+        "auto_assign_success",
+        ticket_id=new_conv.hubspot_ticket_id,
+        agent_name=agent.name,
+        hubspot_owner_id=agent.hubspot_owner_id,
+        queue_wait_seconds=float(wait_seconds) if wait_seconds is not None else None,
+    )
+    return True
+
+
+def handle_ticket_closed(
+    hubspot_ticket_id: str,
+    closed_at_ms: str | int | None = None,
+    owner_id: str | None = None,
+) -> None:
+    """Handle a ticket entering the FECHADO (closed) stage.
+
+    Updates the ``assigned_conversations`` record with closure metadata,
+    calculates total handle time, and decrements the agent's chat counter.
+
+    Args:
+        hubspot_ticket_id: The HubSpot ticket ID.
+        closed_at_ms: Value of ``hs_v2_date_entered_939275052`` (ms epoch).
+        owner_id: The ``hubspot_owner_id`` at the time of closure (the
+            agent who closed the ticket).
+    """
+    closed_at = _parse_hubspot_timestamp(closed_at_ms) or timezone.now()
+
+    try:
+        assigned = AssignedConversation.objects.get(hubspot_ticket_id=hubspot_ticket_id)
+    except AssignedConversation.DoesNotExist:
+        logger.info("auto_assign_close_no_record", ticket_id=hubspot_ticket_id)
+        return
+
+    if assigned.closed_at:
+        # Already processed
+        return
+
+    handle_time: Decimal | None = None
+    if assigned.assigned_at:
+        delta = closed_at - assigned.assigned_at
+        handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
+
+    closing_owner = int(owner_id) if owner_id and str(owner_id).strip() else None
+    closing_agent_name: str | None = None
+
+    # Try to resolve closing agent name from local DB
+    if closing_owner:
+        agent_qs = Agent.objects.filter(hubspot_owner_id=closing_owner).first()
+        if agent_qs:
+            closing_agent_name = agent_qs.name
+            # Decrement their chat count
+            decrement_agent_chat_count(agent_qs)
+    elif assigned.agent:
+        # Fallback: use the originally assigned agent
+        decrement_agent_chat_count(assigned.agent)
+
+    with transaction.atomic():
+        assigned.closed_at = closed_at
+        assigned.closed_by_owner_id = closing_owner
+        assigned.closed_by_agent_name = closing_agent_name
+        assigned.total_handle_time_minutes = handle_time
+        assigned.save(
+            update_fields=[
+                "closed_at",
+                "closed_by_owner_id",
+                "closed_by_agent_name",
+                "total_handle_time_minutes",
+                "updated_at",
+            ]
+        )
+
+    logger.info(
+        "auto_assign_ticket_closed",
+        ticket_id=hubspot_ticket_id,
+        closed_by_owner_id=closing_owner,
+        handle_time_minutes=float(handle_time) if handle_time is not None else None,
+    )
+
+
+def sync_hubspot_team_to_agents(team_id: str) -> int:
+    """Sync HubSpot team members into the local agents table.
+
+    For each team member not yet in the agents table, creates an Agent record.
+    Existing agents are not modified (preserves manual configurations).
+
+    Args:
+        team_id: The HubSpot team ID to sync.
+
+    Returns:
+        Number of new agents created.
+    """
+    try:
+        client = get_hubspot_client()
+        members = client.get_team_members(team_id)
+    except ExternalServiceError:
+        logger.error("auto_assign_team_sync_failed", team_id=team_id)
+        return 0
+
+    created_count = 0
+    for member in members:
+        owner_id = member.get("id")
+        email = member.get("email", "")
+        first = member.get("first_name", "")
+        last = member.get("last_name", "")
+        name = f"{first} {last}".strip() or email
+
+        if not owner_id or not email:
+            continue
+
+        _, created = Agent.objects.get_or_create(
+            hubspot_owner_id=int(owner_id),
+            defaults={
+                "name": name,
+                "agent_email": email,
+                "status_enum": Agent.StatusEnum.OFFLINE,
+                "current_simultaneous_chats": 0,
+                "max_simultaneous_chats": 5,
+                "auto_assign_enabled": True,
+                "is_active": True,
+                "team": f"team_{team_id}",
+            },
+        )
+        if created:
+            created_count += 1
+            logger.info("auto_assign_agent_synced", email=email, hubspot_owner_id=owner_id)
+
+    logger.info("auto_assign_team_sync_complete", team_id=team_id, created=created_count)
+    return created_count
