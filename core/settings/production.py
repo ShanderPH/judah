@@ -1,6 +1,24 @@
 """Production settings — Railway deployment."""
 
+import os
+
 from .base import *
+
+# --- Allowed hosts ---
+# Railway's internal health checker always sends Host: healthcheck.railway.app.
+# Without it ALLOWED_HOSTS rejects the probe → DisallowedHost → deploy hangs.
+# RAILWAY_PUBLIC_DOMAIN is injected automatically by Railway with the
+# service's public URL (e.g. judah-production.up.railway.app).
+
+_railway_hosts: list[str] = [
+    "healthcheck.railway.app",  # Railway internal health probe (always present)
+    ".railway.app",  # wildcard: covers *.up.railway.app and previews
+]
+_public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+if _public_domain:
+    _railway_hosts.append(_public_domain)
+
+ALLOWED_HOSTS = list(ALLOWED_HOSTS) + _railway_hosts
 
 # --- Security ---
 
