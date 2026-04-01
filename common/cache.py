@@ -59,14 +59,16 @@ def cached(timeout: int = 300, prefix: str = "") -> Callable:
 def invalidate_prefix(prefix: str) -> int:
     """Delete all cache keys matching a prefix pattern.
 
-    Returns the number of keys deleted.
+    Uses SCAN (non-blocking) instead of KEYS so large key spaces don't
+    stall the Redis server.  Returns the number of keys deleted.
     """
+    import redis as redis_lib
+    from django.conf import settings
+
     pattern = f"{prefix}:*"
     try:
-        from django_redis import get_redis_connection
-
-        conn = get_redis_connection("default")
-        keys = conn.keys(pattern)
+        conn = redis_lib.from_url(settings.REDIS_URL, decode_responses=False)
+        keys = list(conn.scan_iter(pattern))
         if keys:
             return conn.delete(*keys)
     except Exception:
