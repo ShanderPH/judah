@@ -168,6 +168,32 @@ def task_aggregate_queue_metrics() -> None:
     )
 
 
+@shared_task(bind=True, max_retries=3, default_retry_delay=60, name="support.task_sync_novo_stage_tickets")
+def task_sync_novo_stage_tickets(self) -> dict:
+    """Celery task: sync HubSpot NOVO-stage tickets into the internal queue.
+
+    Fetches all tickets currently in stage ``939275049`` (NOVO) from HubSpot
+    and creates ``NewConversation`` records for those not yet tracked locally.
+    Does NOT perform any assignment — tickets stay ``is_pending=True`` until
+    an eligible agent comes online.
+
+    Designed to run daily at 08:00 (America/Sao_Paulo) and also callable
+    on-demand via the ``POST /api/v1/support/queue/sync-novo/`` endpoint.
+
+    Returns:
+        Dict with ``created``, ``skipped``, ``total_from_hubspot`` counts.
+    """
+    from apps.support.auto_assign_service import sync_novo_stage_tickets
+
+    try:
+        result = sync_novo_stage_tickets()
+        logger.info("task_sync_novo_stage_tickets_done", **result)
+        return result
+    except Exception as exc:
+        logger.warning("task_sync_novo_stage_tickets_retry", error=str(exc), retry=self.request.retries)
+        raise self.retry(exc=exc) from exc
+
+
 @shared_task(name="support.task_poll_hubspot_agent_status")
 def task_poll_hubspot_agent_status() -> dict:
     """Celery task: sync agent availability from HubSpot Users API.
@@ -231,4 +257,13 @@ def task_poll_hubspot_agent_status() -> dict:
         skipped=skipped,
         not_found=not_found,
     )
+
+    # If any agent just came online, attempt to drain the pending queue so
+    # tickets that arrived while no agent was available are assigned promptly.
+    if updated > 0 and Agent.objects.filter(status_enum="online", is_active=True).exists():
+        from apps.support.auto_assign_service import assign_pending_tickets
+
+        assign_result = assign_pending_tickets()
+        logger.info("task_poll_pending_assignment_triggered", **assign_result)
+
     return {"updated": updated, "skipped": skipped, "not_found": not_found}

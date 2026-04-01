@@ -236,3 +236,12 @@ class QueueHealthResponse(Schema):
     eligible_agents: list[AgentDiagnosticSchema]
     pending_tickets: list[PendingTicketSchema]
     last_assignments: list[LastAssignmentSchema]
+
+
+class SyncNovoResponse(Schema):
+    """Result of a NOVO-stage sync operation."""
+
+    created: int
+    skipped: int
+    total_from_hubspot: int
+    queued_for_assignment: bool

@@ -13,6 +13,7 @@ from apps.support.schemas import (
     QueueHealthResponse,
     QueueMetricsResponse,
     QueueStatusResponse,
+    SyncNovoResponse,
     TicketListResponse,
     TicketResponse,
     UpdateTicketRequest,
@@ -224,6 +225,31 @@ def get_queue_health(request) -> dict:
         "eligible_agents": [_build_agent(a) for a in eligible_objs],
         "pending_tickets": pending_tickets,
         "last_assignments": last_assignments,
+    }
+
+
+@router.post(
+    "/queue/sync-novo/",
+    response={202: SyncNovoResponse},
+    summary="Sync NOVO-stage tickets from HubSpot into the internal queue",
+    auth=None,
+)
+def sync_novo_tickets(request) -> tuple[int, dict]:
+    """Fetch all tickets currently in the NOVO stage (939275049) from HubSpot
+    and enqueue any that are not yet tracked in ``new_conversations``.
+
+    Does NOT perform any assignment — tickets remain ``is_pending=True`` and
+    will be picked up automatically once an eligible agent comes online.
+
+    Intended for manual trigger from an admin frontend or for backfilling after
+    a downtime window where webhooks were missed.
+    """
+    from apps.support.auto_assign_service import sync_novo_stage_tickets
+
+    sync_result = sync_novo_stage_tickets()
+    return 202, {
+        **sync_result,
+        "queued_for_assignment": sync_result["created"] > 0,
     }
 
 
