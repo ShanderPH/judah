@@ -12,6 +12,9 @@ _PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"  # Ticket entered FECHADO st
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
 
+# Stage IDs
+_STAGE_FECHADO_ID = "939275052"
+
 
 def handle_hubspot_event(event) -> None:
     """Route and process a HubSpot webhook event.
@@ -120,15 +123,24 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str, pay
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
-    """Update local ticket status when HubSpot pipeline stage changes."""
+    """Update local ticket status when HubSpot pipeline stage changes.
+
+    When a ticket moves to FECHADO (stage 939275052), also remove it from the
+    pending queue so it is never assigned after closure.
+    """
     from apps.support.models import Ticket
+
+    # If ticket moved to FECHADO, trigger the closure flow (removes from queue)
+    if new_stage == _STAGE_FECHADO_ID:
+        logger.info("hubspot_ticket_pipeline_stage_fechado", ticket_id=object_id)
+        _handle_ticket_entered_closed(object_id, None, {})
+        return
 
     try:
         ticket = Ticket.objects.get(ticket_id=object_id)
-        if new_stage == "4":
-            ticket.status = "RESOLVED"
-            ticket.save(update_fields=["status", "updated_at"])
-            logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
+        ticket.status = "RESOLVED"
+        ticket.save(update_fields=["status", "updated_at"])
+        logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
     except Ticket.DoesNotExist:
         logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
 

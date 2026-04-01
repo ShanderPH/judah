@@ -398,6 +398,14 @@ def sync_novo_stage_tickets() -> dict:
     for ticket in tickets:
         ticket_id = str(ticket["id"])
 
+        # Skip tickets that already have an owner in HubSpot — they are not
+        # "new and unassigned" regardless of their pipeline stage.
+        owner_id = ticket.get("owner_id", "")
+        if owner_id and str(owner_id).strip() not in ("", "None", "null"):
+            logger.debug("sync_novo_ticket_has_owner_skipped", ticket_id=ticket_id, owner_id=owner_id)
+            skipped += 1
+            continue
+
         # Skip tickets already in our queue (pending or already assigned)
         if NewConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
             skipped += 1
