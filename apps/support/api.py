@@ -80,7 +80,7 @@ def list_pending_conversations(request) -> list[NewConversation]:
     """Return tickets currently waiting in the assignment queue."""
     from apps.support.models import NewConversation
 
-    return NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at")
+    return NewConversation.objects.order_by("entered_queue_at")
 
 
 @router.get(
@@ -158,7 +158,7 @@ def get_queue_health(request) -> dict:
     absent = [a for a in all_agents if (a.status_enum or "offline") in ("away", "offline", "busy")]
     online_count = sum(1 for a in all_agents if a.status_enum == "online")
 
-    pending_qs = NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at")
+    pending_qs = NewConversation.objects.order_by("entered_queue_at")
     now = timezone.now()
     pending_tickets = [
         {
@@ -238,8 +238,8 @@ def sync_novo_tickets(request) -> tuple[int, dict]:
     """Fetch all tickets currently in the NOVO stage (939275049) from HubSpot
     and enqueue any that are not yet tracked in ``new_conversations``.
 
-    Does NOT perform any assignment — tickets remain ``is_pending=True`` and
-    will be picked up automatically once an eligible agent comes online.
+    Does NOT perform any assignment — tickets will be picked up automatically
+    once an eligible agent comes online.
 
     Intended for manual trigger from an admin frontend or for backfilling after
     a downtime window where webhooks were missed.

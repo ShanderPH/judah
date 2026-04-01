@@ -168,17 +168,17 @@ class Command(BaseCommand):
     def _section_queue(self, limit: int) -> None:
         self.stdout.write(_header("FILA DE CONVERSAS NOVAS"))
 
-        pending = NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at")
+        pending = NewConversation.objects.order_by("entered_queue_at")
         all_new = NewConversation.objects.order_by("-entered_queue_at")[:limit]
 
         pending_count = pending.count()
-        total_count = NewConversation.objects.count()
+        total_count = pending_count
 
         pending_label = f"AGUARDANDO ATRIBUICAO: {pending_count}"
         self.stdout.write(f"\n  {pending_label}  |  Total registrado: {total_count}")
 
         if pending_count > 0:
-            self.stdout.write("\n  Tickets na fila (is_pending=True):")
+            self.stdout.write("\n  Tickets na fila:")
             self.stdout.write(f"  {'TICKET ID':<18} {'PRIORIDADE':>10}  {'AGUARDANDO HA':>15}  {'CLIENTE':<20}")
             self.stdout.write(_divider("."))
             for conv in pending[:20]:
@@ -193,13 +193,11 @@ class Command(BaseCommand):
 
         if total_count > 0:
             self.stdout.write(f"\n  Ultimos {min(limit, total_count)} registros em new_conversations:")
-            self.stdout.write(f"  {'TICKET ID':<18} {'PENDENTE':>8}  {'ENTROU NA FILA':>20}  {'HA':>12}")
+            self.stdout.write(f"  {'TICKET ID':<18} {'ENTROU NA FILA':>20}  {'HA':>12}")
             self.stdout.write(_divider("."))
             for conv in all_new:
-                pend_label = "SIM" if conv.is_pending else "NAO"
                 self.stdout.write(
                     f"  {conv.hubspot_ticket_id:<18} "
-                    f"{pend_label:>8}  "
                     f"{conv.entered_queue_at.strftime('%Y-%m-%d %H:%M:%S'):>20}  "
                     f"{_ago(conv.entered_queue_at):>12}"
                 )
@@ -232,7 +230,7 @@ class Command(BaseCommand):
         self.stdout.write(_header("STATUS DO SISTEMA"))
 
         eligible = get_eligible_agents()
-        pending = NewConversation.objects.filter(is_pending=True).count()
+        pending = NewConversation.objects.count()
 
         issues = []
         warnings = []
@@ -292,7 +290,7 @@ class Command(BaseCommand):
             for a in all_agents
         ]
 
-        pending_qs = NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at")
+        pending_qs = NewConversation.objects.order_by("entered_queue_at")
         pending_data = [
             {
                 "hubspot_ticket_id": c.hubspot_ticket_id,

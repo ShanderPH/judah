@@ -49,7 +49,7 @@ def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     try:
         ms = int(value)
         return datetime.fromtimestamp(ms / 1000, tz=UTC)
-    except (ValueError, TypeError, OSError):
+    except ValueError, TypeError, OSError:
         return None
 
 
@@ -431,7 +431,6 @@ def sync_novo_stage_tickets() -> dict:
             priority=ticket.get("priority") or "",
             subject=ticket.get("subject") or "",
             entered_queue_at=entered_at,
-            is_pending=True,
         )
         created += 1
         logger.info("sync_novo_ticket_queued", ticket_id=ticket_id)

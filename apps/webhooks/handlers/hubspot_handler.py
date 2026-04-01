@@ -24,13 +24,18 @@ def handle_hubspot_event(event) -> None:
     """
     event_type: str = event.event_type
     payload: dict = event.payload
+    et_lower = event_type.lower()
 
     logger.info("hubspot_event_received", event_type=event_type, event_id=event.pk)
 
-    if "ticket" in event_type.lower():
+    if et_lower.startswith("ticket."):
         _handle_ticket_event(event_type, payload)
-    elif "contact" in event_type.lower():
+    elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
+    elif et_lower.startswith("conversation."):
+        _handle_conversation_event(event_type, payload)
+    elif et_lower.startswith(("deal.", "company.")):
+        logger.debug("hubspot_crm_event_logged", event_type=event_type, object_id=payload.get("objectId"))
     else:
         logger.debug("hubspot_event_unhandled", event_type=event_type)
 
@@ -117,6 +122,27 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
         logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
     except Ticket.DoesNotExist:
         logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
+
+
+def _handle_conversation_event(event_type: str, payload: dict) -> None:
+    """Process HubSpot Conversations events (legacy).
+
+    These events come from the HubSpot Conversations API and include:
+      - conversation.creation
+      - conversation.deletion
+      - conversation.privacyDeletion
+      - conversation.propertyChange
+      - conversation.newMessage
+
+    Currently logged for auditing; extend as needed for specific use cases.
+    """
+    object_id = str(payload.get("objectId", ""))
+    logger.debug(
+        "hubspot_conversation_event",
+        event_type=event_type,
+        object_id=object_id,
+        message_id=payload.get("messageId"),
+    )
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:

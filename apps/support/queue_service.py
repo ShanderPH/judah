@@ -173,7 +173,7 @@ def get_queue_status() -> dict:
 
     online = Agent.objects.filter(status_enum=Agent.StatusEnum.ONLINE)
     eligible = get_eligible_agents()
-    pending = NewConversation.objects.filter(is_pending=True).count()
+    pending = NewConversation.objects.count()
 
     return {
         "online_agents": online.count(),

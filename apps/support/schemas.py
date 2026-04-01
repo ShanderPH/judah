@@ -113,7 +113,6 @@ class NewConversationResponse(Schema):
     priority: str | None = None
     subject: str | None = None
     entered_queue_at: datetime
-    is_pending: bool
     created_at: datetime
 
     class Config:

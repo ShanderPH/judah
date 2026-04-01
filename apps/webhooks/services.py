@@ -36,8 +36,8 @@ def process_webhook_event(event_id) -> bool:
     """Dispatch a recorded webhook event to the appropriate handler.
 
     Routes by event_type prefix:
-      - ``ticket.*`` / ``contact.*``  → HubSpot handler
-      - ``conversation.*``            → legacy Jira handler (if present)
+      - ``ticket.*`` / ``contact.*`` / ``deal.*`` / ``company.*``  → HubSpot handler
+      - ``conversation.*``  → HubSpot Conversations handler (legacy)
 
     Args:
         event_id: Primary key of the WebhookEvent to process.
@@ -56,10 +56,21 @@ def process_webhook_event(event_id) -> bool:
     try:
         et = (event.event_type or "").lower()
 
-        if et.startswith("ticket.") or et.startswith("contact."):
+        # HubSpot CRM + Conversations events
+        if et.startswith(("ticket.", "contact.", "deal.", "company.", "conversation.")):
             from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
             handle_hubspot_event(event)
+
+        # Unknown event type - mark as processed but log for visibility
+        elif et == "unknown":
+            logger.warning(
+                "webhook_event_unknown_type",
+                event_id=event.pk,
+                payload_keys=list(event.payload.keys()) if event.payload else [],
+            )
+
+        # Fallback: try Jira handler for other event types
         else:
             try:
                 from apps.webhooks.handlers.jira_handler import handle_jira_event

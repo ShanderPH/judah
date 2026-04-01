@@ -191,7 +191,7 @@ class NewConversation(models.Model):
         ordering = ["entered_queue_at"]  # noqa: RUF012
 
     def __str__(self) -> str:
-        return f"NewConversation {self.hubspot_ticket_id} [pending={self.is_pending}]"
+        return f"NewConversation {self.hubspot_ticket_id}"
 
 
 class AssignedConversation(models.Model):

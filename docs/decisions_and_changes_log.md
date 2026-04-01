@@ -1,5 +1,43 @@
 # Decisions & Changes Log
 
+## 2026-04-01 — HubSpot Webhook Event Type Constraint Fix
+
+### Issue
+All HubSpot webhook calls were returning HTTP 500 errors due to a database constraint violation:
+```
+IntegrityError: new row for relation "webhook_events" violates check constraint "webhook_events_event_type_check"
+```
+
+### Root Cause
+The `webhook_events` table had a check constraint that only allowed `conversation.*` event types:
+- `conversation.creation`
+- `conversation.deletion`
+- `conversation.privacyDeletion`
+- `conversation.propertyChange`
+- `conversation.newMessage`
+
+However, HubSpot was sending `ticket.propertyChange`, `contact.propertyChange`, and other CRM event types that were not in the allowed list.
+
+### Fix Applied
+1. **Database constraint updated** via Supabase migration to include all HubSpot event types:
+   - `ticket.*` events (creation, deletion, propertyChange, associationChange, etc.)
+   - `contact.*` events
+   - `deal.*` events
+   - `company.*` events
+   - `unknown` fallback
+
+2. **Code improvements**:
+   - Updated `apps/webhooks/services.py` to properly route all HubSpot event types
+   - Updated `apps/webhooks/handlers/hubspot_handler.py` to handle `conversation.*` events
+   - Added Django migration `0003_update_event_type_check_constraint.py` to document the change
+
+### Files Changed
+- `apps/webhooks/services.py` — Improved event routing logic
+- `apps/webhooks/handlers/hubspot_handler.py` — Added `_handle_conversation_event` function
+- `apps/webhooks/migrations/0003_update_event_type_check_constraint.py` — New migration
+
+---
+
 ## 2026-03-31 — Initial Foundation (feature/judah-foundation)
 
 ### Architecture Decisions
