@@ -175,13 +175,14 @@ def _handle_agent_availability_change(
     email = (payload.get("email") or "").lower().strip()
 
     if not email:
-        # Fall back to fetching from HubSpot via owner/contact lookup
+        # The webhook objectId is a HubSpot contact ID (not owner ID).
+        # Use the Contacts API to resolve the agent's email.
         try:
             from apps.integrations.hubspot.client import get_hubspot_client
 
             client = get_hubspot_client()
-            owner_details = client.get_owner_details(int(hubspot_contact_id))
-            email = (owner_details.get("email") or "").lower().strip()
+            contact_details = client.get_contact_by_id(hubspot_contact_id)
+            email = (contact_details.get("email") or "").lower().strip()
         except Exception as exc:
             logger.warning(
                 "agent_availability_email_lookup_failed",
@@ -199,7 +200,8 @@ def _handle_agent_availability_change(
 
     try:
         agent = Agent.objects.get(agent_email__iexact=email, is_active=True)
-        if agent.status_enum != new_status:
+        status_changed = agent.status_enum != new_status
+        if status_changed:
             agent.status_enum = new_status
             agent.save(update_fields=["status_enum"])
             logger.info(
@@ -215,6 +217,26 @@ def _handle_agent_availability_change(
                 agent=agent.name,
                 status=new_status,
             )
+
+        # When an agent just came online, drain any pending tickets from the queue
+        # so they are assigned immediately rather than waiting for the next webhook.
+        if status_changed and new_status == "online":
+            try:
+                from apps.support.auto_assign_service import assign_pending_tickets
+
+                assign_result = assign_pending_tickets()
+                logger.info(
+                    "agent_online_pending_assignment_triggered",
+                    agent=agent.name,
+                    **assign_result,
+                )
+            except Exception as assign_exc:
+                logger.warning(
+                    "agent_online_pending_assignment_failed",
+                    agent=agent.name,
+                    error=str(assign_exc),
+                )
+
     except Agent.DoesNotExist:
         logger.debug(
             "agent_not_found_for_availability_change",

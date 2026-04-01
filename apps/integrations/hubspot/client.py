@@ -62,6 +62,37 @@ class HubSpotClient:
             logger.error("hubspot_get_ticket_failed", ticket_id=ticket_id, error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
 
+    def get_contact_by_id(self, contact_id: str) -> dict[str, Any]:
+        """Fetch a HubSpot contact by contact ID to retrieve their email.
+
+        Used when a ``contact.propertyChange`` webhook arrives: the payload
+        ``objectId`` is a contact ID, not an owner ID, so we need the Contacts
+        API to resolve the email before looking up the matching local agent.
+
+        Args:
+            contact_id: The HubSpot contact ID (from webhook ``objectId``).
+
+        Returns:
+            Dict with ``id``, ``email``, ``firstname``, ``lastname`` keys,
+            or an empty dict if the contact is not found.
+        """
+        try:
+            contact = _circuit_breaker.call(
+                self._client.crm.contacts.basic_api.get_by_id,
+                contact_id,
+                properties=["email", "firstname", "lastname"],
+            )
+            props = contact.properties or {}
+            return {
+                "id": contact.id,
+                "email": props.get("email", ""),
+                "firstname": props.get("firstname", ""),
+                "lastname": props.get("lastname", ""),
+            }
+        except Exception as exc:
+            logger.warning("hubspot_get_contact_by_id_failed", contact_id=contact_id, error=str(exc))
+            return {}
+
     def search_contact_by_email(self, email: str) -> dict[str, Any]:
         """Search for a HubSpot contact by email address.
 
@@ -266,6 +297,99 @@ class HubSpotClient:
             return members
         except Exception as exc:
             logger.error("hubspot_get_team_members_failed", team_id=team_id, error=str(exc))
+            raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def search_tickets_in_novo_stage(self) -> list[dict[str, Any]]:
+        """Fetch all tickets in the NOVO stage of the support pipeline.
+
+        Uses the HubSpot Tickets Search API with full pagination to return
+        every ticket in pipeline ``636459134`` / stage ``939275049`` regardless
+        of whether they have an owner.
+
+        Returns:
+            List of ticket dicts with ``id``, ``subject``, ``priority``,
+            ``pipeline``, ``stage``, ``owner_id``, ``contact_name``,
+            ``contact_email``, ``entered_novo_at`` keys.
+
+        Raises:
+            ExternalServiceError: On API failure.
+        """
+        import requests as _requests
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self._access_token}",
+                "Content-Type": "application/json",
+            }
+            url = "https://api.hubapi.com/crm/v3/objects/tickets/search"
+            properties = [
+                "subject",
+                "hs_ticket_priority",
+                "hs_pipeline",
+                "hs_pipeline_stage",
+                "hubspot_owner_id",
+                f"hs_v2_date_entered_{STAGE_NOVO_ID}",
+                "firstname",
+                "email",
+            ]
+            body = {
+                "filterGroups": [
+                    {
+                        "filters": [
+                            {"propertyName": "hs_pipeline", "operator": "EQ", "value": SUPPORT_PIPELINE_ID},
+                            {"propertyName": "hs_pipeline_stage", "operator": "EQ", "value": STAGE_NOVO_ID},
+                        ]
+                    }
+                ],
+                "properties": properties,
+                "sorts": [{"propertyName": "createdate", "direction": "ASCENDING"}],
+                "limit": 100,
+            }
+
+            results: list[dict[str, Any]] = []
+            after: str | None = None
+
+            while True:
+                if after:
+                    body["after"] = after
+
+                response = _circuit_breaker.call(
+                    _requests.post,
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for ticket in data.get("results", []):
+                    props = ticket.get("properties") or {}
+                    results.append(
+                        {
+                            "id": ticket["id"],
+                            "subject": props.get("subject", ""),
+                            "priority": props.get("hs_ticket_priority", ""),
+                            "pipeline": props.get("hs_pipeline", ""),
+                            "stage": props.get("hs_pipeline_stage", ""),
+                            "owner_id": props.get("hubspot_owner_id") or "",
+                            "contact_name": props.get("firstname", ""),
+                            "contact_email": props.get("email", ""),
+                            "entered_novo_at": props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}"),
+                        }
+                    )
+
+                paging = data.get("paging", {})
+                next_page = paging.get("next", {})
+                after = next_page.get("after")
+                if not after:
+                    break
+
+            logger.info("hubspot_novo_tickets_fetched", count=len(results))
+            return results
+
+        except Exception as exc:
+            logger.error("hubspot_search_novo_tickets_failed", error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
 
     def get_all_owners_availability(self) -> list[dict[str, Any]]:

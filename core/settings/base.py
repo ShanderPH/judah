@@ -173,6 +173,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_poll_hubspot_agent_status",
         "schedule": 180,  # seconds
     },
+    # Sync NOVO-stage tickets from HubSpot daily at 08:00 AM (São Paulo)
+    "sync-novo-stage-tickets-daily": {
+        "task": "support.task_sync_novo_stage_tickets",
+        "schedule": crontab(hour=8, minute=0),
+    },
 }
 
 # ---------------------------------------------------------------------------

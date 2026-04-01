@@ -20,12 +20,17 @@ router = Router()
 
 
 def _verify_hubspot_signature(request: HttpRequest, secret: str) -> bool:
-    """Verify the HubSpot webhook HMAC-SHA256 signature."""
-    signature = request.headers.get("X-HubSpot-Signature-v3", "")
+    """Verify the HubSpot webhook signature (v1 format for private apps).
+
+    Private apps use v1: SHA-256(client_secret + request_body).
+    HubSpot sends this value in the ``X-HubSpot-Signature`` header.
+    """
+    signature = request.headers.get("X-HubSpot-Signature", "")
     if not signature:
         return False
     body = request.body.decode("utf-8")
-    expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    source = secret + body
+    expected = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return hmac.compare_digest(signature, expected)
 
 
