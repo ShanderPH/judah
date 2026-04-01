@@ -229,7 +229,7 @@ def task_poll_hubspot_agent_status() -> dict:
             continue
 
         try:
-            agent = Agent.objects.get(agent_email__iexact=email, is_active=True)
+            agent = Agent.objects.filter(agent_email__iexact=email).exclude(is_active=False).get()
         except Agent.DoesNotExist:
             not_found += 1
             continue
@@ -239,12 +239,15 @@ def task_poll_hubspot_agent_status() -> dict:
             continue
 
         if agent.status_enum != new_status:
+            old_status = agent.status_enum
             agent.status_enum = new_status
-            agent.save(update_fields=["status_enum"])
+            agent.updated_at = timezone.now()
+            agent.save(update_fields=["status_enum", "updated_at"])
             logger.info(
                 "agent_status_synced",
                 agent=agent.name,
                 email=email,
+                old_status=old_status,
                 new_status=new_status,
             )
             updated += 1
@@ -260,10 +263,67 @@ def task_poll_hubspot_agent_status() -> dict:
 
     # If any agent just came online, attempt to drain the pending queue so
     # tickets that arrived while no agent was available are assigned promptly.
-    if updated > 0 and Agent.objects.filter(status_enum="online", is_active=True).exists():
+    if updated > 0 and Agent.objects.filter(status_enum="online").exclude(is_active=False).exists():
         from apps.support.auto_assign_service import assign_pending_tickets
 
         assign_result = assign_pending_tickets()
         logger.info("task_poll_pending_assignment_triggered", **assign_result)
 
     return {"updated": updated, "skipped": skipped, "not_found": not_found}
+
+
+@shared_task(name="support.task_aggregate_agent_metrics")
+def task_aggregate_agent_metrics() -> dict:
+    """Celery task: compute and persist per-agent metrics from closed conversations.
+
+    Aggregates data from ``closed_conversations`` and ``assignment_logs`` for
+    each active agent and upserts a row in ``agent_metrics``.
+
+    Should run daily (e.g., at 00:10 AM) after ``task_aggregate_queue_metrics``.
+
+    Returns:
+        Dict with ``updated`` and ``skipped`` counts.
+    """
+    from apps.support.models import Agent, AgentMetrics, AssignmentLog, ClosedConversation
+
+    agents = list(Agent.objects.exclude(is_active=False))
+    now = timezone.now()
+    updated = 0
+    skipped = 0
+
+    for agent in agents:
+        closed_qs = ClosedConversation.objects.filter(agent=agent)
+        total_chats = closed_qs.count()
+
+        handle_agg = closed_qs.filter(total_handle_time_minutes__isnull=False).aggregate(
+            avg=Avg("total_handle_time_minutes"),
+        )
+        avg_handle = float(handle_agg.get("avg") or 0.0)
+
+        wait_agg = closed_qs.filter(queue_wait_seconds__isnull=False).aggregate(
+            avg=Avg("queue_wait_seconds"),
+        )
+        avg_wait_min = float(wait_agg.get("avg") or 0.0) / 60.0
+
+        total_auto = AssignmentLog.objects.filter(
+            agent=agent,
+            assignment_type="automatic",
+        ).count()
+
+        _, upserted = AgentMetrics.objects.update_or_create(
+            agent_id=agent.hubspot_owner_id,
+            defaults={
+                "total_chats": total_chats + total_auto,
+                "chats_closed": total_chats,
+                "average_ticket_time_min": avg_handle,
+                "average_response_time_min": avg_wait_min,
+                "last_time_updated": now,
+            },
+        )
+        if upserted:
+            updated += 1
+        else:
+            skipped += 1
+
+    logger.info("task_aggregate_agent_metrics_done", updated=updated, skipped=skipped)
+    return {"updated": updated, "skipped": skipped}

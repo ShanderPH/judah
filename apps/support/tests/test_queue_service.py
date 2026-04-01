@@ -164,14 +164,14 @@ class TestGetLastAssignedOwnerId:
             ticket_id="T001",
             agent_name="Agent A",
             hubspot_owner_id=111,
-            assignment_type="auto",
+            assignment_type="automatic",
             assigned_at=datetime(2026, 3, 1, 10, 0, tzinfo=UTC),
         )
         AssignmentLog.objects.create(
             ticket_id="T002",
             agent_name="Agent B",
             hubspot_owner_id=222,
-            assignment_type="auto",
+            assignment_type="automatic",
             assigned_at=datetime(2026, 3, 1, 11, 0, tzinfo=UTC),
         )
 

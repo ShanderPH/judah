@@ -210,54 +210,54 @@ def _handle_agent_availability_change(
         )
         return
 
-    try:
-        agent = Agent.objects.get(agent_email__iexact=email, is_active=True)
-        status_changed = agent.status_enum != new_status
-        if status_changed:
-            agent.status_enum = new_status
-            agent.save(update_fields=["status_enum"])
-            logger.info(
-                "agent_status_updated_via_webhook",
-                agent=agent.name,
-                email=email,
-                new_status=new_status,
-                availability=availability_value,
-            )
-        else:
-            logger.debug(
-                "agent_status_unchanged_via_webhook",
-                agent=agent.name,
-                status=new_status,
-            )
+    from django.utils import timezone
 
-        # When an agent just came online, drain any pending tickets from the queue
-        # so they are assigned immediately rather than waiting for the next webhook.
-        if status_changed and new_status == "online":
-            try:
-                from apps.support.auto_assign_service import assign_pending_tickets
-
-                assign_result = assign_pending_tickets()
-                logger.info(
-                    "agent_online_pending_assignment_triggered",
-                    agent=agent.name,
-                    **assign_result,
-                )
-            except Exception as assign_exc:
-                logger.warning(
-                    "agent_online_pending_assignment_failed",
-                    agent=agent.name,
-                    error=str(assign_exc),
-                )
-
-    except Agent.DoesNotExist:
+    agent = Agent.objects.filter(agent_email__iexact=email).exclude(is_active=False).first()
+    if agent is None:
         logger.debug(
             "agent_not_found_for_availability_change",
             email=email,
             contact_id=hubspot_contact_id,
         )
-    except Exception as exc:
-        logger.error(
-            "agent_availability_update_failed",
+        return
+
+    old_status = agent.status_enum
+    status_changed = old_status != new_status
+    if status_changed:
+        agent.status_enum = new_status
+        agent.updated_at = timezone.now()
+        agent.save(update_fields=["status_enum", "updated_at"])
+
+        logger.info(
+            "agent_status_updated_via_webhook",
+            agent=agent.name,
             email=email,
-            error=str(exc),
+            old_status=old_status,
+            new_status=new_status,
+            availability=availability_value,
         )
+    else:
+        logger.debug(
+            "agent_status_unchanged_via_webhook",
+            agent=agent.name,
+            status=new_status,
+        )
+
+    # When an agent just came online, drain any pending tickets from the queue
+    # so they are assigned immediately rather than waiting for the next webhook.
+    if status_changed and new_status == "online":
+        try:
+            from apps.support.auto_assign_service import assign_pending_tickets
+
+            assign_result = assign_pending_tickets()
+            logger.info(
+                "agent_online_pending_assignment_triggered",
+                agent=agent.name,
+                **assign_result,
+            )
+        except Exception as assign_exc:
+            logger.warning(
+                "agent_online_pending_assignment_failed",
+                agent=agent.name,
+                error=str(assign_exc),
+            )

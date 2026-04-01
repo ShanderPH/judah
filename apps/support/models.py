@@ -335,7 +335,7 @@ class AssignmentLog(models.Model):
     )
     agent_name = models.TextField()
     hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
-    assignment_type = models.TextField(default="auto")
+    assignment_type = models.TextField(default="automatic")
     assigned_by = models.TextField(null=True, blank=True)
     pipeline_id = models.TextField(null=True, blank=True)
     entered_queue_at = models.DateTimeField(null=True, blank=True)
