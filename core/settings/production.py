@@ -46,14 +46,17 @@ CSRF_COOKIE_SECURE = True
 X_FRAME_OPTIONS = "DENY"
 
 # --- Database ---
-# Increase connection reuse for production traffic.
-# Supabase direct (port 5432) supports persistent connections.
-# If using PgBouncer (port 6543) set this to 0.
+# Supabase Supavisor transaction-mode pooler (port 6543) does not support
+# persistent connections — CONN_MAX_AGE must be 0.
+# Direct connection or session-mode pooler (port 5432) can safely reuse
+# connections; we default to 60 s there.
 
 if "default" in DATABASES:
-    DATABASES["default"].setdefault("CONN_MAX_AGE", 60)
+    _db_port = str(DATABASES["default"].get("PORT") or "5432")
+    DATABASES["default"]["CONN_MAX_AGE"] = 0 if _db_port == "6543" else 60
     DATABASES["default"].setdefault("OPTIONS", {})
     DATABASES["default"]["OPTIONS"].setdefault("connect_timeout", 10)
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 # --- Logging ---
 # JSON format is already selected in base.py when DJANGO_ENV=production.
