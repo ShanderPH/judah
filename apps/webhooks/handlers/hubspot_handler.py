@@ -60,66 +60,40 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
         logger.debug("hubspot_ticket_event_unhandled", event_type=event_type, ticket_id=object_id)
 
 
-def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str) -> None:
+def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | None) -> None:
     """Trigger the auto-assignment flow when a ticket enters the NOVO stage.
 
-    Runs synchronously here but delegates heavy work to the auto_assign_service.
-    In production this should be dispatched to a Celery task for resilience.
+    Executes synchronously within the webhook request to guarantee processing
+    regardless of Celery worker availability.
     """
     logger.info("hubspot_ticket_entered_novo", ticket_id=hubspot_ticket_id, entered_at_ms=entered_at_ms)
 
     try:
-        from apps.support.tasks import task_process_new_ticket_event
+        from apps.support.auto_assign_service import process_new_ticket_event
 
-        task_process_new_ticket_event.delay(hubspot_ticket_id, entered_at_ms)
-        logger.info("auto_assign_task_dispatched", ticket_id=hubspot_ticket_id)
+        process_new_ticket_event(hubspot_ticket_id, entered_at_ms)
     except Exception as exc:
-        # Celery unavailable — fall back to synchronous execution so the
-        # assignment is not silently dropped.
-        logger.warning(
-            "auto_assign_celery_unavailable_fallback",
+        logger.error(
+            "auto_assign_novo_handler_failed",
             ticket_id=hubspot_ticket_id,
             error=str(exc),
         )
-        try:
-            from apps.support.auto_assign_service import process_new_ticket_event
-
-            process_new_ticket_event(hubspot_ticket_id, entered_at_ms)
-        except Exception as inner_exc:
-            logger.error(
-                "auto_assign_fallback_failed",
-                ticket_id=hubspot_ticket_id,
-                error=str(inner_exc),
-            )
 
 
-def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str, payload: dict) -> None:
-    """Track ticket closure for handle-time metering."""
+def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:
+    """Track ticket closure — moves record to closed_conversations."""
     logger.info("hubspot_ticket_entered_closed", ticket_id=hubspot_ticket_id, closed_at_ms=closed_at_ms)
 
-    # The current owner at the time of closure is available in the change source context.
-    # HubSpot doesn't send it directly in propertyChange, so we record what we have
-    # and let the service fetch the owner from HubSpot if needed.
     try:
-        from apps.support.tasks import task_handle_ticket_closed
+        from apps.support.auto_assign_service import handle_ticket_closed
 
-        task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms)
+        handle_ticket_closed(hubspot_ticket_id, closed_at_ms)
     except Exception as exc:
-        logger.warning(
-            "auto_assign_close_celery_unavailable_fallback",
+        logger.error(
+            "auto_assign_close_handler_failed",
             ticket_id=hubspot_ticket_id,
             error=str(exc),
         )
-        try:
-            from apps.support.auto_assign_service import handle_ticket_closed
-
-            handle_ticket_closed(hubspot_ticket_id, closed_at_ms)
-        except Exception as inner_exc:
-            logger.error(
-                "auto_assign_close_fallback_failed",
-                ticket_id=hubspot_ticket_id,
-                error=str(inner_exc),
-            )
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
