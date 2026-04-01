@@ -60,6 +60,7 @@ class TestWebhookHandlerStatusHistory:
         record = history.first()
         assert record.old_status == "away"
         assert record.new_status == "online"
+        assert record.sync_source == "hubspot_webhook"
 
     def test_no_history_when_status_unchanged(self) -> None:
         agent = _make_agent("Ester", "ester@test.com", 11, status="online")
@@ -102,7 +103,7 @@ class TestWebhookHandlerStatusHistory:
 
         agent.refresh_from_db()
         assert agent.status_enum == "online"
-        assert AgentStatusHistory.objects.filter(agent=agent).count() >= 1
+        assert AgentStatusHistory.objects.filter(agent=agent).count() == 1
 
     def test_excludes_agent_with_is_active_false(self) -> None:
         agent = _make_agent("Hugo", "hugo@test.com", 14, status="away", is_active=False)
@@ -130,7 +131,9 @@ class TestWebhookHandlerStatusHistory:
         assert agent.status_enum == "away"
         history = AgentStatusHistory.objects.filter(agent=agent).order_by("-changed_at").first()
         assert history is not None
+        assert history.old_status == "online"
         assert history.new_status == "away"
+        assert history.sync_source == "hubspot_webhook"
 
 
 # ---------------------------------------------------------------------------
@@ -158,10 +161,11 @@ class TestPollTaskStatusHistory:
             task_poll_hubspot_agent_status()
 
         history = AgentStatusHistory.objects.filter(agent=agent)
-        assert history.count() >= 1
-        record = history.order_by("-changed_at").first()
+        assert history.count() == 1
+        record = history.first()
         assert record.old_status == "away"
         assert record.new_status == "online"
+        assert record.sync_source == "hubspot_poll"
 
     def test_no_history_when_poll_status_unchanged(self) -> None:
         agent = _make_agent("Karl", "karl@test.com", 21, status="online")
@@ -182,7 +186,7 @@ class TestPollTaskStatusHistory:
         agent.refresh_from_db()
         assert agent.status_enum == "online"
         assert result["updated"] == 1
-        assert AgentStatusHistory.objects.filter(agent=agent).count() >= 1
+        assert AgentStatusHistory.objects.filter(agent=agent).count() == 1
 
     def test_poll_excludes_agent_with_is_active_false(self) -> None:
         agent = _make_agent("Mario", "mario@test.com", 23, status="away", is_active=False)

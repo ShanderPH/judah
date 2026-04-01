@@ -221,12 +221,21 @@ def _handle_agent_availability_change(
         )
         return
 
+    from apps.support.models import AgentStatusHistory
+
     old_status = agent.status_enum
     status_changed = old_status != new_status
     if status_changed:
         agent.status_enum = new_status
         agent.updated_at = timezone.now()
         agent.save(update_fields=["status_enum", "updated_at"])
+
+        AgentStatusHistory.objects.create(
+            agent=agent,
+            old_status=old_status,
+            new_status=new_status,
+            sync_source="hubspot_webhook",
+        )
 
         logger.info(
             "agent_status_updated_via_webhook",

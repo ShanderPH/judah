@@ -239,10 +239,20 @@ def task_poll_hubspot_agent_status() -> dict:
             continue
 
         if agent.status_enum != new_status:
+            from apps.support.models import AgentStatusHistory
+
             old_status = agent.status_enum
             agent.status_enum = new_status
             agent.updated_at = timezone.now()
             agent.save(update_fields=["status_enum", "updated_at"])
+
+            AgentStatusHistory.objects.create(
+                agent=agent,
+                old_status=old_status,
+                new_status=new_status,
+                sync_source="hubspot_poll",
+            )
+
             logger.info(
                 "agent_status_synced",
                 agent=agent.name,
