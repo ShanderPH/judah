@@ -30,7 +30,12 @@ DEBUG = False
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
 
-SECURE_SSL_REDIRECT = True
+# Railway enforces HTTPS at its edge; the container only receives plain HTTP
+# internally. Setting SECURE_SSL_REDIRECT=True here causes Django to return
+# 301 on every request (including the health-check probe from 100.64.x.x),
+# because Railway's internal health checker sends no X-Forwarded-Proto header.
+# SSL redirect is NOT needed — Railway already handles it at the proxy layer.
+SECURE_SSL_REDIRECT = False
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_HSTS_SECONDS = 31_536_000  # 1 year

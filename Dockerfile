@@ -33,7 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /install /usr/local
 
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+# --home /app keeps HOME=/app so gunicorn can write worker heartbeat files.
+# The default --system home (/nonexistent) causes "Permission denied" errors
+# in the gunicorn control server and can cause workers to appear hung.
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup --home /app appuser
 
 COPY . .
 
