@@ -183,16 +183,12 @@ class NewConversation(models.Model):
     priority = models.TextField(blank=True, null=True)
     subject = models.TextField(blank=True, null=True)
     entered_queue_at = models.DateTimeField(db_index=True)
-    is_pending = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "new_conversations"
         ordering = ["entered_queue_at"]  # noqa: RUF012
-        indexes = [  # noqa: RUF012
-            models.Index(fields=["is_pending", "entered_queue_at"]),
-        ]
 
     def __str__(self) -> str:
         return f"NewConversation {self.hubspot_ticket_id} [pending={self.is_pending}]"
@@ -241,6 +237,54 @@ class AssignedConversation(models.Model):
 
     def __str__(self) -> str:
         return f"AssignedConversation {self.hubspot_ticket_id} → {self.agent_name}"
+
+
+class ClosedConversation(models.Model):
+    """Ticket that was closed after being handled by an agent.
+
+    Records are moved here from ``assigned_conversations`` (or directly from
+    ``new_conversations`` if the ticket was closed before assignment) when a
+    closure event arrives from HubSpot.
+
+    Maps to the ``closed_conversations`` table in Supabase.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="closed_conversations",
+        db_column="agent_id",
+    )
+    hubspot_owner_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    agent_name = models.TextField(null=True, blank=True)
+    pipeline_id = models.TextField(default="636459134")
+    entered_queue_at = models.DateTimeField(null=True, blank=True)
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(db_index=True)
+    closed_by_owner_id = models.BigIntegerField(null=True, blank=True)
+    closed_by_agent_name = models.TextField(null=True, blank=True)
+    queue_wait_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    total_handle_time_minutes = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    contact_name = models.TextField(null=True, blank=True)
+    contact_email = models.TextField(null=True, blank=True)
+    priority = models.TextField(null=True, blank=True)
+    subject = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "closed_conversations"
+        ordering = ["-closed_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["closed_at"]),
+            models.Index(fields=["hubspot_owner_id", "closed_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ClosedConversation {self.hubspot_ticket_id} closed_at={self.closed_at}"
 
 
 class QueuePerformanceMetrics(models.Model):

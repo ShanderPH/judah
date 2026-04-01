@@ -28,6 +28,7 @@ from apps.support.models import (
     Agent,
     AssignedConversation,
     AssignmentLog,
+    ClosedConversation,
     NewConversation,
 )
 from apps.support.queue_service import (
@@ -93,13 +94,10 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
             "priority": ticket_data.get("priority") or "",
             "subject": ticket_data.get("subject") or "",
             "entered_queue_at": entered_queue_at,
-            "is_pending": True,
         },
     )
     if not created:
         logger.info("auto_assign_ticket_already_queued", ticket_id=hubspot_ticket_id)
-        if not new_conv.is_pending:
-            return False
 
     return attempt_auto_assign(new_conv, ticket_data)
 
@@ -153,9 +151,6 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
-    if not new_conv.is_pending:
-        return False
-
     # Select next agent (Rule 1-4)
     last_owner_id = get_last_assigned_owner_id()
     agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
@@ -184,9 +179,8 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
         wait_seconds = Decimal(str(round(delta.total_seconds(), 2)))
 
     with transaction.atomic():
-        # Mark new_conversation as assigned
-        new_conv.is_pending = False
-        new_conv.save(update_fields=["is_pending", "updated_at"])
+        # Remove from pending queue — the record moves to assigned_conversations
+        new_conv.delete()
 
         # Create or update assigned_conversation record
         AssignedConversation.objects.update_or_create(
@@ -251,20 +245,34 @@ def handle_ticket_closed(
 
     # If the ticket is still pending (never assigned), remove it from the queue
     # so it is not assigned after closure.
-    pending_conv = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id, is_pending=True).first()
+    pending_conv = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if pending_conv:
-        pending_conv.is_pending = False
-        pending_conv.save(update_fields=["is_pending", "updated_at"])
-        logger.info("auto_assign_pending_removed_on_close", ticket_id=hubspot_ticket_id)
+        pending_conv.delete()
+        logger.info("auto_assign_pending_deleted_on_close", ticket_id=hubspot_ticket_id)
+
+    # Resolve closing agent info
+    closing_owner = int(owner_id) if owner_id and str(owner_id).strip() else None
+    closing_agent_name: str | None = None
+    closing_agent_obj: Agent | None = None
+
+    if closing_owner:
+        closing_agent_obj = Agent.objects.filter(hubspot_owner_id=closing_owner).first()
+        if closing_agent_obj:
+            closing_agent_name = closing_agent_obj.name
 
     try:
         assigned = AssignedConversation.objects.get(hubspot_ticket_id=hubspot_ticket_id)
     except AssignedConversation.DoesNotExist:
-        logger.info("auto_assign_close_no_record", ticket_id=hubspot_ticket_id)
-        return
-
-    if assigned.closed_at:
-        # Already processed
+        # Ticket was closed without ever being assigned — create a minimal closed record
+        logger.info("auto_assign_close_no_assigned_record", ticket_id=hubspot_ticket_id)
+        ClosedConversation.objects.get_or_create(
+            hubspot_ticket_id=hubspot_ticket_id,
+            defaults={
+                "closed_at": closed_at,
+                "closed_by_owner_id": closing_owner,
+                "closed_by_agent_name": closing_agent_name,
+            },
+        )
         return
 
     handle_time: Decimal | None = None
@@ -272,34 +280,36 @@ def handle_ticket_closed(
         delta = closed_at - assigned.assigned_at
         handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
 
-    closing_owner = int(owner_id) if owner_id and str(owner_id).strip() else None
-    closing_agent_name: str | None = None
-
-    # Try to resolve closing agent name from local DB
-    if closing_owner:
-        agent_qs = Agent.objects.filter(hubspot_owner_id=closing_owner).first()
-        if agent_qs:
-            closing_agent_name = agent_qs.name
-            # Decrement their chat count
-            decrement_agent_chat_count(agent_qs)
-    elif assigned.agent:
-        # Fallback: use the originally assigned agent
-        decrement_agent_chat_count(assigned.agent)
+    # Decrement the assigned agent's chat count
+    decrement_target = closing_agent_obj or assigned.agent
+    if decrement_target:
+        decrement_agent_chat_count(decrement_target)
+    if not closing_agent_name and assigned.agent:
+        closing_agent_name = assigned.agent.name
 
     with transaction.atomic():
-        assigned.closed_at = closed_at
-        assigned.closed_by_owner_id = closing_owner
-        assigned.closed_by_agent_name = closing_agent_name
-        assigned.total_handle_time_minutes = handle_time
-        assigned.save(
-            update_fields=[
-                "closed_at",
-                "closed_by_owner_id",
-                "closed_by_agent_name",
-                "total_handle_time_minutes",
-                "updated_at",
-            ]
+        # Move from assigned_conversations → closed_conversations
+        ClosedConversation.objects.get_or_create(
+            hubspot_ticket_id=hubspot_ticket_id,
+            defaults={
+                "agent": assigned.agent,
+                "hubspot_owner_id": assigned.hubspot_owner_id,
+                "agent_name": assigned.agent_name,
+                "pipeline_id": assigned.pipeline_id,
+                "entered_queue_at": assigned.entered_queue_at,
+                "assigned_at": assigned.assigned_at,
+                "closed_at": closed_at,
+                "closed_by_owner_id": closing_owner,
+                "closed_by_agent_name": closing_agent_name,
+                "queue_wait_seconds": assigned.queue_wait_seconds,
+                "total_handle_time_minutes": handle_time,
+                "contact_name": assigned.contact_name,
+                "contact_email": assigned.contact_email,
+                "priority": assigned.priority,
+                "subject": assigned.subject,
+            },
         )
+        assigned.delete()
 
     logger.info(
         "auto_assign_ticket_closed",
@@ -324,7 +334,7 @@ def assign_pending_tickets() -> dict:
     """
     from apps.support.queue_service import get_eligible_agents
 
-    pending = list(NewConversation.objects.filter(is_pending=True).order_by("entered_queue_at"))
+    pending = list(NewConversation.objects.all().order_by("entered_queue_at"))
     total = len(pending)
 
     if not total:

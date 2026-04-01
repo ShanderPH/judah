@@ -1,7 +1,5 @@
 """Business logic for webhook processing."""
 
-from datetime import UTC
-
 import structlog
 
 from apps.webhooks.models import DeadLetterQueue, WebhookEvent
@@ -15,7 +13,7 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
     """Persist an incoming webhook event.
 
     Args:
-        source: The originating system (hubspot, jira, etc.).
+        source: The originating system (hubspot, jira, etc.) — used for routing.
         event_type: Specific event type identifier.
         payload: The raw webhook payload.
 
@@ -23,16 +21,23 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
         The created WebhookEvent instance.
     """
     event = WebhookEvent.objects.create(
-        source=source,
         event_type=event_type,
+        event_id=str(payload.get("eventId", "") or ""),
+        object_id=str(payload.get("objectId", "") or payload.get("object_id", "") or ""),
+        property_name=payload.get("propertyName") or payload.get("property_name"),
+        property_value=payload.get("propertyValue") or payload.get("property_value"),
         payload=payload,
     )
     logger.info("webhook_event_recorded", event_id=event.pk, source=source, event_type=event_type)
     return event
 
 
-def process_webhook_event(event_id: int) -> bool:
+def process_webhook_event(event_id) -> bool:
     """Dispatch a recorded webhook event to the appropriate handler.
+
+    Routes by event_type prefix:
+      - ``ticket.*`` / ``contact.*``  → HubSpot handler
+      - ``conversation.*``            → legacy Jira handler (if present)
 
     Args:
         event_id: Primary key of the WebhookEvent to process.
@@ -40,7 +45,7 @@ def process_webhook_event(event_id: int) -> bool:
     Returns:
         True if processing succeeded, False otherwise.
     """
-    from datetime import datetime
+    from django.utils import timezone
 
     try:
         event = WebhookEvent.objects.get(pk=event_id)
@@ -49,18 +54,23 @@ def process_webhook_event(event_id: int) -> bool:
         return False
 
     try:
-        if event.source == WebhookEvent.Source.HUBSPOT:
+        et = (event.event_type or "").lower()
+
+        if et.startswith("ticket.") or et.startswith("contact."):
             from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
             handle_hubspot_event(event)
-        elif event.source == WebhookEvent.Source.JIRA:
-            from apps.webhooks.handlers.jira_handler import handle_jira_event
+        else:
+            try:
+                from apps.webhooks.handlers.jira_handler import handle_jira_event
 
-            handle_jira_event(event)
+                handle_jira_event(event)
+            except ImportError:
+                logger.debug("webhook_event_no_handler", event_type=event.event_type)
 
-        event.status = WebhookEvent.Status.PROCESSED
-        event.processed_at = datetime.now(tz=UTC)
-        event.save(update_fields=["status", "processed_at"])
+        event.processed = True
+        event.processed_at = timezone.now()
+        event.save(update_fields=["processed", "processed_at"])
         logger.info("webhook_event_processed", event_id=event.pk)
         return True
 
@@ -69,15 +79,13 @@ def process_webhook_event(event_id: int) -> bool:
         event.error_message = str(exc)
 
         if event.retry_count >= MAX_RETRIES:
-            event.status = WebhookEvent.Status.DEAD_LETTER
             DeadLetterQueue.objects.get_or_create(
                 event=event,
                 defaults={"failure_reason": str(exc)},
             )
             logger.error("webhook_event_dead_letter", event_id=event.pk, error=str(exc))
         else:
-            event.status = WebhookEvent.Status.FAILED
             logger.warning("webhook_event_failed", event_id=event.pk, retry=event.retry_count, error=str(exc))
 
-        event.save(update_fields=["status", "retry_count", "error_message"])
+        event.save(update_fields=["retry_count", "error_message"])
         return False
