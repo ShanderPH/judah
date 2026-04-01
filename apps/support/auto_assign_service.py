@@ -388,9 +388,9 @@ def sync_novo_stage_tickets() -> dict:
     try:
         client = get_hubspot_client()
         tickets = client.search_tickets_in_novo_stage()
-    except ExternalServiceError:
-        logger.error("sync_novo_stage_tickets_hubspot_fetch_failed")
-        return {"created": 0, "skipped": 0, "total_from_hubspot": 0}
+    except ExternalServiceError as exc:
+        logger.error("sync_novo_stage_tickets_hubspot_fetch_failed", error=str(exc))
+        return {"created": 0, "skipped": 0, "total_from_hubspot": 0, "error": str(exc)}
 
     created = 0
     skipped = 0

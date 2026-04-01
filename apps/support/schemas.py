@@ -245,3 +245,4 @@ class SyncNovoResponse(Schema):
     skipped: int
     total_from_hubspot: int
     queued_for_assignment: bool
+    error: str | None = None
