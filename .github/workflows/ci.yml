@@ -181,5 +181,8 @@ jobs:
       - name: Django system check
         run: python manage.py check --fail-level WARNING
 
+      - name: Apply migrations
+        run: python manage.py migrate --run-syncdb
+
       - name: Check for missing migrations
-        run: python manage.py migrate --run-syncdb --check
+        run: python manage.py makemigrations --check --dry-run
