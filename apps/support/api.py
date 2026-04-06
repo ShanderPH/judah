@@ -167,8 +167,11 @@ def get_queue_health(request) -> dict:
             "contact_name": c.contact_name,
             "entered_queue_at": c.entered_queue_at,
             "wait_seconds": round((now - c.entered_queue_at).total_seconds(), 1),
+            "queue_position": idx + 1,
+            "queue_status": c.queue_status,
+            "assignment_attempts": c.assignment_attempts,
         }
-        for c in pending_qs
+        for idx, c in enumerate(pending_qs)
     ]
 
     logs_qs = AssignmentLog.objects.order_by("-assigned_at")[:5]

@@ -173,7 +173,16 @@ class NewConversation(models.Model):
     """Ticket that entered the NOVO stage and is awaiting automatic assignment.
 
     Maps to the ``new_conversations`` table in Supabase.
+
+    Queue position is determined by ``entered_queue_at`` (FIFO order).
+    Tickets that cannot be assigned immediately remain in this table until
+    an agent becomes available, at which point ``assign_pending_tickets()``
+    processes them in order.
     """
+
+    class QueueStatus(models.TextChoices):
+        PENDING = "pending", "Pending Assignment"
+        QUEUED = "queued", "In Queue (No Agent Available)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     hubspot_ticket_id = models.TextField(unique=True, db_index=True)
@@ -183,6 +192,13 @@ class NewConversation(models.Model):
     priority = models.TextField(blank=True, null=True)
     subject = models.TextField(blank=True, null=True)
     entered_queue_at = models.DateTimeField(db_index=True)
+    queue_status = models.CharField(
+        max_length=20,
+        choices=QueueStatus.choices,
+        default=QueueStatus.PENDING,
+    )
+    assignment_attempts = models.IntegerField(default=0)
+    last_assignment_attempt_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -192,6 +208,14 @@ class NewConversation(models.Model):
 
     def __str__(self) -> str:
         return f"NewConversation {self.hubspot_ticket_id}"
+
+    @property
+    def queue_position(self) -> int:
+        """Calculate the current position in the queue (1-indexed).
+
+        Position is based on ``entered_queue_at`` ordering (oldest = position 1).
+        """
+        return NewConversation.objects.filter(entered_queue_at__lt=self.entered_queue_at).count() + 1
 
 
 class AssignedConversation(models.Model):

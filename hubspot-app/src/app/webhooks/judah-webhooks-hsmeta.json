@@ -22,11 +22,6 @@
           "subscriptionType": "ticket.propertyChange",
           "propertyName": "hs_pipeline_stage",
           "active": true
-        },
-        {
-          "subscriptionType": "contact.propertyChange",
-          "propertyName": "hs_availability_status",
-          "active": true
         }
       ]
     }

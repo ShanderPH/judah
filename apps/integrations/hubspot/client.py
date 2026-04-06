@@ -392,6 +392,42 @@ class HubSpotClient:
             logger.error("hubspot_search_novo_tickets_failed", error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
 
+    def get_user_by_id(self, user_id: str) -> dict[str, Any]:
+        """Fetch a HubSpot User by their User ID (hs_object_id).
+
+        Uses the CRM Users API (``GET /crm/v3/objects/users/{userId}``) to
+        retrieve user details including email and availability status.
+
+        Args:
+            user_id: The HubSpot User ID (hs_object_id from webhook payload).
+
+        Returns:
+            Dict with ``id``, ``email``, ``hs_availability_status`` keys,
+            or an empty dict if the user is not found.
+        """
+        import requests
+
+        try:
+            headers = {"Authorization": f"Bearer {self._access_token}"}
+            response = _circuit_breaker.call(
+                requests.get,
+                f"https://api.hubapi.com/crm/v3/objects/users/{user_id}",
+                headers=headers,
+                params={"properties": "hs_email,hs_availability_status"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            props = data.get("properties") or {}
+            return {
+                "id": data.get("id"),
+                "email": props.get("hs_email", ""),
+                "hs_availability_status": props.get("hs_availability_status", ""),
+            }
+        except Exception as exc:
+            logger.warning("hubspot_get_user_by_id_failed", user_id=user_id, error=str(exc))
+            return {}
+
     def get_all_owners_availability(self) -> list[dict[str, Any]]:
         """Fetch all HubSpot users with their current availability status.
 
