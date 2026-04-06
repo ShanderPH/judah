@@ -124,8 +124,12 @@ NINJA_JWT = {
 
 # --- Cache (Redis) ---
 # Uses Django's built-in redis backend (no django-redis dependency needed).
+# Railway may provide REDIS_PRIVATE_URL or REDIS_URL depending on configuration.
 
-REDIS_URL = config("REDIS_URL", default="redis://localhost:6379/0")
+REDIS_URL = config(
+    "REDIS_URL",
+    default=config("REDIS_PRIVATE_URL", default="redis://localhost:6379/0"),
+)
 
 CACHES = {
     "default": {
