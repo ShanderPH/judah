@@ -148,10 +148,12 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
 def _handle_contact_event(event_type: str, payload: dict) -> None:
     """Process contact-related HubSpot events.
 
-    Handles ``hs_availability_status`` property changes so that agent status
-    in the local DB is updated instantly when an agent changes availability
-    in HubSpot (requires the private app webhook to subscribe to
-    ``contact.propertyChange`` → ``hs_availability_status``).
+    Handles ``hs_availability_status`` property changes as a fallback mechanism.
+    The primary agent availability sync is handled by the polling task
+    ``task_poll_hubspot_agent_status`` which uses the HubSpot Users API.
+
+    Note: HubSpot does not support ``user.propertyChange`` webhook subscriptions,
+    so we rely on ``contact.propertyChange`` as a secondary sync mechanism.
     """
     object_id = str(payload.get("objectId", ""))
     property_name = payload.get("propertyName", "")
@@ -170,16 +172,13 @@ def _handle_agent_availability_change(
 ) -> None:
     """Update agent status_enum when HubSpot availability changes via webhook.
 
-    Called when a ``contact.propertyChange`` event arrives for
-    ``hs_availability_status``. Resolves the agent by matching the contact
-    email from the payload (or by fetching from HubSpot if not present).
+    Fallback handler for ``contact.propertyChange`` events. The primary sync
+    mechanism is the polling task ``task_poll_hubspot_agent_status``.
 
     Mapping:
       ``"available"``  →  ``status_enum = "online"``
       ``"away"`` / other  →  ``status_enum = "away"``
     """
-    from apps.support.models import Agent
-
     new_status = "online" if availability_value == "available" else "away"
 
     # The payload may carry the email directly in changeSource context or
@@ -210,18 +209,36 @@ def _handle_agent_availability_change(
         )
         return
 
+    _update_agent_status_and_assign(email, new_status, availability_value, "hubspot_webhook")
+
+
+def _update_agent_status_and_assign(
+    email: str,
+    new_status: str,
+    availability_value: str,
+    sync_source: str,
+) -> None:
+    """Update agent status and trigger pending ticket assignment if agent came online.
+
+    Shared logic for both user.propertyChange and contact.propertyChange handlers.
+
+    Args:
+        email: Agent's email address.
+        new_status: New status_enum value ("online" or "away").
+        availability_value: Original HubSpot availability value for logging.
+        sync_source: Source identifier for AgentStatusHistory.
+    """
     from django.utils import timezone
+
+    from apps.support.models import Agent, AgentStatusHistory
 
     agent = Agent.objects.filter(agent_email__iexact=email).exclude(is_active=False).first()
     if agent is None:
         logger.debug(
             "agent_not_found_for_availability_change",
             email=email,
-            contact_id=hubspot_contact_id,
         )
         return
-
-    from apps.support.models import AgentStatusHistory
 
     old_status = agent.status_enum
     status_changed = old_status != new_status
@@ -234,7 +251,7 @@ def _handle_agent_availability_change(
             agent=agent,
             old_status=old_status,
             new_status=new_status,
-            sync_source="hubspot_webhook",
+            sync_source=sync_source,
         )
 
         logger.info(
