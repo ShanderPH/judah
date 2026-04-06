@@ -215,9 +215,7 @@ class NewConversation(models.Model):
 
         Position is based on ``entered_queue_at`` ordering (oldest = position 1).
         """
-        return (
-            NewConversation.objects.filter(entered_queue_at__lt=self.entered_queue_at).count() + 1
-        )
+        return NewConversation.objects.filter(entered_queue_at__lt=self.entered_queue_at).count() + 1
 
 
 class AssignedConversation(models.Model):
