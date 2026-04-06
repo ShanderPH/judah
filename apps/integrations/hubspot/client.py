@@ -431,7 +431,7 @@ class HubSpotClient:
     def get_all_owners_availability(self) -> list[dict[str, Any]]:
         """Fetch all HubSpot users with their current availability status.
 
-        Uses the HubSpot Settings Users API (``GET /settings/v3/users``) which
+        Uses the HubSpot CRM Users API (``GET /crm/v3/objects/users``) which
         exposes the ``hs_availability_status`` property:
           - ``"available"`` → mapped to ``"online"``
           - ``"away"`` / anything else → mapped to ``"away"``
@@ -443,15 +443,18 @@ class HubSpotClient:
         Raises:
             ExternalServiceError: On API failure.
         """
-        import requests  # local import to avoid cold-start overhead
+        import requests
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
             response = _circuit_breaker.call(
                 requests.get,
-                "https://api.hubapi.com/settings/v3/users",
+                "https://api.hubapi.com/crm/v3/objects/users",
                 headers=headers,
-                params={"limit": 100},
+                params={
+                    "limit": 100,
+                    "properties": "hs_email,hs_availability_status",
+                },
                 timeout=10,
             )
             response.raise_for_status()
@@ -459,11 +462,12 @@ class HubSpotClient:
 
             result = []
             for user in data.get("results", []):
-                availability = user.get("hs_availability_status") or "available"
+                props = user.get("properties") or {}
+                availability = props.get("hs_availability_status") or "available"
                 result.append(
                     {
                         "user_id": user.get("id"),
-                        "email": user.get("email", ""),
+                        "email": props.get("hs_email", ""),
                         "availability_status": availability,
                         "status_enum": "online" if availability == "available" else "away",
                     }
