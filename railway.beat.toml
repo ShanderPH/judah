@@ -1,0 +1,10 @@
+# Railway deployment configuration for Celery Beat
+# https://docs.railway.app/reference/config-as-code
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.beat"
+
+[deploy]
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
