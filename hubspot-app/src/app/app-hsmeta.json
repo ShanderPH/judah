@@ -11,6 +11,7 @@
         "oauth",
         "tickets",
         "crm.objects.contacts.read",
+        "crm.objects.users.read",
         "settings.users.read"
       ]
     },
