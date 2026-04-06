@@ -143,6 +143,10 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
 
     This is idempotent — if the conversation is already assigned it returns False.
 
+    When no agent is available, the conversation's ``queue_status`` is updated
+    to ``"queued"`` so it remains in the queue for assignment when an agent
+    becomes available.
+
     Args:
         new_conv: The NewConversation instance to assign.
         ticket_data: Optional pre-fetched ticket data dict. If None, will be
@@ -156,7 +160,17 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
 
     if agent is None:
-        logger.warning("auto_assign_no_agent_available", ticket_id=new_conv.hubspot_ticket_id)
+        # No agent available — mark as queued for later assignment
+        new_conv.queue_status = NewConversation.QueueStatus.QUEUED
+        new_conv.assignment_attempts += 1
+        new_conv.last_assignment_attempt_at = timezone.now()
+        new_conv.save(update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"])
+        logger.warning(
+            "auto_assign_no_agent_available",
+            ticket_id=new_conv.hubspot_ticket_id,
+            queue_position=new_conv.queue_position,
+            assignment_attempts=new_conv.assignment_attempts,
+        )
         return False
 
     # Assign via HubSpot API
