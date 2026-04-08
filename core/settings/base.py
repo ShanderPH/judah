@@ -217,7 +217,22 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- CORS ---
 
-CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:3000", cast=Csv())
+def _normalize_cors_origins(origins_str: str) -> list[str]:
+    """Ensure all CORS origins have a scheme (https://)."""
+    origins = [o.strip() for o in origins_str.split(",") if o.strip()]
+    normalized = []
+    for origin in origins:
+        if not origin.startswith(("http://", "https://")):
+            origin = f"https://{origin}"
+        normalized.append(origin)
+    return normalized
+
+
+CORS_ALLOWED_ORIGINS = config(
+    "CORS_ALLOWED_ORIGINS",
+    default="http://localhost:3000",
+    cast=_normalize_cors_origins,
+)
 CORS_ALLOW_CREDENTIALS = True
 
 # --- Supabase ---

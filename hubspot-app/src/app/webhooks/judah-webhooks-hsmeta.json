@@ -22,6 +22,11 @@
           "subscriptionType": "ticket.propertyChange",
           "propertyName": "hs_pipeline_stage",
           "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hubspot_owner_id",
+          "active": true
         }
       ]
     }
