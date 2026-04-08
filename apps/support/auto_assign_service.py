@@ -50,7 +50,7 @@ def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     try:
         ms = int(value)
         return datetime.fromtimestamp(ms / 1000, tz=UTC)
-    except ValueError, TypeError, OSError:
+    except (ValueError, TypeError, OSError):
         return None
 
 
@@ -204,7 +204,9 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
             new_conv.queue_status = NewConversation.QueueStatus.QUEUED
             new_conv.assignment_attempts += 1
             new_conv.last_assignment_attempt_at = timezone.now()
-            new_conv.save(update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"])
+            new_conv.save(
+                update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
+            )
             return False
 
     # Assign via HubSpot API
@@ -577,8 +579,7 @@ def sync_all_agents_status_and_counts() -> dict:
     try:
         availability_data = client.get_all_owners_availability()
         availability_map = {
-            item.get("email", "").lower(): item.get("status_enum", "away")
-            for item in availability_data
+            item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
         }
     except Exception as exc:
         logger.warning("sync_all_agents_availability_fetch_failed", error=str(exc))
