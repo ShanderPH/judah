@@ -32,9 +32,11 @@ def isolate_db(db):
         AssignedConversation,
         AssignmentLog,
         ClosedConversation,
+        ConversationReassignment,
         NewConversation,
     )
 
+    ConversationReassignment.objects.all().delete()
     Agent.objects.all().delete()
     AgentMetrics.objects.all().delete()
     AgentStatusHistory.objects.all().delete()

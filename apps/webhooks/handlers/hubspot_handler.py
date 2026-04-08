@@ -10,6 +10,7 @@ logger = structlog.get_logger(__name__)
 _PROP_STAGE_NOVO = "hs_v2_date_entered_939275049"  # Ticket entered NOVO stage
 _PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"  # Ticket entered FECHADO stage
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
+_PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
 _PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
 
 # Stage IDs
@@ -58,6 +59,9 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
 
         elif property_name == _PROP_PIPELINE_STAGE:
             _handle_pipeline_stage_change(object_id, property_value)
+
+        elif property_name == _PROP_OWNER_ID:
+            _handle_ticket_owner_change(object_id, property_value, payload)
 
     elif event_type in ("ticket.creation", "ticket.created"):
         logger.debug("hubspot_ticket_created_event", ticket_id=object_id)
@@ -122,6 +126,146 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
         logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
     except Ticket.DoesNotExist:
         logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
+
+
+def _handle_ticket_owner_change(
+    hubspot_ticket_id: str,
+    new_owner_id: str | None,
+    payload: dict,
+) -> None:
+    """Handle ticket owner (agent) reassignment.
+
+    When a ticket's hubspot_owner_id changes, this indicates a manual reassignment
+    by an agent in HubSpot. We need to:
+    1. Decrement the previous owner's conversation count
+    2. Increment the new owner's conversation count
+    3. Update the AssignedConversation record
+    4. Log the reassignment for metrics
+
+    Args:
+        hubspot_ticket_id: The HubSpot ticket ID.
+        new_owner_id: The new hubspot_owner_id value (may be empty if unassigned).
+        payload: Full webhook payload containing previousValue.
+    """
+    from decimal import Decimal
+
+    from django.db import transaction
+    from django.utils import timezone
+
+    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
+    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
+
+    previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
+    new_owner = new_owner_id.strip() if new_owner_id else ""
+    prev_owner = str(previous_owner_id).strip() if previous_owner_id else ""
+
+    # Skip if no actual change or if this is an initial assignment (no previous owner)
+    if not prev_owner or prev_owner in ("", "None", "null"):
+        logger.debug(
+            "ticket_owner_change_initial_assignment",
+            ticket_id=hubspot_ticket_id,
+            new_owner_id=new_owner,
+        )
+        return
+
+    # Skip if new owner is the same as previous (no actual change)
+    if new_owner == prev_owner:
+        logger.debug(
+            "ticket_owner_change_same_owner",
+            ticket_id=hubspot_ticket_id,
+            owner_id=new_owner,
+        )
+        return
+
+    logger.info(
+        "ticket_owner_change_detected",
+        ticket_id=hubspot_ticket_id,
+        from_owner_id=prev_owner,
+        to_owner_id=new_owner,
+    )
+
+    now = timezone.now()
+
+    # Resolve agents
+    from_agent: Agent | None = None
+    to_agent: Agent | None = None
+
+    try:
+        prev_owner_int = int(prev_owner)
+        from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
+    except ValueError, TypeError:
+        pass
+
+    if new_owner and new_owner not in ("", "None", "null"):
+        try:
+            new_owner_int = int(new_owner)
+            to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first()
+        except ValueError, TypeError:
+            pass
+
+    # Calculate time with previous agent
+    time_with_prev_seconds: Decimal | None = None
+    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
+
+    if assigned_conv and assigned_conv.assigned_at:
+        delta = now - assigned_conv.assigned_at
+        time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
+
+    with transaction.atomic():
+        # 1. Decrement previous owner's chat count
+        if from_agent:
+            decrement_agent_chat_count(from_agent)
+            logger.info(
+                "ticket_reassignment_decremented_from_agent",
+                ticket_id=hubspot_ticket_id,
+                agent=from_agent.name,
+                new_count=from_agent.current_simultaneous_chats,
+            )
+
+        # 2. Increment new owner's chat count (if assigned to someone)
+        if to_agent:
+            increment_agent_chat_count(to_agent)
+            logger.info(
+                "ticket_reassignment_incremented_to_agent",
+                ticket_id=hubspot_ticket_id,
+                agent=to_agent.name,
+                new_count=to_agent.current_simultaneous_chats,
+            )
+
+        # 3. Update AssignedConversation record
+        if assigned_conv:
+            if to_agent:
+                assigned_conv.agent = to_agent
+                assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
+                assigned_conv.agent_name = to_agent.name
+            else:
+                # Ticket was unassigned
+                assigned_conv.agent = None
+                assigned_conv.hubspot_owner_id = int(new_owner) if new_owner else None
+                assigned_conv.agent_name = ""
+            assigned_conv.save(update_fields=["agent", "hubspot_owner_id", "agent_name", "updated_at"])
+
+        # 4. Log the reassignment for metrics
+        ConversationReassignment.objects.create(
+            hubspot_ticket_id=hubspot_ticket_id,
+            from_agent=from_agent,
+            from_hubspot_owner_id=int(prev_owner) if prev_owner else None,
+            from_agent_name=from_agent.name if from_agent else None,
+            to_agent=to_agent,
+            to_hubspot_owner_id=int(new_owner) if new_owner else None,
+            to_agent_name=to_agent.name if to_agent else None,
+            reassigned_at=now,
+            time_with_previous_agent_seconds=time_with_prev_seconds,
+            reassignment_source="hubspot_webhook",
+        )
+
+    logger.info(
+        "ticket_reassignment_processed",
+        ticket_id=hubspot_ticket_id,
+        from_agent=from_agent.name if from_agent else prev_owner,
+        to_agent=to_agent.name if to_agent else new_owner,
+        time_with_prev_seconds=float(time_with_prev_seconds) if time_with_prev_seconds else None,
+    )
 
 
 def _handle_conversation_event(event_type: str, payload: dict) -> None:

@@ -20,6 +20,7 @@ _circuit_breaker = CircuitBreaker(name="hubspot", failure_threshold=5, recovery_
 SUPPORT_PIPELINE_ID = "636459134"
 STAGE_NOVO_ID = "939275049"
 STAGE_CLOSED_ID = "939275052"
+STAGE_FECHADO_ID = STAGE_CLOSED_ID  # Alias for Portuguese naming consistency
 
 # HubSpot team IDs for N1 support
 HUBSPOT_TEAM_N1_ID = "8"  # 8.1 N1 sub-team
@@ -477,6 +478,54 @@ class HubSpotClient:
         except Exception as exc:
             logger.error("hubspot_get_owners_availability_failed", error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+    def count_active_tickets_by_owner(self, owner_id: int) -> int:
+        """Count active (non-closed) tickets assigned to a specific owner.
+
+        Uses the HubSpot Tickets Search API to count tickets in the support
+        pipeline that are assigned to the given owner and are NOT in the
+        FECHADO (closed) stage.
+
+        Args:
+            owner_id: The HubSpot owner ID.
+
+        Returns:
+            Number of active tickets assigned to this owner.
+        """
+        import requests
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self._access_token}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "filterGroups": [
+                    {
+                        "filters": [
+                            {"propertyName": "hs_pipeline", "operator": "EQ", "value": SUPPORT_PIPELINE_ID},
+                            {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": str(owner_id)},
+                            {"propertyName": "hs_pipeline_stage", "operator": "NEQ", "value": STAGE_FECHADO_ID},
+                        ]
+                    }
+                ],
+                "limit": 1,
+            }
+            response = _circuit_breaker.call(
+                requests.post,
+                "https://api.hubapi.com/crm/v3/objects/tickets/search",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            count = data.get("total", 0)
+            logger.debug("hubspot_active_tickets_count", owner_id=owner_id, count=count)
+            return count
+        except Exception as exc:
+            logger.warning("hubspot_count_active_tickets_failed", owner_id=owner_id, error=str(exc))
+            return -1  # Return -1 to indicate error; caller should handle gracefully
 
 
 _hubspot_client: HubSpotClient | None = None

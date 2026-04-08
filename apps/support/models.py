@@ -373,3 +373,54 @@ class AssignmentLog(models.Model):
 
     def __str__(self) -> str:
         return f"AssignmentLog ticket={self.ticket_id} → {self.agent_name}"
+
+
+class ConversationReassignment(models.Model):
+    """Tracks when a ticket is transferred from one agent to another.
+
+    This captures manual reassignments done by agents in HubSpot, enabling:
+    - Accurate conversation count per agent (decrement source, increment target)
+    - Metrics on ticket routing paths
+    - Identification of tickets that required escalation or transfer
+
+    Maps to the ``conversation_reassignments`` table in Supabase.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    from_agent = models.ForeignKey(
+        Agent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reassignments_from",
+        db_column="from_agent_id",
+    )
+    from_hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
+    from_agent_name = models.TextField(null=True, blank=True)
+    to_agent = models.ForeignKey(
+        Agent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reassignments_to",
+        db_column="to_agent_id",
+    )
+    to_hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
+    to_agent_name = models.TextField(null=True, blank=True)
+    reassigned_at = models.DateTimeField(db_index=True)
+    time_with_previous_agent_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    reassignment_source = models.TextField(default="hubspot_webhook")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "conversation_reassignments"
+        ordering = ["-reassigned_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["hubspot_ticket_id", "reassigned_at"]),
+            models.Index(fields=["from_hubspot_owner_id", "reassigned_at"]),
+            models.Index(fields=["to_hubspot_owner_id", "reassigned_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Reassignment {self.hubspot_ticket_id}: {self.from_agent_name} → {self.to_agent_name}"
