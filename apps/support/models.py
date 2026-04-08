@@ -409,9 +409,7 @@ class ConversationReassignment(models.Model):
     to_hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
     to_agent_name = models.TextField(null=True, blank=True)
     reassigned_at = models.DateTimeField(db_index=True)
-    time_with_previous_agent_seconds = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True
-    )
+    time_with_previous_agent_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     reassignment_source = models.TextField(default="hubspot_webhook")
     created_at = models.DateTimeField(auto_now_add=True)
 

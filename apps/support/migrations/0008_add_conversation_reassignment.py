@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("support", "0007_newconversation_queue_fields"),
     ]
@@ -36,9 +35,7 @@ class Migration(migrations.Migration):
                 ("reassigned_at", models.DateTimeField(db_index=True)),
                 (
                     "time_with_previous_agent_seconds",
-                    models.DecimalField(
-                        blank=True, decimal_places=2, max_digits=10, null=True
-                    ),
+                    models.DecimalField(blank=True, decimal_places=2, max_digits=10, null=True),
                 ),
                 ("reassignment_source", models.TextField(default="hubspot_webhook")),
                 ("created_at", models.DateTimeField(auto_now_add=True)),

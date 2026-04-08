@@ -205,9 +205,7 @@ def _handle_ticket_owner_change(
 
     # Calculate time with previous agent
     time_with_prev_seconds: Decimal | None = None
-    assigned_conv = AssignedConversation.objects.filter(
-        hubspot_ticket_id=hubspot_ticket_id
-    ).first()
+    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
 
     if assigned_conv and assigned_conv.assigned_at:
         delta = now - assigned_conv.assigned_at
@@ -245,9 +243,7 @@ def _handle_ticket_owner_change(
                 assigned_conv.agent = None
                 assigned_conv.hubspot_owner_id = int(new_owner) if new_owner else None
                 assigned_conv.agent_name = ""
-            assigned_conv.save(update_fields=[
-                "agent", "hubspot_owner_id", "agent_name", "updated_at"
-            ])
+            assigned_conv.save(update_fields=["agent", "hubspot_owner_id", "agent_name", "updated_at"])
 
         # 4. Log the reassignment for metrics
         ConversationReassignment.objects.create(

@@ -217,6 +217,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- CORS ---
 
+
 def _normalize_cors_origins(origins_str: str) -> list[str]:
     """Ensure all CORS origins have a scheme (https://)."""
     origins = [o.strip() for o in origins_str.split(",") if o.strip()]
