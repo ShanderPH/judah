@@ -193,14 +193,14 @@ def _handle_ticket_owner_change(
     try:
         prev_owner_int = int(prev_owner)
         from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         pass
 
     if new_owner and new_owner not in ("", "None", "null"):
         try:
             new_owner_int = int(new_owner)
             to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first()
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     # Calculate time with previous agent
