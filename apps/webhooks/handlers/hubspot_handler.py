@@ -1,4 +1,9 @@
-"""Handler for HubSpot webhook events."""
+"""Handler for HubSpot webhook events.
+
+All event processing is dispatched asynchronously via Celery tasks.
+The webhook endpoint returns 202 immediately — no blocking I/O occurs
+in the request thread beyond the initial event recording.
+"""
 
 from __future__ import annotations
 
@@ -70,54 +75,42 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
 
 
 def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | None) -> None:
-    """Trigger the auto-assignment flow when a ticket enters the NOVO stage.
+    """Dispatch auto-assignment via Matchmaker when a ticket enters NOVO stage.
 
-    Executes synchronously within the webhook request to guarantee processing
-    regardless of Celery worker availability.
+    Non-blocking — dispatches a Celery task and returns immediately.
     """
     logger.info("hubspot_ticket_entered_novo", ticket_id=hubspot_ticket_id, entered_at_ms=entered_at_ms)
 
-    try:
-        from apps.support.auto_assign_service import process_new_ticket_event
+    from apps.support.tasks import task_matchmaker_assign_single
 
-        process_new_ticket_event(hubspot_ticket_id, entered_at_ms)
-    except Exception as exc:
-        logger.error(
-            "auto_assign_novo_handler_failed",
-            ticket_id=hubspot_ticket_id,
-            error=str(exc),
-        )
+    task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms)
 
 
 def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:
-    """Track ticket closure — moves record to closed_conversations."""
+    """Dispatch ticket closure processing via Celery.
+
+    Non-blocking — dispatches a Celery task and returns immediately.
+    """
     logger.info("hubspot_ticket_entered_closed", ticket_id=hubspot_ticket_id, closed_at_ms=closed_at_ms)
 
-    try:
-        from apps.support.auto_assign_service import handle_ticket_closed
+    from apps.support.tasks import task_handle_ticket_closed
 
-        handle_ticket_closed(hubspot_ticket_id, closed_at_ms)
-    except Exception as exc:
-        logger.error(
-            "auto_assign_close_handler_failed",
-            ticket_id=hubspot_ticket_id,
-            error=str(exc),
-        )
+    owner_id = payload.get("hubspot_owner_id") or payload.get("sourceId")
+    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, str(owner_id) if owner_id else None)
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
-    """Update local ticket status when HubSpot pipeline stage changes.
+    """Handle pipeline stage transitions.
 
-    When a ticket moves to FECHADO (stage 939275052), also remove it from the
-    pending queue so it is never assigned after closure.
+    When a ticket moves to FECHADO (stage 939275052), triggers the closure flow.
+    Other stage changes are logged for observability.
     """
-    from apps.support.models import Ticket
-
-    # If ticket moved to FECHADO, trigger the closure flow (removes from queue)
     if new_stage == _STAGE_FECHADO_ID:
         logger.info("hubspot_ticket_pipeline_stage_fechado", ticket_id=object_id)
         _handle_ticket_entered_closed(object_id, None, {})
         return
+
+    from apps.support.models import Ticket
 
     try:
         ticket = Ticket.objects.get(ticket_id=object_id)
@@ -133,139 +126,19 @@ def _handle_ticket_owner_change(
     new_owner_id: str | None,
     payload: dict,
 ) -> None:
-    """Handle ticket owner (agent) reassignment.
+    """Dispatch ticket owner reassignment via Celery.
 
-    When a ticket's hubspot_owner_id changes, this indicates a manual reassignment
-    by an agent in HubSpot. We need to:
-    1. Decrement the previous owner's conversation count
-    2. Increment the new owner's conversation count
-    3. Update the AssignedConversation record
-    4. Log the reassignment for metrics
-
-    Args:
-        hubspot_ticket_id: The HubSpot ticket ID.
-        new_owner_id: The new hubspot_owner_id value (may be empty if unassigned).
-        payload: Full webhook payload containing previousValue.
+    Non-blocking — dispatches a Celery task and returns immediately.
     """
-    from decimal import Decimal
-
-    from django.db import transaction
-    from django.utils import timezone
-
-    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
-    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
-
-    previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
-    new_owner = new_owner_id.strip() if new_owner_id else ""
-    prev_owner = str(previous_owner_id).strip() if previous_owner_id else ""
-
-    # Skip if no actual change or if this is an initial assignment (no previous owner)
-    if not prev_owner or prev_owner in ("", "None", "null"):
-        logger.debug(
-            "ticket_owner_change_initial_assignment",
-            ticket_id=hubspot_ticket_id,
-            new_owner_id=new_owner,
-        )
-        return
-
-    # Skip if new owner is the same as previous (no actual change)
-    if new_owner == prev_owner:
-        logger.debug(
-            "ticket_owner_change_same_owner",
-            ticket_id=hubspot_ticket_id,
-            owner_id=new_owner,
-        )
-        return
-
     logger.info(
-        "ticket_owner_change_detected",
+        "hubspot_ticket_owner_change",
         ticket_id=hubspot_ticket_id,
-        from_owner_id=prev_owner,
-        to_owner_id=new_owner,
+        new_owner_id=new_owner_id,
     )
 
-    now = timezone.now()
+    from apps.support.tasks import task_handle_owner_change
 
-    # Resolve agents
-    from_agent: Agent | None = None
-    to_agent: Agent | None = None
-
-    try:
-        prev_owner_int = int(prev_owner)
-        from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
-    except ValueError, TypeError:
-        pass
-
-    if new_owner and new_owner not in ("", "None", "null"):
-        try:
-            new_owner_int = int(new_owner)
-            to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first()
-        except ValueError, TypeError:
-            pass
-
-    # Calculate time with previous agent
-    time_with_prev_seconds: Decimal | None = None
-    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
-
-    if assigned_conv and assigned_conv.assigned_at:
-        delta = now - assigned_conv.assigned_at
-        time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
-    with transaction.atomic():
-        # 1. Decrement previous owner's chat count
-        if from_agent:
-            decrement_agent_chat_count(from_agent)
-            logger.info(
-                "ticket_reassignment_decremented_from_agent",
-                ticket_id=hubspot_ticket_id,
-                agent=from_agent.name,
-                new_count=from_agent.current_simultaneous_chats,
-            )
-
-        # 2. Increment new owner's chat count (if assigned to someone)
-        if to_agent:
-            increment_agent_chat_count(to_agent)
-            logger.info(
-                "ticket_reassignment_incremented_to_agent",
-                ticket_id=hubspot_ticket_id,
-                agent=to_agent.name,
-                new_count=to_agent.current_simultaneous_chats,
-            )
-
-        # 3. Update AssignedConversation record
-        if assigned_conv:
-            if to_agent:
-                assigned_conv.agent = to_agent
-                assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
-                assigned_conv.agent_name = to_agent.name
-            else:
-                # Ticket was unassigned
-                assigned_conv.agent = None
-                assigned_conv.hubspot_owner_id = int(new_owner) if new_owner else None
-                assigned_conv.agent_name = ""
-            assigned_conv.save(update_fields=["agent", "hubspot_owner_id", "agent_name", "updated_at"])
-
-        # 4. Log the reassignment for metrics
-        ConversationReassignment.objects.create(
-            hubspot_ticket_id=hubspot_ticket_id,
-            from_agent=from_agent,
-            from_hubspot_owner_id=int(prev_owner) if prev_owner else None,
-            from_agent_name=from_agent.name if from_agent else None,
-            to_agent=to_agent,
-            to_hubspot_owner_id=int(new_owner) if new_owner else None,
-            to_agent_name=to_agent.name if to_agent else None,
-            reassigned_at=now,
-            time_with_previous_agent_seconds=time_with_prev_seconds,
-            reassignment_source="hubspot_webhook",
-        )
-
-    logger.info(
-        "ticket_reassignment_processed",
-        ticket_id=hubspot_ticket_id,
-        from_agent=from_agent.name if from_agent else prev_owner,
-        to_agent=to_agent.name if to_agent else new_owner,
-        time_with_prev_seconds=float(time_with_prev_seconds) if time_with_prev_seconds else None,
-    )
+    task_handle_owner_change.delay(hubspot_ticket_id, new_owner_id, payload)
 
 
 def _handle_conversation_event(event_type: str, payload: dict) -> None:
@@ -292,12 +165,9 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
 def _handle_contact_event(event_type: str, payload: dict) -> None:
     """Process contact-related HubSpot events.
 
-    Handles ``hs_availability_status`` property changes as a fallback mechanism.
-    The primary agent availability sync is handled by the polling task
-    ``task_poll_hubspot_agent_status`` which uses the HubSpot Users API.
-
-    Note: HubSpot does not support ``user.propertyChange`` webhook subscriptions,
-    so we rely on ``contact.propertyChange`` as a secondary sync mechanism.
+    Handles ``hs_availability_status`` property changes as a fast-path
+    for agent availability detection. The primary sync mechanism is the
+    SAT heartbeat (20-second polling).
     """
     object_id = str(payload.get("objectId", ""))
     property_name = payload.get("propertyName", "")
@@ -314,120 +184,17 @@ def _handle_agent_availability_change(
     availability_value: str,
     payload: dict,
 ) -> None:
-    """Update agent status_enum when HubSpot availability changes via webhook.
+    """Dispatch agent availability change via Celery.
 
-    Fallback handler for ``contact.propertyChange`` events. The primary sync
-    mechanism is the polling task ``task_poll_hubspot_agent_status``.
-
-    Mapping:
-      ``"available"``  →  ``status_enum = "online"``
-      ``"away"`` / other  →  ``status_enum = "away"``
+    Non-blocking — dispatches a Celery task and returns immediately.
+    Acts as a fast-path complement to the SAT 20-second heartbeat.
     """
-    new_status = "online" if availability_value == "available" else "away"
+    logger.info(
+        "hubspot_agent_availability_change",
+        contact_id=hubspot_contact_id,
+        availability=availability_value,
+    )
 
-    # The payload may carry the email directly in changeSource context or
-    # portalId; try to get it from known payload fields first.
-    email = (payload.get("email") or "").lower().strip()
+    from apps.support.tasks import task_handle_availability_change
 
-    if not email:
-        # The webhook objectId is a HubSpot contact ID (not owner ID).
-        # Use the Contacts API to resolve the agent's email.
-        try:
-            from apps.integrations.hubspot.client import get_hubspot_client
-
-            client = get_hubspot_client()
-            contact_details = client.get_contact_by_id(hubspot_contact_id)
-            email = (contact_details.get("email") or "").lower().strip()
-        except Exception as exc:
-            logger.warning(
-                "agent_availability_email_lookup_failed",
-                contact_id=hubspot_contact_id,
-                error=str(exc),
-            )
-
-    if not email:
-        logger.warning(
-            "agent_availability_change_no_email",
-            contact_id=hubspot_contact_id,
-            availability=availability_value,
-        )
-        return
-
-    _update_agent_status_and_assign(email, new_status, availability_value, "hubspot_webhook")
-
-
-def _update_agent_status_and_assign(
-    email: str,
-    new_status: str,
-    availability_value: str,
-    sync_source: str,
-) -> None:
-    """Update agent status and trigger pending ticket assignment if agent came online.
-
-    Shared logic for both user.propertyChange and contact.propertyChange handlers.
-
-    Args:
-        email: Agent's email address.
-        new_status: New status_enum value ("online" or "away").
-        availability_value: Original HubSpot availability value for logging.
-        sync_source: Source identifier for AgentStatusHistory.
-    """
-    from django.utils import timezone
-
-    from apps.support.models import Agent, AgentStatusHistory
-
-    agent = Agent.objects.filter(agent_email__iexact=email).exclude(is_active=False).first()
-    if agent is None:
-        logger.debug(
-            "agent_not_found_for_availability_change",
-            email=email,
-        )
-        return
-
-    old_status = agent.status_enum
-    status_changed = old_status != new_status
-    if status_changed:
-        agent.status_enum = new_status
-        agent.updated_at = timezone.now()
-        agent.save(update_fields=["status_enum", "updated_at"])
-
-        AgentStatusHistory.objects.create(
-            agent=agent,
-            old_status=old_status,
-            new_status=new_status,
-            sync_source=sync_source,
-        )
-
-        logger.info(
-            "agent_status_updated_via_webhook",
-            agent=agent.name,
-            email=email,
-            old_status=old_status,
-            new_status=new_status,
-            availability=availability_value,
-        )
-    else:
-        logger.debug(
-            "agent_status_unchanged_via_webhook",
-            agent=agent.name,
-            status=new_status,
-        )
-
-    # When an agent just came online, drain any pending tickets from the queue
-    # so they are assigned immediately rather than waiting for the next webhook.
-    if status_changed and new_status == "online":
-        try:
-            from apps.support.auto_assign_service import assign_pending_tickets
-
-            assign_result = assign_pending_tickets()
-            logger.info(
-                "agent_online_pending_assignment_triggered",
-                agent=agent.name,
-                **assign_result,
-            )
-        except Exception as assign_exc:
-            logger.warning(
-                "agent_online_pending_assignment_failed",
-                agent=agent.name,
-                error=str(assign_exc),
-            )
+    task_handle_availability_change.delay(hubspot_contact_id, availability_value, payload)

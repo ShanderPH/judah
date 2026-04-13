@@ -54,6 +54,12 @@ class Agent(models.Model):
     skills = models.JSONField(null=True, blank=True)
     timezone = models.TextField(default="America/Sao_Paulo")
     last_assignment_at = models.DateTimeField(null=True, blank=True)
+    total_assignments = models.IntegerField(default=0)
+    online_time_seconds_today = models.IntegerField(default=0)
+    away_time_seconds_today = models.IntegerField(default=0)
+    last_status_change_at = models.DateTimeField(null=True, blank=True)
+    sat_last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    sat_last_count_sync_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True)
 
@@ -244,6 +250,7 @@ class AssignedConversation(models.Model):
     closed_by_owner_id = models.BigIntegerField(null=True, blank=True)
     closed_by_agent_name = models.TextField(null=True, blank=True)
     total_handle_time_minutes = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    assignment_count = models.IntegerField(default=1)
     contact_name = models.TextField(null=True, blank=True)
     contact_email = models.TextField(null=True, blank=True)
     priority = models.TextField(null=True, blank=True)
@@ -293,6 +300,8 @@ class ClosedConversation(models.Model):
     closed_by_agent_name = models.TextField(null=True, blank=True)
     queue_wait_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_handle_time_minutes = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    resolution_time_minutes = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    closure_source = models.CharField(max_length=20, default="agent")
     contact_name = models.TextField(null=True, blank=True)
     contact_email = models.TextField(null=True, blank=True)
     priority = models.TextField(null=True, blank=True)
@@ -424,3 +433,37 @@ class ConversationReassignment(models.Model):
 
     def __str__(self) -> str:
         return f"Reassignment {self.hubspot_ticket_id}: {self.from_agent_name} → {self.to_agent_name}"
+
+
+class AgentDailyTimeLog(models.Model):
+    """Daily accumulated online/away time per agent.
+
+    Populated by the SAT (Smart Agent Tracking) service at midnight
+    when daily counters on the Agent model are snapshotted and reset.
+
+    Maps to the ``agent_daily_time_logs`` table.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.CASCADE,
+        related_name="daily_time_logs",
+        db_column="agent_id",
+    )
+    log_date = models.DateField(db_index=True)
+    online_time_seconds = models.IntegerField(default=0)
+    away_time_seconds = models.IntegerField(default=0)
+    status_transitions = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "agent_daily_time_logs"
+        ordering = ["-log_date"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(fields=["agent", "log_date"], name="unique_agent_daily_log"),
+        ]
+
+    def __str__(self) -> str:
+        return f"TimeLog {self.agent.name} {self.log_date} (online={self.online_time_seconds}s)"
