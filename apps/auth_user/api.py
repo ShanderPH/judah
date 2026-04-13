@@ -1,10 +1,12 @@
 """Django Ninja API endpoints for auth_user."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from ninja import Router
-from ninja_jwt.controller import NinjaJWTDefaultController
 from ninja_jwt.tokens import RefreshToken
 
-from apps.auth_user.models import User
 from apps.auth_user.schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -22,14 +24,16 @@ from apps.auth_user.services import (
 )
 from common.exceptions import UnauthorizedError
 
+if TYPE_CHECKING:
+    from apps.auth_user.models import User
+
 router = Router()
 
 
 @router.post("/register", response={201: UserResponse}, auth=None, summary="Register a new user")
-async def register(request, payload: RegisterRequest) -> tuple[int, User]:
+def register(request, payload: RegisterRequest) -> tuple[int, User]:
     """Create a new user account and return the user profile."""
-    user = await register_user.__wrapped__(payload) if hasattr(register_user, "__wrapped__") else register_user(payload)
-    return 201, user
+    return 201, register_user(payload)
 
 
 @router.post("/login", response=TokenResponse, auth=None, summary="Obtain JWT token pair")

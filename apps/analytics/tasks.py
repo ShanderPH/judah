@@ -3,6 +3,7 @@
 from datetime import date, timedelta
 
 import structlog
+
 from celery import shared_task
 
 logger = structlog.get_logger(__name__)
@@ -20,9 +21,7 @@ def generate_daily_report(self, report_date_str: str | None = None) -> dict:
     """
     from apps.analytics.services import compute_daily_report
 
-    target_date = (
-        date.fromisoformat(report_date_str) if report_date_str else date.today() - timedelta(days=1)
-    )
+    target_date = date.fromisoformat(report_date_str) if report_date_str else date.today() - timedelta(days=1)
 
     try:
         report = compute_daily_report(target_date)
@@ -30,7 +29,7 @@ def generate_daily_report(self, report_date_str: str | None = None) -> dict:
         return {"report_date": str(target_date), "status": "success", "report_id": report.pk}
     except Exception as exc:
         logger.error("daily_report_task_failed", date=str(target_date), error=str(exc))
-        raise self.retry(exc=exc)
+        raise self.retry(exc=exc) from None
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=300)

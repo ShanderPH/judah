@@ -1,14 +1,19 @@
 """Django Ninja API endpoints for analytics."""
 
+from __future__ import annotations
+
 from datetime import date
+from typing import TYPE_CHECKING
 
 from ninja import Router
 
-from apps.analytics.models import DailyReport
 from apps.analytics.schemas import DailyReportResponse
 from apps.analytics.services import get_daily_report, get_recent_reports
 from common.exceptions import NotFoundError
 from common.pagination import StandardPagination, paginate
+
+if TYPE_CHECKING:
+    from apps.analytics.models import DailyReport
 
 router = Router()
 

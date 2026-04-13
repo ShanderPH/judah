@@ -23,7 +23,7 @@ class ChatResponse(Schema):
     session_id: str
     message: str
     agent_type: str
-    sources: list[dict] = []
+    sources: list[dict] = []  # noqa: RUF012
     tokens_used: int = 0
     latency_ms: int = 0
 

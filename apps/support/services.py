@@ -1,5 +1,7 @@
 """Business logic for support/helpdesk app."""
 
+import contextlib
+
 import structlog
 
 from apps.support.models import Queue, Ticket
@@ -17,8 +19,8 @@ def get_ticket(ticket_id: int) -> Ticket:
     """
     try:
         return Ticket.objects.select_related("queue", "sla", "assigned_to").get(pk=ticket_id)
-    except Ticket.DoesNotExist:
-        raise NotFoundError(f"Ticket with id={ticket_id} not found.")
+    except Ticket.DoesNotExist as err:
+        raise NotFoundError(f"Ticket with id={ticket_id} not found.") from err
 
 
 def list_tickets(
@@ -48,10 +50,8 @@ def create_ticket(payload: CreateTicketRequest) -> Ticket:
     """
     queue = None
     if payload.queue_id:
-        try:
+        with contextlib.suppress(Queue.DoesNotExist):
             queue = Queue.objects.get(pk=payload.queue_id)
-        except Queue.DoesNotExist:
-            pass
 
     ticket = Ticket.objects.create(
         subject=payload.subject,

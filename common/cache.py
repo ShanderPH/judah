@@ -3,11 +3,13 @@
 import functools
 import hashlib
 import json
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from django.core.cache import cache
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = structlog.get_logger(__name__)
 
@@ -15,7 +17,7 @@ logger = structlog.get_logger(__name__)
 def make_cache_key(prefix: str, *args: Any, **kwargs: Any) -> str:
     """Generate a deterministic cache key from a prefix and arguments."""
     raw = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True, default=str)
-    digest = hashlib.md5(raw.encode()).hexdigest()  # noqa: S324
+    digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
     return f"{prefix}:{digest}"
 
 
@@ -57,14 +59,16 @@ def cached(timeout: int = 300, prefix: str = "") -> Callable:
 def invalidate_prefix(prefix: str) -> int:
     """Delete all cache keys matching a prefix pattern.
 
-    Returns the number of keys deleted.
+    Uses SCAN (non-blocking) instead of KEYS so large key spaces don't
+    stall the Redis server.  Returns the number of keys deleted.
     """
+    import redis as redis_lib
+    from django.conf import settings
+
     pattern = f"{prefix}:*"
     try:
-        from django_redis import get_redis_connection
-
-        conn = get_redis_connection("default")
-        keys = conn.keys(pattern)
+        conn = redis_lib.from_url(settings.REDIS_URL, decode_responses=False)
+        keys = list(conn.scan_iter(pattern))
         if keys:
             return conn.delete(*keys)
     except Exception:

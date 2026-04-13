@@ -6,7 +6,7 @@ django-extensions>=3.2.0
 ipython>=8.30.0
 
 # Lint & Format
-ruff>=0.8.0
+ruff==0.15.8
 pre-commit>=4.0.0
 
 # Testing

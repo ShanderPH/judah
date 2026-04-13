@@ -1,8 +1,7 @@
 """Pydantic v2 schemas for auth_user endpoints."""
 
-from pydantic import EmailStr, Field, field_validator
-
 from ninja import Schema
+from pydantic import EmailStr, Field, field_validator
 
 
 class LoginRequest(Schema):

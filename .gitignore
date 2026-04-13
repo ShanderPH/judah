@@ -34,7 +34,8 @@ staticfiles/
 .env
 .env.local
 .env.*.local
-!.env.example
+.env.production
+.env.staging
 
 # Virtual environments
 .venv/
@@ -81,3 +82,5 @@ node_modules/
 
 # OS
 Thumbs.db
+
+/.claude

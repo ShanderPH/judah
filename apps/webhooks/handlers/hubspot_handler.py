@@ -1,8 +1,25 @@
-"""Handler for HubSpot webhook events."""
+"""Handler for HubSpot webhook events.
+
+All event processing is dispatched asynchronously via Celery tasks.
+The webhook endpoint returns 202 immediately — no blocking I/O occurs
+in the request thread beyond the initial event recording.
+"""
+
+from __future__ import annotations
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# HubSpot property names that trigger auto-assignment logic
+_PROP_STAGE_NOVO = "hs_v2_date_entered_939275049"  # Ticket entered NOVO stage
+_PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"  # Ticket entered FECHADO stage
+_PROP_PIPELINE_STAGE = "hs_pipeline_stage"
+_PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
+_PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
+
+# Stage IDs
+_STAGE_FECHADO_ID = "939275052"
 
 
 def handle_hubspot_event(event) -> None:
@@ -13,13 +30,18 @@ def handle_hubspot_event(event) -> None:
     """
     event_type: str = event.event_type
     payload: dict = event.payload
+    et_lower = event_type.lower()
 
     logger.info("hubspot_event_received", event_type=event_type, event_id=event.pk)
 
-    if "ticket" in event_type.lower():
+    if et_lower.startswith("ticket."):
         _handle_ticket_event(event_type, payload)
-    elif "contact" in event_type.lower():
+    elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
+    elif et_lower.startswith("conversation."):
+        _handle_conversation_event(event_type, payload)
+    elif et_lower.startswith(("deal.", "company.")):
+        logger.debug("hubspot_crm_event_logged", event_type=event_type, object_id=payload.get("objectId"))
     else:
         logger.debug("hubspot_event_unhandled", event_type=event_type)
 
@@ -30,20 +52,149 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
     if not object_id:
         return
 
+    property_name = payload.get("propertyName", "")
+    property_value = payload.get("propertyValue", "")
+
+    if event_type == "ticket.propertyChange":
+        if property_name == _PROP_STAGE_NOVO:
+            _handle_ticket_entered_novo(object_id, property_value)
+
+        elif property_name == _PROP_STAGE_CLOSED:
+            _handle_ticket_entered_closed(object_id, property_value, payload)
+
+        elif property_name == _PROP_PIPELINE_STAGE:
+            _handle_pipeline_stage_change(object_id, property_value)
+
+        elif property_name == _PROP_OWNER_ID:
+            _handle_ticket_owner_change(object_id, property_value, payload)
+
+    elif event_type in ("ticket.creation", "ticket.created"):
+        logger.debug("hubspot_ticket_created_event", ticket_id=object_id)
+    else:
+        logger.debug("hubspot_ticket_event_unhandled", event_type=event_type, ticket_id=object_id)
+
+
+def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | None) -> None:
+    """Dispatch auto-assignment via Matchmaker when a ticket enters NOVO stage.
+
+    Non-blocking — dispatches a Celery task and returns immediately.
+    """
+    logger.info("hubspot_ticket_entered_novo", ticket_id=hubspot_ticket_id, entered_at_ms=entered_at_ms)
+
+    from apps.support.tasks import task_matchmaker_assign_single
+
+    task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms)
+
+
+def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:
+    """Dispatch ticket closure processing via Celery.
+
+    Non-blocking — dispatches a Celery task and returns immediately.
+    """
+    logger.info("hubspot_ticket_entered_closed", ticket_id=hubspot_ticket_id, closed_at_ms=closed_at_ms)
+
+    from apps.support.tasks import task_handle_ticket_closed
+
+    owner_id = payload.get("hubspot_owner_id") or payload.get("sourceId")
+    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, str(owner_id) if owner_id else None)
+
+
+def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
+    """Handle pipeline stage transitions.
+
+    When a ticket moves to FECHADO (stage 939275052), triggers the closure flow.
+    Other stage changes are logged for observability.
+    """
+    if new_stage == _STAGE_FECHADO_ID:
+        logger.info("hubspot_ticket_pipeline_stage_fechado", ticket_id=object_id)
+        _handle_ticket_entered_closed(object_id, None, {})
+        return
+
     from apps.support.models import Ticket
 
     try:
-        ticket = Ticket.objects.get(hubspot_ticket_id=object_id)
-        if event_type == "ticket.propertyChange" and payload.get("propertyName") == "hs_pipeline_stage":
-            new_stage = payload.get("propertyValue", "")
-            if new_stage == "4":
-                ticket.status = Ticket.Status.RESOLVED
-                ticket.save(update_fields=["status", "updated_at"])
-                logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
+        ticket = Ticket.objects.get(ticket_id=object_id)
+        ticket.status = "RESOLVED"
+        ticket.save(update_fields=["status", "updated_at"])
+        logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
     except Ticket.DoesNotExist:
-        logger.debug("hubspot_ticket_not_synced", hubspot_id=object_id)
+        logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
+
+
+def _handle_ticket_owner_change(
+    hubspot_ticket_id: str,
+    new_owner_id: str | None,
+    payload: dict,
+) -> None:
+    """Dispatch ticket owner reassignment via Celery.
+
+    Non-blocking — dispatches a Celery task and returns immediately.
+    """
+    logger.info(
+        "hubspot_ticket_owner_change",
+        ticket_id=hubspot_ticket_id,
+        new_owner_id=new_owner_id,
+    )
+
+    from apps.support.tasks import task_handle_owner_change
+
+    task_handle_owner_change.delay(hubspot_ticket_id, new_owner_id, payload)
+
+
+def _handle_conversation_event(event_type: str, payload: dict) -> None:
+    """Process HubSpot Conversations events (legacy).
+
+    These events come from the HubSpot Conversations API and include:
+      - conversation.creation
+      - conversation.deletion
+      - conversation.privacyDeletion
+      - conversation.propertyChange
+      - conversation.newMessage
+
+    Currently logged for auditing; extend as needed for specific use cases.
+    """
+    object_id = str(payload.get("objectId", ""))
+    logger.debug(
+        "hubspot_conversation_event",
+        event_type=event_type,
+        object_id=object_id,
+        message_id=payload.get("messageId"),
+    )
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:
-    """Process contact-related HubSpot events."""
-    logger.debug("hubspot_contact_event", event_type=event_type, object_id=payload.get("objectId"))
+    """Process contact-related HubSpot events.
+
+    Handles ``hs_availability_status`` property changes as a fast-path
+    for agent availability detection. The primary sync mechanism is the
+    SAT heartbeat (20-second polling).
+    """
+    object_id = str(payload.get("objectId", ""))
+    property_name = payload.get("propertyName", "")
+    property_value = payload.get("propertyValue", "")
+
+    if event_type == "contact.propertyChange" and property_name == _PROP_AVAILABILITY:
+        _handle_agent_availability_change(object_id, property_value, payload)
+    else:
+        logger.debug("hubspot_contact_event", event_type=event_type, object_id=object_id)
+
+
+def _handle_agent_availability_change(
+    hubspot_contact_id: str,
+    availability_value: str,
+    payload: dict,
+) -> None:
+    """Dispatch agent availability change via Celery.
+
+    Non-blocking — dispatches a Celery task and returns immediately.
+    Acts as a fast-path complement to the SAT 20-second heartbeat.
+    """
+    logger.info(
+        "hubspot_agent_availability_change",
+        contact_id=hubspot_contact_id,
+        availability=availability_value,
+    )
+
+    from apps.support.tasks import task_handle_availability_change
+
+    task_handle_availability_change.delay(hubspot_contact_id, availability_value, payload)

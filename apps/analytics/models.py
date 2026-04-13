@@ -22,8 +22,8 @@ class Metric(models.Model):
 
     class Meta:
         db_table = "analytics_metrics"
-        ordering = ["-date"]
-        indexes = [
+        ordering = ["-date"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
             models.Index(fields=["metric_type", "date"]),
         ]
 
@@ -49,7 +49,7 @@ class DailyReport(models.Model):
 
     class Meta:
         db_table = "analytics_daily_reports"
-        ordering = ["-date"]
+        ordering = ["-date"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"Daily Report — {self.date}"
@@ -75,8 +75,8 @@ class AgentPerformance(models.Model):
 
     class Meta:
         db_table = "analytics_agent_performance"
-        unique_together = [("agent", "date")]
-        ordering = ["-date"]
+        unique_together = [("agent", "date")]  # noqa: RUF012
+        ordering = ["-date"]  # noqa: RUF012
 
     def __str__(self) -> str:
         return f"{self.agent} — {self.date}"

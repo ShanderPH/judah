@@ -69,8 +69,8 @@ def get_user_by_id(user_id: int) -> User:
     """
     try:
         return User.objects.get(pk=user_id)
-    except User.DoesNotExist:
-        raise NotFoundError(f"User with id={user_id} not found.")
+    except User.DoesNotExist as err:
+        raise NotFoundError(f"User with id={user_id} not found.") from err
 
 
 def update_profile(user: User, payload: UpdateProfileRequest) -> User:

@@ -1,0 +1,23 @@
+# JUDAH Code Owners
+# Owners are automatically requested for review on PRs that touch their files.
+
+# Global fallback owner
+* @ShanderPH
+
+# Core settings and config
+core/ @ShanderPH
+pyproject.toml @ShanderPH
+requirements*.txt @ShanderPH
+Makefile @ShanderPH
+Dockerfile @ShanderPH
+docker-compose*.yml @ShanderPH
+
+# GitHub Actions CI/CD
+.github/workflows/ @ShanderPH
+
+# Database migrations — always require review
+apps/*/migrations/ @ShanderPH
+
+# Documentation
+docs/ @ShanderPH
+README.md @ShanderPH

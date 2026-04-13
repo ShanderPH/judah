@@ -2,27 +2,33 @@
 
 from django.contrib import admin
 
-from apps.knowledge.models import Article, ArticleChunk, Category
+from apps.knowledge.models import Article, ArticleChunk, Category, KBSyncLog
 
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ("name", "slug", "parent", "order", "is_public")
-    search_fields = ("name", "slug")
-    prepopulated_fields = {"slug": ("name",)}
+    list_display = ("name", "hubspot_id", "position", "article_count", "updated_at")
+    search_fields = ("name", "hubspot_id")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(Article)
 class ArticleAdmin(admin.ModelAdmin):
-    list_display = ("title", "category", "status", "view_count", "updated_at")
-    list_filter = ("status", "category")
-    search_fields = ("title", "content", "slug")
-    prepopulated_fields = {"slug": ("title",)}
-    readonly_fields = ("view_count", "helpful_count", "not_helpful_count", "pinecone_id")
+    list_display = ("title", "hubspot_id", "state", "category_name", "view_count", "synced_at")
+    list_filter = ("state", "language")
+    search_fields = ("title", "hubspot_id", "slug", "category_name")
+    readonly_fields = ("view_count", "rating_sum", "rating_count", "synced_at", "created_at", "updated_at")
 
 
 @admin.register(ArticleChunk)
 class ArticleChunkAdmin(admin.ModelAdmin):
-    list_display = ("article", "chunk_index", "token_count")
-    search_fields = ("article__title",)
-    readonly_fields = ("pinecone_id",)
+    list_display = ("article_hubspot_id", "chunk_index", "chunk_type", "token_count", "created_at")
+    search_fields = ("article_hubspot_id", "chunk_text")
+    readonly_fields = ("pinecone_id", "created_at")
+
+
+@admin.register(KBSyncLog)
+class KBSyncLogAdmin(admin.ModelAdmin):
+    list_display = ("sync_type", "status", "total_articles", "articles_created", "articles_updated", "started_at")
+    list_filter = ("status", "sync_type")
+    readonly_fields = ("started_at",)

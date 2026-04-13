@@ -1,0 +1,24 @@
+{
+  "uid": "judah_hubspot_integration",
+  "type": "app",
+  "config": {
+    "name": "Judah HubSpot Integration",
+    "description": "Manages webhook subscriptions for the Judah support queue auto-assignment system. Syncs ticket pipeline changes and agent availability status to Supabase in real time.",
+    "distribution": "private",
+    "auth": {
+      "type": "static",
+      "requiredScopes": [
+        "oauth",
+        "tickets",
+        "crm.objects.contacts.read",
+        "crm.objects.users.read",
+        "settings.users.read"
+      ]
+    },
+    "permittedUrls": {
+      "fetch": ["https://judah-production.up.railway.app"],
+      "iframe": [],
+      "img": []
+    }
+  }
+}

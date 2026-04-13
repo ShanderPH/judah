@@ -1,6 +1,6 @@
 """Standard pagination classes for JUDAH API."""
 
-from typing import Any, Generic, TypeVar
+from typing import TypeVar
 
 from ninja import Schema
 from ninja.pagination import CursorPagination, LimitOffsetPagination, paginate
@@ -8,7 +8,7 @@ from ninja.pagination import CursorPagination, LimitOffsetPagination, paginate
 T = TypeVar("T")
 
 
-class PagedResponse(Schema, Generic[T]):
+class PagedResponse[T](Schema):
     """Generic paged response envelope."""
 
     count: int
@@ -17,7 +17,7 @@ class PagedResponse(Schema, Generic[T]):
     results: list[T]
 
 
-class CursorPagedResponse(Schema, Generic[T]):
+class CursorPagedResponse[T](Schema):
     """Cursor-based paged response envelope."""
 
     next: str | None = None
@@ -43,9 +43,9 @@ class StandardCursorPagination(CursorPagination):
 
 
 __all__ = [
-    "PagedResponse",
     "CursorPagedResponse",
-    "StandardPagination",
+    "PagedResponse",
     "StandardCursorPagination",
+    "StandardPagination",
     "paginate",
 ]

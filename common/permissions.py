@@ -29,9 +29,7 @@ def require_role(*roles: str):
             if user is None:
                 raise UnauthorizedError()
             if hasattr(user, "role") and user.role not in roles:
-                raise ForbiddenError(
-                    f"This action requires one of the following roles: {', '.join(roles)}."
-                )
+                raise ForbiddenError(f"This action requires one of the following roles: {', '.join(roles)}.")
             return func(request, *args, **kwargs)
 
         return wrapper

@@ -15,8 +15,11 @@ class MetricAdmin(admin.ModelAdmin):
 @admin.register(DailyReport)
 class DailyReportAdmin(admin.ModelAdmin):
     list_display = (
-        "date", "total_tickets_opened", "total_tickets_resolved",
-        "sla_compliance_rate", "ai_deflection_rate",
+        "date",
+        "total_tickets_opened",
+        "total_tickets_resolved",
+        "sla_compliance_rate",
+        "ai_deflection_rate",
     )
     readonly_fields = ("created_at", "updated_at")
 

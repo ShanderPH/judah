@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.14"
+  DJANGO_ENV: test
+  DJANGO_SECRET_KEY: ci-secret-key-not-for-production
+  DJANGO_DEBUG: "False"
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/judah_test
+  REDIS_URL: redis://localhost:6379/0
+  SENTRY_DSN: ""
+  OPENAI_API_KEY: sk-test-placeholder
+  PINECONE_API_KEY: test-placeholder
+  PINECONE_INDEX_NAME: test-index
+  HUBSPOT_ACCESS_TOKEN: test-placeholder
+  HUBSPOT_APP_SECRET: test-placeholder
+  JIRA_SERVER_URL: https://test.atlassian.net
+  JIRA_API_TOKEN: test-placeholder
+  JIRA_USER_EMAIL: test@test.com
+  SUPABASE_URL: https://test.supabase.co
+  SUPABASE_SERVICE_KEY: test-placeholder
+  SUPABASE_ANON_KEY: test-placeholder
+  AGNO_TELEMETRY: "false"
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements/dev.txt
+
+      - name: Run Ruff (lint)
+        run: ruff check .
+
+      - name: Run Ruff (format check)
+        run: ruff format --check .
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
+
+    strategy:
+      matrix:
+        python-version: ["3.14"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: judah_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements/test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements/test.txt
+
+      - name: Run migrations
+        run: python manage.py migrate --run-syncdb
+
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            --cov=apps \
+            --cov=common \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=50 \
+            -v
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.14'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements/base.txt bandit safety
+
+      - name: Run Bandit (SAST)
+        run: bandit -r apps/ common/ core/ -ll -x apps/*/tests/,apps/*/migrations/
+
+      - name: Run Safety (dependency CVE check)
+        run: safety check --full-report
+        continue-on-error: true
+
+  django-checks:
+    name: Django System Checks
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: judah_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/base.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements/base.txt
+
+      - name: Django system check
+        run: python manage.py check --fail-level WARNING
+
+      - name: Apply migrations
+        run: python manage.py migrate --run-syncdb
+
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run

@@ -5,6 +5,8 @@ from django.urls import path
 from ninja import NinjaAPI
 from ninja_jwt.authentication import JWTAuth
 
+from common.exceptions import register_exception_handlers
+
 api = NinjaAPI(
     title="JUDAH API",
     version="1.0.0",
@@ -12,6 +14,8 @@ api = NinjaAPI(
     auth=JWTAuth(),
     urls_namespace="judah",
 )
+
+register_exception_handlers(api)
 
 api.add_router("/auth/", "apps.auth_user.api.router", tags=["Auth"], auth=None)
 api.add_router("/church/", "apps.church.api.router", tags=["Church"])

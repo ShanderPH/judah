@@ -1,5 +1,9 @@
 """Base settings shared across all environments."""
 
+from __future__ import annotations
+
+import os
+from datetime import timedelta
 from pathlib import Path
 
 import structlog
@@ -84,9 +88,6 @@ ASGI_APPLICATION = "core.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "OPTIONS": {
-            "pool": True,
-        },
     }
 }
 
@@ -94,8 +95,7 @@ _database_url = config("DATABASE_URL", default="")
 if _database_url:
     import dj_database_url  # type: ignore[import-untyped]
 
-    DATABASES["default"] = dj_database_url.parse(_database_url)
-    DATABASES["default"]["OPTIONS"] = {"pool": True}
+    DATABASES["default"] = dj_database_url.parse(_database_url, conn_max_age=60)
 
 # --- Auth ---
 
@@ -110,8 +110,6 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # --- JWT ---
 
-from datetime import timedelta  # noqa: E402
-
 NINJA_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=config("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", default=60, cast=int)),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=config("JWT_REFRESH_TOKEN_LIFETIME_DAYS", default=7, cast=int)),
@@ -125,15 +123,22 @@ NINJA_JWT = {
 }
 
 # --- Cache (Redis) ---
+# Uses Django's built-in redis backend (no django-redis dependency needed).
+# Railway may provide REDIS_PRIVATE_URL or REDIS_URL depending on configuration.
 
-REDIS_URL = config("REDIS_URL", default="redis://localhost:6379/0")
+REDIS_URL = config(
+    "REDIS_URL",
+    default=config("REDIS_PRIVATE_URL", default="redis://localhost:6379/0"),
+)
 
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "socket_connect_timeout": 5,
+            "socket_timeout": 5,
+            "retry_on_timeout": True,
         },
     }
 }
@@ -154,6 +159,52 @@ CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_SOFT_TIME_LIMIT = 300
 CELERY_TASK_TIME_LIMIT = 600
 
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    # Sync HubSpot N1 team members daily at 06:00 AM (São Paulo)
+    "sync-hubspot-team-members-daily": {
+        "task": "support.task_sync_hubspot_team_members",
+        "schedule": crontab(hour=6, minute=0),
+    },
+    # Aggregate queue metrics daily at 00:05 AM (São Paulo)
+    "aggregate-queue-metrics-daily": {
+        "task": "support.task_aggregate_queue_metrics",
+        "schedule": crontab(hour=0, minute=5),
+    },
+    # SAT heartbeat — sync agent availability every 20 seconds (skips off-hours)
+    "sat-heartbeat": {
+        "task": "support.task_sat_heartbeat",
+        "schedule": 20,  # seconds
+    },
+    # SAT daily counter reset at midnight
+    "sat-reset-daily-counters": {
+        "task": "support.task_sat_reset_daily_counters",
+        "schedule": crontab(hour=0, minute=1),
+    },
+    # Matchmaker safety net — drain pending queue every 60 seconds
+    "matchmaker-drain-queue": {
+        "task": "support.task_matchmaker_drain_queue",
+        "schedule": 60,  # seconds
+    },
+    # Sync NOVO-stage tickets from HubSpot daily at 08:00 AM (São Paulo)
+    "sync-novo-stage-tickets-daily": {
+        "task": "support.task_sync_novo_stage_tickets",
+        "schedule": crontab(hour=8, minute=0),
+    },
+    # Aggregate per-agent metrics daily at 00:10 AM (São Paulo)
+    "aggregate-agent-metrics-daily": {
+        "task": "support.task_aggregate_agent_metrics",
+        "schedule": crontab(hour=0, minute=10),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Auto-assignment configuration
+# ---------------------------------------------------------------------------
+
+HUBSPOT_N1_TEAM_ID = config("HUBSPOT_N1_TEAM_ID", default="8")
+
 # --- Internationalization ---
 
 LANGUAGE_CODE = "pt-br"
@@ -162,10 +213,18 @@ USE_I18N = True
 USE_TZ = True
 
 # --- Static files ---
+# STORAGES replaces deprecated STATICFILES_STORAGE (removed in Django 5.1).
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # --- Default primary key ---
 
@@ -173,7 +232,23 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- CORS ---
 
-CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:3000", cast=Csv())
+
+def _normalize_cors_origins(origins_str: str) -> list[str]:
+    """Ensure all CORS origins have a scheme (https://)."""
+    origins = [o.strip() for o in origins_str.split(",") if o.strip()]
+    normalized = []
+    for origin in origins:
+        if not origin.startswith(("http://", "https://")):
+            origin = f"https://{origin}"
+        normalized.append(origin)
+    return normalized
+
+
+CORS_ALLOWED_ORIGINS = config(
+    "CORS_ALLOWED_ORIGINS",
+    default="http://localhost:3000",
+    cast=_normalize_cors_origins,
+)
 CORS_ALLOW_CREDENTIALS = True
 
 # --- Supabase ---
@@ -203,63 +278,185 @@ if SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
-        integrations=[DjangoIntegration(), CeleryIntegration()],
-        traces_sample_rate=0.1,
+        integrations=[
+            DjangoIntegration(transaction_style="url"),
+            CeleryIntegration(monitor_beat_tasks=True),
+            LoggingIntegration(level=None, event_level="ERROR"),
+        ],
+        traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.05, cast=float),
+        profiles_sample_rate=config("SENTRY_PROFILES_SAMPLE_RATE", default=0.01, cast=float),
         send_default_pii=False,
+        environment=os.environ.get("DJANGO_ENV", "development"),
+        release=config("GIT_SHA", default=""),
     )
 
-# --- Logging (structlog) ---
+# ---------------------------------------------------------------------------
+# Logging (structlog 24.x)
+#
+# Architecture:
+#   structlog native records  →  _STRUCTLOG_PRE_CHAIN  →  wrap_for_formatter
+#   stdlib/third-party records → foreign_pre_chain (same chain)  →  formatter
+#   Both paths converge in ProcessorFormatter which applies the final renderer.
+#
+# In production:  JSONRenderer  → machine-readable, aggregator-friendly
+# In development: ConsoleRenderer → human-readable coloured output (see development.py)
+# ---------------------------------------------------------------------------
 
-LOGGING = {
+_STRUCTLOG_PRE_CHAIN: list = [
+    # Merge any context variables bound via structlog.contextvars.bind_contextvars()
+    structlog.contextvars.merge_contextvars,
+    # Add log level name ("info", "error", …) to the event dict
+    structlog.stdlib.add_log_level,
+    # Add the logger name for easy filtering
+    structlog.stdlib.add_logger_name,
+    # ISO-8601 timestamp with UTC offset
+    structlog.processors.TimeStamper(fmt="iso"),
+    # Render stack info (for logger.exception / exc_info=True)
+    structlog.processors.StackInfoRenderer(),
+]
+
+# Determine active log format from environment (base.py is loaded before
+# production.py overrides DEBUG, so we read DJANGO_ENV directly).
+_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development")
+_IS_PRODUCTION = _DJANGO_ENV == "production"
+
+LOGGING: dict = {
     "version": 1,
     "disable_existing_loggers": False,
+    # ------------------------------------------------------------------ #
+    # Formatters                                                           #
+    # ------------------------------------------------------------------ #
     "formatters": {
+        # JSON — used in staging/production for log aggregators
         "json": {
             "()": structlog.stdlib.ProcessorFormatter,
-            "processor": structlog.processors.JSONRenderer(),
+            "processors": [
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.processors.dict_tracebacks,
+                structlog.processors.JSONRenderer(),
+            ],
+            "foreign_pre_chain": _STRUCTLOG_PRE_CHAIN,
         },
+        # Console — coloured human-readable (development only)
         "console": {
             "()": structlog.stdlib.ProcessorFormatter,
-            "processor": structlog.dev.ConsoleRenderer(),
+            "processors": [
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.dev.ConsoleRenderer(colors=True, sort_keys=False),
+            ],
+            "foreign_pre_chain": _STRUCTLOG_PRE_CHAIN,
         },
     },
+    # ------------------------------------------------------------------ #
+    # Filters                                                              #
+    # ------------------------------------------------------------------ #
+    "filters": {
+        "suppress_health_checks": {
+            "()": "common.logging.HealthCheckFilter",
+        },
+        "require_debug_true": {
+            "()": "django.utils.log.RequireDebugTrue",
+        },
+    },
+    # ------------------------------------------------------------------ #
+    # Handlers                                                             #
+    # ------------------------------------------------------------------ #
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "formatter": "console",
+            # Production uses JSON; development.py switches this to "console"
+            "formatter": "json" if _IS_PRODUCTION else "console",
+            "filters": ["suppress_health_checks"],
         },
     },
+    # ------------------------------------------------------------------ #
+    # Root logger (catch-all for unregistered loggers)                    #
+    # ------------------------------------------------------------------ #
     "root": {
         "handlers": ["console"],
-        "level": "INFO",
+        "level": "WARNING",
     },
+    # ------------------------------------------------------------------ #
+    # Per-logger configuration                                             #
+    # ------------------------------------------------------------------ #
     "loggers": {
+        # Django internals — INFO and above
         "django": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,
         },
+        # DB query log — WARNING by default; set to DEBUG to capture all queries
+        # (SlowQueryFilter in development.py limits output to slow queries only)
+        "django.db.backends": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        # Django security framework warnings
+        "django.security": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        # Application code
         "apps": {
             "handlers": ["console"],
             "level": "DEBUG",
             "propagate": False,
         },
+        "common": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        # Celery workers and beat
+        "celery": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "celery.task": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        # Third-party HTTP clients — suppress verbose connection-level logs
+        "httpx": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "httpcore": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "urllib3": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
     },
 }
 
+# ---------------------------------------------------------------------------
+# structlog global configuration
+#
+# The processor chain here applies to *structlog-native* log calls
+# (logger.info(), logger.error(), etc.).  The final processor
+# `wrap_for_formatter` hands the event dict off to ProcessorFormatter,
+# which applies the renderer (JSONRenderer or ConsoleRenderer).
+# ---------------------------------------------------------------------------
 structlog.configure(
     processors=[
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
+        *_STRUCTLOG_PRE_CHAIN,
         structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
+        structlog.processors.ExceptionRenderer(),
         structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
     ],
     logger_factory=structlog.stdlib.LoggerFactory(),
