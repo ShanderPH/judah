@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
-import pytz
 from django.utils import timezone
 
 from apps.support.agent_sync_service import (
@@ -49,7 +49,7 @@ class TestBusinessHoursLogic:
         """Test business hours detection for various days and times."""
         # Create a datetime with the specified weekday and hour
         # January 2024: 1=Monday, 6=Saturday, 7=Sunday
-        base_date = datetime(2024, 1, 1, hour, 0, 0, tzinfo=pytz.timezone("America/Sao_Paulo"))
+        base_date = datetime(2024, 1, 1, hour, 0, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
         # Adjust to the target weekday
         days_diff = weekday - base_date.weekday()
         target_date = base_date + timezone.timedelta(days=days_diff)
