@@ -172,15 +172,30 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_aggregate_queue_metrics",
         "schedule": crontab(hour=0, minute=5),
     },
-    # Poll HubSpot agent availability every 3 minutes
-    "poll-hubspot-agent-status": {
-        "task": "support.task_poll_hubspot_agent_status",
-        "schedule": 180,  # seconds
+    # SAT heartbeat — sync agent availability every 20 seconds (skips off-hours)
+    "sat-heartbeat": {
+        "task": "support.task_sat_heartbeat",
+        "schedule": 20,  # seconds
+    },
+    # SAT daily counter reset at midnight
+    "sat-reset-daily-counters": {
+        "task": "support.task_sat_reset_daily_counters",
+        "schedule": crontab(hour=0, minute=1),
+    },
+    # Matchmaker safety net — drain pending queue every 60 seconds
+    "matchmaker-drain-queue": {
+        "task": "support.task_matchmaker_drain_queue",
+        "schedule": 60,  # seconds
     },
     # Sync NOVO-stage tickets from HubSpot daily at 08:00 AM (São Paulo)
     "sync-novo-stage-tickets-daily": {
         "task": "support.task_sync_novo_stage_tickets",
         "schedule": crontab(hour=8, minute=0),
+    },
+    # Aggregate per-agent metrics daily at 00:10 AM (São Paulo)
+    "aggregate-agent-metrics-daily": {
+        "task": "support.task_aggregate_agent_metrics",
+        "schedule": crontab(hour=0, minute=10),
     },
 }
 

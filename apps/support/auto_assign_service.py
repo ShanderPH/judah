@@ -26,7 +26,6 @@ from django.utils import timezone
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.support.models import (
     Agent,
-    AgentStatusHistory,
     AssignedConversation,
     AssignmentLog,
     ClosedConversation,
@@ -159,17 +158,9 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
-    # Sync all agents' status and conversation counts before assignment
-    # This ensures we have the most up-to-date availability data
-    try:
-        sync_all_agents_status_and_counts()
-    except Exception as sync_exc:
-        logger.warning(
-            "auto_assign_pre_sync_failed",
-            ticket_id=new_conv.hubspot_ticket_id,
-            error=str(sync_exc),
-        )
-        # Continue with assignment even if sync fails — use cached data
+    # Agent status is kept fresh by the SAT heartbeat (20-second polling).
+    # Load reconciliation is done per-agent by the Matchmaker before assignment.
+    # No batch sync needed here.
 
     # Select next agent (Rule 1-4)
     last_owner_id = get_last_assigned_owner_id()
@@ -330,6 +321,17 @@ def handle_ticket_closed(
         delta = closed_at - assigned.assigned_at
         handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
 
+    # Compute resolution time (wait + handle = total lifecycle)
+    resolution_time: Decimal | None = None
+    if assigned.entered_queue_at:
+        total_delta = closed_at - assigned.entered_queue_at
+        resolution_time = Decimal(str(round(total_delta.total_seconds() / 60, 2)))
+
+    # Determine closure source
+    closure_source = "agent"
+    if closing_owner and assigned.agent and closing_owner != assigned.hubspot_owner_id:
+        closure_source = "system"  # Closed by someone other than assigned agent
+
     # Decrement the assigned agent's chat count
     decrement_target = closing_agent_obj or assigned.agent
     if decrement_target:
@@ -353,6 +355,8 @@ def handle_ticket_closed(
                 "closed_by_agent_name": closing_agent_name,
                 "queue_wait_seconds": assigned.queue_wait_seconds,
                 "total_handle_time_minutes": handle_time,
+                "resolution_time_minutes": resolution_time,
+                "closure_source": closure_source,
                 "contact_name": assigned.contact_name,
                 "contact_email": assigned.contact_email,
                 "priority": assigned.priority,
@@ -550,124 +554,3 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
 
     logger.info("auto_assign_team_sync_complete", team_id=team_id, created=created_count)
     return created_count
-
-
-def sync_all_agents_status_and_counts() -> dict:
-    """Sync all helpdesk agents' status and conversation counts from HubSpot.
-
-    This function performs a parallel sync of:
-    1. Agent availability status (online/away) from HubSpot Users API
-    2. Active conversation count per agent from HubSpot Tickets Search API
-
-    The sync is optimized to run before each assignment to ensure accurate
-    availability data, minimizing the risk of assigning to unavailable agents.
-
-    Returns:
-        Dict with ``agents_synced``, ``status_changes``, ``count_corrections`` keys.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    client = get_hubspot_client()
-
-    # Get all active agents from local DB
-    agents = list(Agent.objects.filter(is_active=True).exclude(hubspot_owner_id__isnull=True))
-    if not agents:
-        logger.debug("sync_all_agents_no_active_agents")
-        return {"agents_synced": 0, "status_changes": 0, "count_corrections": 0}
-
-    # Fetch availability status for all users in one call
-    try:
-        availability_data = client.get_all_owners_availability()
-        availability_map = {
-            item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
-        }
-    except Exception as exc:
-        logger.warning("sync_all_agents_availability_fetch_failed", error=str(exc))
-        availability_map = {}
-
-    # Fetch conversation counts in parallel for each agent
-    count_map: dict[int, int] = {}
-
-    def fetch_count(agent: Agent) -> tuple[int, int]:
-        count = client.count_active_tickets_by_owner(agent.hubspot_owner_id)
-        return (agent.hubspot_owner_id, count)
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_count, agent): agent for agent in agents}
-        for future in as_completed(futures):
-            try:
-                owner_id, count = future.result()
-                if count >= 0:  # -1 indicates error
-                    count_map[owner_id] = count
-            except Exception as exc:
-                agent = futures[future]
-                logger.warning(
-                    "sync_agent_count_fetch_error",
-                    agent=agent.name,
-                    error=str(exc),
-                )
-
-    # Apply updates to agents
-    status_changes = 0
-    count_corrections = 0
-    now = timezone.now()
-
-    for agent in agents:
-        updates = []
-        email_lower = (agent.agent_email or "").lower()
-
-        # Update status from availability map
-        if email_lower in availability_map:
-            new_status = availability_map[email_lower]
-            if agent.status_enum != new_status:
-                old_status = agent.status_enum
-                agent.status_enum = new_status
-                updates.append("status_enum")
-                status_changes += 1
-
-                # Log status change
-                AgentStatusHistory.objects.create(
-                    agent=agent,
-                    old_status=old_status,
-                    new_status=new_status,
-                    sync_source="pre_assignment_sync",
-                )
-                logger.info(
-                    "sync_agent_status_updated",
-                    agent=agent.name,
-                    old_status=old_status,
-                    new_status=new_status,
-                )
-
-        # Update conversation count from HubSpot
-        if agent.hubspot_owner_id in count_map:
-            hubspot_count = count_map[agent.hubspot_owner_id]
-            if agent.current_simultaneous_chats != hubspot_count:
-                old_count = agent.current_simultaneous_chats
-                agent.current_simultaneous_chats = hubspot_count
-                updates.append("current_simultaneous_chats")
-                count_corrections += 1
-                logger.info(
-                    "sync_agent_count_corrected",
-                    agent=agent.name,
-                    old_count=old_count,
-                    new_count=hubspot_count,
-                )
-
-        if updates:
-            agent.updated_at = now
-            updates.append("updated_at")
-            agent.save(update_fields=updates)
-
-    logger.info(
-        "sync_all_agents_complete",
-        agents_synced=len(agents),
-        status_changes=status_changes,
-        count_corrections=count_corrections,
-    )
-
-    return {
-        "agents_synced": len(agents),
-        "status_changes": status_changes,
-        "count_corrections": count_corrections,
-    }

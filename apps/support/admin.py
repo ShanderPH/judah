@@ -2,7 +2,15 @@
 
 from django.contrib import admin
 
-from apps.support.models import Agent, AgentMetrics, AgentStatusHistory, Queue, Ticket, TicketJiraAssociation
+from apps.support.models import (
+    Agent,
+    AgentDailyTimeLog,
+    AgentMetrics,
+    AgentStatusHistory,
+    Queue,
+    Ticket,
+    TicketJiraAssociation,
+)
 
 
 @admin.register(Queue)
@@ -21,10 +29,19 @@ class TicketAdmin(admin.ModelAdmin):
 
 @admin.register(Agent)
 class AgentAdmin(admin.ModelAdmin):
-    list_display = ("name", "agent_email", "status_enum", "team", "current_simultaneous_chats", "is_active")
+    list_display = (
+        "name",
+        "agent_email",
+        "status_enum",
+        "team",
+        "current_simultaneous_chats",
+        "total_assignments",
+        "sat_last_heartbeat_at",
+        "is_active",
+    )
     list_filter = ("status_enum", "team", "is_active")
     search_fields = ("name", "agent_email", "team")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "sat_last_heartbeat_at", "sat_last_count_sync_at")
 
 
 @admin.register(AgentStatusHistory)
@@ -46,3 +63,11 @@ class TicketJiraAssociationAdmin(admin.ModelAdmin):
     list_display = ("ticket", "jira_issue_id", "association_active", "linked_at")
     list_filter = ("association_active",)
     readonly_fields = ("linked_at",)
+
+
+@admin.register(AgentDailyTimeLog)
+class AgentDailyTimeLogAdmin(admin.ModelAdmin):
+    list_display = ("agent", "log_date", "online_time_seconds", "away_time_seconds", "status_transitions")
+    list_filter = ("log_date",)
+    search_fields = ("agent__name",)
+    readonly_fields = ("created_at", "updated_at")
