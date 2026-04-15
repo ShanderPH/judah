@@ -441,6 +441,9 @@ class HubSpotClient:
         default 100-record limit. Portals with >100 users would silently miss
         agents on page 2+ without pagination.
 
+        Results are cached in Redis for 15 seconds to avoid redundant API calls
+        when the SAT heartbeat and Matchmaker drain overlap.
+
         Returns:
             List of dicts with ``user_id``, ``email``, ``availability_status``,
             ``status_enum`` keys.
@@ -449,6 +452,15 @@ class HubSpotClient:
             ExternalServiceError: On API failure.
         """
         import requests
+        from django.core.cache import cache
+
+        # Check cache first — avoids redundant API calls within the same
+        # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
+        cache_key = "hubspot_owners_availability"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
+            return cached
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -492,6 +504,10 @@ class HubSpotClient:
                 after = (paging.get("next") or {}).get("after")
                 if not after:
                     break
+
+            # Cache for 15 seconds — shorter than the 20-second heartbeat interval
+            # to ensure fresh data on the next cycle.
+            cache.set(cache_key, result, timeout=15)
 
             logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
             return result

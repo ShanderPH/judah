@@ -75,10 +75,21 @@ def sat_heartbeat() -> dict:
         item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
     }
 
-    # Get all active agents
+    # Get all active agents — only fetch fields needed for heartbeat logic
     agents = list(
         Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
         .exclude(hubspot_owner_id__isnull=True)
+        .only(
+            "id",
+            "name",
+            "agent_email",
+            "status_enum",
+            "sat_last_heartbeat_at",
+            "last_status_change_at",
+            "online_time_seconds_today",
+            "away_time_seconds_today",
+            "updated_at",
+        )
         .order_by("id")
     )
 
@@ -91,9 +102,7 @@ def sat_heartbeat() -> dict:
     # updates. If their webhook email doesn't match agent_email in the DB, their
     # status can get stuck.
     unmatched_emails = [
-        (a.agent_email or "N/A")
-        for a in agents
-        if (a.agent_email or "").lower() not in availability_map
+        (a.agent_email or "N/A") for a in agents if (a.agent_email or "").lower() not in availability_map
     ]
     if unmatched_emails:
         logger.warning(
@@ -108,6 +117,11 @@ def sat_heartbeat() -> dict:
             ),
         )
 
+    # Separate agents into heartbeat-only (no status change) and status-changed
+    # so we can bulk_update the common case and individual-save only the exceptions.
+    heartbeat_only_agents: list[Agent] = []
+    status_history_rows: list[AgentStatusHistory] = []
+
     for agent in agents:
         email_lower = (agent.agent_email or "").lower()
         if email_lower not in availability_map:
@@ -117,7 +131,6 @@ def sat_heartbeat() -> dict:
         old_status = agent.status_enum
 
         # Always update heartbeat timestamp
-        update_fields = ["sat_last_heartbeat_at", "updated_at"]
         agent.sat_last_heartbeat_at = now
         agent.updated_at = now
 
@@ -127,20 +140,26 @@ def sat_heartbeat() -> dict:
 
             agent.status_enum = new_status
             agent.last_status_change_at = now
-            update_fields.extend(
-                [
+
+            status_history_rows.append(
+                AgentStatusHistory(
+                    agent=agent,
+                    old_status=old_status,
+                    new_status=new_status,
+                    sync_source="sat_heartbeat",
+                )
+            )
+
+            # Status-changed agents need extra fields saved
+            agent.save(
+                update_fields=[
+                    "sat_last_heartbeat_at",
+                    "updated_at",
                     "status_enum",
                     "last_status_change_at",
                     "online_time_seconds_today",
                     "away_time_seconds_today",
                 ]
-            )
-
-            AgentStatusHistory.objects.create(
-                agent=agent,
-                old_status=old_status,
-                new_status=new_status,
-                sync_source="sat_heartbeat",
             )
 
             status_changes += 1
@@ -153,8 +172,20 @@ def sat_heartbeat() -> dict:
                 old_status=old_status,
                 new_status=new_status,
             )
+        else:
+            heartbeat_only_agents.append(agent)
 
-        agent.save(update_fields=update_fields)
+    # Bulk update heartbeat-only agents in a single query instead of N individual saves
+    if heartbeat_only_agents:
+        Agent.objects.bulk_update(
+            heartbeat_only_agents,
+            ["sat_last_heartbeat_at", "updated_at"],
+            batch_size=50,
+        )
+
+    # Bulk create status history rows
+    if status_history_rows:
+        AgentStatusHistory.objects.bulk_create(status_history_rows)
 
     # If any agent came online, trigger Matchmaker to drain pending queue
     # Use a Redis guard to avoid thundering herd when multiple agents come
@@ -174,17 +205,14 @@ def sat_heartbeat() -> dict:
         except Exception as exc:
             logger.warning("sat_matchmaker_dispatch_failed", error=str(exc))
 
-    # Log a concise heartbeat summary
+    # Log a concise heartbeat summary — only query pending count when
+    # there were status changes (avoids a DB round-trip every 20 seconds).
     online_count = sum(1 for a in agents if a.status_enum == "online")
-    pending_count = 0
-    try:
+
+    if status_changes > 0:
         from apps.support.models import NewConversation
 
         pending_count = NewConversation.objects.count()
-    except Exception:
-        pass
-
-    if status_changes > 0 or pending_count > 0:
         logger.info(
             "sat_heartbeat_done",
             agents_checked=len(agents),
@@ -370,10 +398,20 @@ def sat_reset_daily_counters() -> dict:
     now = timezone.now()
 
     agents = list(
-        Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True)).exclude(hubspot_owner_id__isnull=True)
+        Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
+        .exclude(hubspot_owner_id__isnull=True)
+        .only(
+            "id",
+            "name",
+            "status_enum",
+            "last_status_change_at",
+            "online_time_seconds_today",
+            "away_time_seconds_today",
+        )
     )
 
-    reset_count = 0
+    # Collect daily log snapshots for bulk upsert
+    daily_log_snapshots: list[tuple[Agent, int, int]] = []
 
     for agent in agents:
         # Flush any pending time for the current status before reset
@@ -385,30 +423,33 @@ def sat_reset_daily_counters() -> dict:
                 else:
                     agent.away_time_seconds_today += delta_seconds
 
-        # Snapshot to daily log (for yesterday, since we run at 00:01)
+        # Collect snapshot data for batch upsert
         if agent.online_time_seconds_today > 0 or agent.away_time_seconds_today > 0:
-            AgentDailyTimeLog.objects.update_or_create(
-                agent=agent,
-                log_date=yesterday,
-                defaults={
-                    "online_time_seconds": agent.online_time_seconds_today,
-                    "away_time_seconds": agent.away_time_seconds_today,
-                },
-            )
+            daily_log_snapshots.append((agent, agent.online_time_seconds_today, agent.away_time_seconds_today))
 
         # Reset counters and anchor time
         agent.online_time_seconds_today = 0
         agent.away_time_seconds_today = 0
         agent.last_status_change_at = now
-        agent.save(
-            update_fields=[
-                "online_time_seconds_today",
-                "away_time_seconds_today",
-                "last_status_change_at",
-                "updated_at",
-            ]
-        )
-        reset_count += 1
 
-    logger.info("sat_daily_counters_reset", agents_reset=reset_count, snapshot_date=str(yesterday))
-    return {"agents_reset": reset_count}
+    # Batch upsert daily log snapshots
+    for agent_ref, online_s, away_s in daily_log_snapshots:
+        AgentDailyTimeLog.objects.update_or_create(
+            agent=agent_ref,
+            log_date=yesterday,
+            defaults={
+                "online_time_seconds": online_s,
+                "away_time_seconds": away_s,
+            },
+        )
+
+    # Bulk update all agents in one query instead of N individual saves
+    if agents:
+        Agent.objects.bulk_update(
+            agents,
+            ["online_time_seconds_today", "away_time_seconds_today", "last_status_change_at"],
+            batch_size=50,
+        )
+
+    logger.info("sat_daily_counters_reset", agents_reset=len(agents), snapshot_date=str(yesterday))
+    return {"agents_reset": len(agents)}

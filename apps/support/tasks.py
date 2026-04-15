@@ -543,19 +543,37 @@ def task_reconcile_agent_counts() -> dict:
     from apps.support.models import Agent
 
     client = get_hubspot_client()
-    agents = list(Agent.objects.filter(is_active=True).exclude(hubspot_owner_id__isnull=True).order_by("id"))
+    agents = list(
+        Agent.objects.filter(is_active=True)
+        .exclude(hubspot_owner_id__isnull=True)
+        .only("id", "name", "hubspot_owner_id", "current_simultaneous_chats")
+        .order_by("id")
+    )
+
+    # Parallelize HubSpot API calls (one per agent)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    count_map: dict[int, int] = {}
+
+    def _fetch_count(owner_id: int) -> tuple[int, int]:
+        try:
+            return (owner_id, client.count_active_tickets_by_owner(owner_id))
+        except Exception:
+            return (owner_id, -1)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_fetch_count, a.hubspot_owner_id): a for a in agents}
+        for future in as_completed(futures):
+            owner_id, count = future.result()
+            if count >= 0:
+                count_map[owner_id] = count
 
     corrections = 0
     now = timezone.now()
 
     for agent in agents:
-        try:
-            hubspot_count = client.count_active_tickets_by_owner(agent.hubspot_owner_id)
-        except Exception as exc:
-            logger.warning("reconcile_count_fetch_failed", agent=agent.name, error=str(exc))
-            continue
-
-        if hubspot_count < 0:
+        hubspot_count = count_map.get(agent.hubspot_owner_id)
+        if hubspot_count is None:
             continue
 
         if agent.current_simultaneous_chats != hubspot_count:
@@ -689,18 +707,15 @@ def task_aggregate_agent_metrics() -> dict:
     skipped = 0
 
     for agent in agents:
-        closed_qs = ClosedConversation.objects.filter(agent=agent)
-        total_chats = closed_qs.count()
-
-        handle_agg = closed_qs.filter(total_handle_time_minutes__isnull=False).aggregate(
-            avg=Avg("total_handle_time_minutes"),
+        # Combine count + aggregates into a single query
+        closed_agg = ClosedConversation.objects.filter(agent=agent).aggregate(
+            total_chats=Count("id"),
+            avg_handle=Avg("total_handle_time_minutes"),
+            avg_wait=Avg("queue_wait_seconds"),
         )
-        avg_handle = float(handle_agg.get("avg") or 0.0)
-
-        wait_agg = closed_qs.filter(queue_wait_seconds__isnull=False).aggregate(
-            avg=Avg("queue_wait_seconds"),
-        )
-        avg_wait_min = float(wait_agg.get("avg") or 0.0) / 60.0
+        total_chats = closed_agg["total_chats"]
+        avg_handle = float(closed_agg["avg_handle"] or 0.0)
+        avg_wait_min = float(closed_agg["avg_wait"] or 0.0) / 60.0
 
         total_auto = AssignmentLog.objects.filter(
             agent=agent,
@@ -708,19 +723,16 @@ def task_aggregate_agent_metrics() -> dict:
         ).count()
 
         # Compute average online/away time from daily logs (last 30 days)
-        time_logs = AgentDailyTimeLog.objects.filter(
+        # aggregate() returns None for empty querysets — no need for exists() guard
+        time_agg = AgentDailyTimeLog.objects.filter(
             agent=agent,
             log_date__gte=yesterday - timedelta(days=30),
+        ).aggregate(
+            avg_online=Avg("online_time_seconds"),
+            avg_away=Avg("away_time_seconds"),
         )
-        avg_online = 0.0
-        avg_away = 0.0
-        if time_logs.exists():
-            time_agg = time_logs.aggregate(
-                avg_online=Avg("online_time_seconds"),
-                avg_away=Avg("away_time_seconds"),
-            )
-            avg_online = float(time_agg.get("avg_online") or 0.0)
-            avg_away = float(time_agg.get("avg_away") or 0.0)
+        avg_online = float(time_agg.get("avg_online") or 0.0)
+        avg_away = float(time_agg.get("avg_away") or 0.0)
 
         _, upserted = AgentMetrics.objects.update_or_create(
             agent_id=agent.hubspot_owner_id,

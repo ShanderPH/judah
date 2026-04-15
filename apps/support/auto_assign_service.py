@@ -67,7 +67,7 @@ def _safe_parse_owner_id(value: str | int | None) -> int | None:
 
     try:
         return int(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -78,7 +78,7 @@ def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     try:
         ms = int(value)
         return datetime.fromtimestamp(ms / 1000, tz=UTC)
-    except (ValueError, TypeError, OSError):
+    except ValueError, TypeError, OSError:
         return None
 
 
@@ -493,6 +493,19 @@ def sync_novo_stage_tickets() -> dict:
     skipped = 0
     already_assigned = 0
 
+    # Pre-fetch existing ticket IDs to avoid N+1 queries in the loop
+    ticket_ids_from_hubspot = {str(t["id"]) for t in tickets}
+    existing_pending = set(
+        NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
+    )
+    existing_assigned = set(
+        AssignedConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
+    )
+
     for ticket in tickets:
         ticket_id = str(ticket["id"])
 
@@ -500,17 +513,16 @@ def sync_novo_stage_tickets() -> dict:
         # "new and unassigned" regardless of their pipeline stage.
         owner_id = ticket.get("owner_id", "")
         if owner_id and str(owner_id).strip() not in ("", "None", "null"):
-            logger.debug("sync_novo_ticket_has_owner_skipped", ticket_id=ticket_id, owner_id=owner_id)
             skipped += 1
             continue
 
         # Skip tickets already in our queue (pending)
-        if NewConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
+        if ticket_id in existing_pending:
             skipped += 1
             continue
 
         # Skip tickets already assigned
-        if AssignedConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
+        if ticket_id in existing_assigned:
             already_assigned += 1
             continue
 
@@ -531,7 +543,6 @@ def sync_novo_stage_tickets() -> dict:
             ticket_id=ticket_id,
             subject=(ticket.get("subject") or "")[:80],
             contact=ticket.get("contact_name") or "",
-            queue_position=NewConversation.objects.count(),
         )
 
     logger.info(
