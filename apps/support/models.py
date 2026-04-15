@@ -66,6 +66,10 @@ class Agent(models.Model):
     class Meta:
         db_table = "agents"
         ordering = ["name"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["status_enum", "auto_assign_enabled"], name="idx_agent_eligible"),
+            models.Index(fields=["hubspot_owner_id"], name="idx_agent_hubspot_owner"),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -379,6 +383,9 @@ class AssignmentLog(models.Model):
     class Meta:
         db_table = "assignment_logs"
         ordering = ["-assigned_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["assignment_type", "-assigned_at"], name="idx_alog_type_assigned_desc"),
+        ]
 
     def __str__(self) -> str:
         return f"AssignmentLog ticket={self.ticket_id} → {self.agent_name}"
