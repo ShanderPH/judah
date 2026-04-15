@@ -107,15 +107,20 @@ def select_next_agent(last_assigned_hubspot_owner_id: int | None = None) -> Agen
 def increment_agent_chat_count(agent: Agent) -> None:
     """Atomically increment an agent's current simultaneous chat count.
 
+    Uses F() expressions to prevent race conditions when multiple workers
+    try to increment the same agent's count simultaneously.
+
     Args:
         agent: The Agent instance to update.
     """
+    from django.db.models import F
+
+    now = timezone.now()
     Agent.objects.filter(pk=agent.pk).update(
-        current_simultaneous_chats=agent.current_simultaneous_chats + 1,
-        last_assignment_at=timezone.now(),
-        updated_at=timezone.now(),
+        current_simultaneous_chats=F("current_simultaneous_chats") + 1,
+        last_assignment_at=now,
+        updated_at=now,
     )
-    # Refresh in-memory object
     agent.refresh_from_db()
     logger.debug(
         "queue_agent_chat_count_incremented",
@@ -127,13 +132,17 @@ def increment_agent_chat_count(agent: Agent) -> None:
 def decrement_agent_chat_count(agent: Agent) -> None:
     """Atomically decrement an agent's current simultaneous chat count (min 0).
 
-    Called when a conversation is closed.
+    Uses Greatest() to ensure the count never goes below zero, even under
+    concurrent updates.
 
     Args:
         agent: The Agent instance to update.
     """
+    from django.db.models import F, Value
+    from django.db.models.functions import Greatest
+
     Agent.objects.filter(pk=agent.pk).update(
-        current_simultaneous_chats=max(0, agent.current_simultaneous_chats - 1),
+        current_simultaneous_chats=Greatest(F("current_simultaneous_chats") - 1, Value(0)),
         updated_at=timezone.now(),
     )
     agent.refresh_from_db()

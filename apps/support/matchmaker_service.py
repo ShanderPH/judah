@@ -42,20 +42,36 @@ logger = structlog.get_logger(__name__)
 def matchmaker_assign_next() -> bool:
     """Attempt to assign the oldest pending NewConversation to the best agent.
 
-    Uses ``select_for_update(skip_locked=True)`` to safely handle concurrent
-    workers.  Before assignment, reconciles the candidate agent's load with
-    HubSpot via the SAT service.
+    Uses a Redis lock per ticket to prevent two workers from processing the
+    same ticket simultaneously.  Before assignment, reconciles the candidate
+    agent's load with HubSpot via the SAT service.
 
     Returns:
         True if a ticket was assigned, False if no ticket or no agent available.
     """
-    # Lock the oldest pending conversation (skip if another worker has it)
+    from django.core.cache import cache
+
+    # Pick the oldest pending conversation using select_for_update
     with transaction.atomic():
         new_conv = NewConversation.objects.select_for_update(skip_locked=True).order_by("entered_queue_at").first()
-
         if new_conv is None:
             return False
 
+        # Claim this ticket with a Redis lock to prevent double-processing
+        # after the DB lock is released
+        claim_key = f"matchmaker_claim:{new_conv.hubspot_ticket_id}"
+        if not cache.add(claim_key, "1", timeout=60):
+            logger.debug("matchmaker_ticket_already_claimed", ticket_id=new_conv.hubspot_ticket_id)
+            return False
+
+    try:
+        return _do_assign(new_conv)
+    finally:
+        cache.delete(claim_key)
+
+
+def _do_assign(new_conv: NewConversation) -> bool:
+    """Internal: perform the actual assignment after claiming a ticket."""
     # Select next agent via the 4-rule algorithm
     last_owner_id = get_last_assigned_owner_id()
     agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
@@ -157,12 +173,18 @@ def matchmaker_assign_next() -> bool:
             total_assignments=agent.total_assignments + 1,
         )
 
+    # Log remaining queue depth after assignment
+    remaining = NewConversation.objects.count()
+
     logger.info(
         "matchmaker_assigned",
         ticket_id=new_conv.hubspot_ticket_id,
         agent=agent.name,
         hubspot_owner_id=agent.hubspot_owner_id,
         queue_wait_seconds=float(wait_seconds) if wait_seconds else None,
+        agent_current_chats=agent.current_simultaneous_chats,
+        agent_max_chats=agent.max_simultaneous_chats,
+        remaining_in_queue=remaining,
     )
     return True
 
@@ -189,10 +211,15 @@ def matchmaker_drain_queue() -> dict:
         return {"assigned": 0, "remaining": total_pending, "total_pending": total_pending}
 
     assigned = 0
+    max_iterations = total_pending + 5  # Safety cap to prevent infinite loops
 
-    while True:
+    logger.info("matchmaker_drain_started", total_pending=total_pending)
+
+    while assigned < max_iterations:
         # Re-check eligibility before each attempt
-        if not get_eligible_agents():
+        eligible = get_eligible_agents()
+        if not eligible:
+            logger.info("matchmaker_drain_no_eligible_agents", assigned_so_far=assigned)
             break
 
         success = matchmaker_assign_next()
@@ -208,6 +235,7 @@ def matchmaker_drain_queue() -> dict:
         total_pending=total_pending,
         assigned=assigned,
         remaining=remaining,
+        eligible_agents_at_end=len(get_eligible_agents()),
     )
     return {"assigned": assigned, "remaining": remaining, "total_pending": total_pending}
 
