@@ -437,6 +437,10 @@ class HubSpotClient:
           - ``"available"`` → mapped to ``"online"``
           - ``"away"`` / anything else → mapped to ``"away"``
 
+        Paginates through ALL users using the ``after`` cursor to avoid the
+        default 100-record limit. Portals with >100 users would silently miss
+        agents on page 2+ without pagination.
+
         Returns:
             List of dicts with ``user_id``, ``email``, ``availability_status``,
             ``status_enum`` keys.
@@ -448,32 +452,48 @@ class HubSpotClient:
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
-            response = _circuit_breaker.call(
-                requests.get,
-                "https://api.hubapi.com/crm/v3/objects/users",
-                headers=headers,
-                params={
+            result = []
+            after: str | None = None
+            page = 0
+
+            while True:
+                params: dict = {
                     "limit": 100,
                     "properties": "hs_email,hs_availability_status",
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
+                }
+                if after:
+                    params["after"] = after
 
-            result = []
-            for user in data.get("results", []):
-                props = user.get("properties") or {}
-                availability = props.get("hs_availability_status") or "available"
-                result.append(
-                    {
-                        "user_id": user.get("id"),
-                        "email": props.get("hs_email", ""),
-                        "availability_status": availability,
-                        "status_enum": "online" if availability == "available" else "away",
-                    }
+                response = _circuit_breaker.call(
+                    requests.get,
+                    "https://api.hubapi.com/crm/v3/objects/users",
+                    headers=headers,
+                    params=params,
+                    timeout=10,
                 )
-            logger.info("hubspot_owners_availability_fetched", count=len(result))
+                response.raise_for_status()
+                data = response.json()
+                page += 1
+
+                for user in data.get("results", []):
+                    props = user.get("properties") or {}
+                    availability = props.get("hs_availability_status") or "available"
+                    result.append(
+                        {
+                            "user_id": user.get("id"),
+                            "email": props.get("hs_email", ""),
+                            "availability_status": availability,
+                            "status_enum": "online" if availability == "available" else "away",
+                        }
+                    )
+
+                # Follow pagination cursor; stop when no next page
+                paging = data.get("paging") or {}
+                after = (paging.get("next") or {}).get("after")
+                if not after:
+                    break
+
+            logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
             return result
         except Exception as exc:
             logger.error("hubspot_get_owners_availability_failed", error=str(exc))

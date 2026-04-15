@@ -38,14 +38,6 @@ def handle_hubspot_event(event) -> None:
         _handle_ticket_event(event_type, payload)
     elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
-    elif et_lower == "object.propertychange":
-        # crmObjects-style subscriptions send subscriptionType="object.propertyChange"
-        # with an objectType field instead of the legacy "contact.propertyChange" prefix.
-        object_type = (payload.get("objectType") or "").upper()
-        if object_type == "CONTACT":
-            _handle_contact_event("contact.propertyChange", payload)
-        else:
-            logger.debug("hubspot_crm_object_event_unhandled", event_type=event_type, object_type=object_type)
     elif et_lower.startswith("conversation."):
         _handle_conversation_event(event_type, payload)
     elif et_lower.startswith(("deal.", "company.")):
