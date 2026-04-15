@@ -8,11 +8,14 @@ from ninja import Router
 
 from apps.support.schemas import (
     AssignedConversationResponse,
+    BusinessHoursResponse,
+    CreateSpecialScheduleRequest,
     CreateTicketRequest,
     NewConversationResponse,
     QueueHealthResponse,
     QueueMetricsResponse,
     QueueStatusResponse,
+    SpecialScheduleResponse,
     SyncNovoResponse,
     TicketListResponse,
     TicketResponse,
@@ -279,3 +282,134 @@ def list_queue_metrics(
 
     cutoff = timezone.localdate() - timedelta(days=min(days, 365))
     return QueuePerformanceMetrics.objects.filter(metric_date__gte=cutoff).order_by("-metric_date")
+
+
+# ---------------------------------------------------------------------------
+# Business hours management endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/business-hours/",
+    response=BusinessHoursResponse,
+    summary="Get current business hours configuration",
+    auth=None,
+)
+def get_business_hours(request) -> dict:
+    """Return the current business hours configuration, including whether
+    it is currently within business hours."""
+    from apps.support.agent_sync_service import is_business_hours
+    from apps.support.models import BusinessHoursConfig
+
+    config = BusinessHoursConfig.objects.filter(is_active=True).first()
+
+    if config:
+
+        def _fmt(start: int, end: int) -> str:
+            return f"{start:02d}:00-{end:02d}:00"
+
+        return {
+            "name": config.name,
+            "is_active": True,
+            "monday": _fmt(config.monday_start, config.monday_end),
+            "tuesday": _fmt(config.tuesday_start, config.tuesday_end),
+            "wednesday": _fmt(config.wednesday_start, config.wednesday_end),
+            "thursday": _fmt(config.thursday_start, config.thursday_end),
+            "friday": _fmt(config.friday_start, config.friday_end),
+            "saturday": _fmt(config.saturday_start, config.saturday_end),
+            "sunday": _fmt(config.sunday_start, config.sunday_end),
+            "timezone_name": config.timezone_name,
+            "is_currently_business_hours": is_business_hours(),
+        }
+
+    # Return defaults
+    return {
+        "name": "default (hardcoded)",
+        "is_active": True,
+        "monday": "09:00-18:00",
+        "tuesday": "09:00-18:00",
+        "wednesday": "09:00-18:00",
+        "thursday": "09:00-18:00",
+        "friday": "09:00-18:00",
+        "saturday": "09:00-13:00",
+        "sunday": "08:00-12:00",
+        "timezone_name": "America/Sao_Paulo",
+        "is_currently_business_hours": is_business_hours(),
+    }
+
+
+@router.get(
+    "/special-schedules/",
+    response=list[SpecialScheduleResponse],
+    summary="List special schedule overrides",
+    auth=None,
+)
+def list_special_schedules(request) -> list:
+    """Return all special schedule overrides (holidays, custom hours)."""
+    from apps.support.models import SpecialSchedule
+
+    schedules = SpecialSchedule.objects.order_by("-date")[:50]
+    return [
+        {
+            "id": s.id,
+            "date": str(s.date),
+            "schedule_type": s.schedule_type,
+            "start_hour": s.start_hour,
+            "end_hour": s.end_hour,
+            "reason": s.reason,
+        }
+        for s in schedules
+    ]
+
+
+@router.post(
+    "/special-schedules/",
+    response={201: SpecialScheduleResponse},
+    summary="Create a special schedule override",
+    auth=None,
+)
+def create_special_schedule(request, payload: CreateSpecialScheduleRequest) -> tuple[int, dict]:
+    """Create a special schedule override for a specific date.
+
+    Use ``schedule_type: "closed"`` to mark a date as non-operational.
+    Use ``schedule_type: "custom"`` with ``start_hour`` and ``end_hour``
+    for modified hours.
+    """
+    from datetime import date as date_type
+
+    from apps.support.models import SpecialSchedule
+
+    parts = payload.date.split("-")
+    target_date = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
+
+    schedule, _ = SpecialSchedule.objects.update_or_create(
+        date=target_date,
+        defaults={
+            "schedule_type": payload.schedule_type,
+            "start_hour": payload.start_hour,
+            "end_hour": payload.end_hour,
+            "reason": payload.reason,
+        },
+    )
+    return 201, {
+        "id": schedule.id,
+        "date": str(schedule.date),
+        "schedule_type": schedule.schedule_type,
+        "start_hour": schedule.start_hour,
+        "end_hour": schedule.end_hour,
+        "reason": schedule.reason,
+    }
+
+
+@router.delete(
+    "/special-schedules/{schedule_id}",
+    response={204: None},
+    summary="Delete a special schedule override",
+    auth=None,
+)
+def delete_special_schedule(request, schedule_id: str) -> tuple[int, None]:
+    """Remove a special schedule override."""
+    from apps.support.models import SpecialSchedule
+
+    SpecialSchedule.objects.filter(id=schedule_id).delete()
+    return 204, None

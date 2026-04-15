@@ -135,21 +135,48 @@ def sat_heartbeat() -> dict:
         agent.save(update_fields=update_fields)
 
     # If any agent came online, trigger Matchmaker to drain pending queue
+    # Use a Redis guard to avoid thundering herd when multiple agents come
+    # online in the same heartbeat cycle.
     if agents_came_online > 0:
         try:
+            from django.core.cache import cache
+
             from apps.support.tasks import task_matchmaker_drain_queue
 
-            task_matchmaker_drain_queue.delay()
-            logger.info("sat_triggered_matchmaker_drain", agents_came_online=agents_came_online)
+            drain_guard = "sat_drain_guard"
+            if cache.add(drain_guard, "1", timeout=10):
+                task_matchmaker_drain_queue.delay()
+                logger.info("sat_triggered_matchmaker_drain", agents_came_online=agents_came_online)
+            else:
+                logger.debug("sat_drain_already_dispatched", agents_came_online=agents_came_online)
         except Exception as exc:
             logger.warning("sat_matchmaker_dispatch_failed", error=str(exc))
 
-    logger.info(
-        "sat_heartbeat_done",
-        agents_checked=len(agents),
-        status_changes=status_changes,
-        agents_came_online=agents_came_online,
-    )
+    # Log a concise heartbeat summary
+    online_count = sum(1 for a in agents if a.status_enum == "online")
+    pending_count = 0
+    try:
+        from apps.support.models import NewConversation
+
+        pending_count = NewConversation.objects.count()
+    except Exception:
+        pass
+
+    if status_changes > 0 or pending_count > 0:
+        logger.info(
+            "sat_heartbeat_done",
+            agents_checked=len(agents),
+            agents_online=online_count,
+            status_changes=status_changes,
+            agents_came_online=agents_came_online,
+            pending_queue=pending_count,
+        )
+    else:
+        logger.debug(
+            "sat_heartbeat_done",
+            agents_checked=len(agents),
+            agents_online=online_count,
+        )
 
     return {
         "agents_checked": len(agents),

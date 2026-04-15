@@ -42,6 +42,35 @@ from common.exceptions import ExternalServiceError
 logger = structlog.get_logger(__name__)
 
 
+def _safe_parse_owner_id(value: str | int | None) -> int | None:
+    """Safely extract a numeric HubSpot owner ID from various formats.
+
+    HubSpot webhooks may send owner IDs in different formats:
+      - ``"72733895"`` (plain numeric string)
+      - ``"userId:72733895"`` (prefixed format)
+      - ``"StageCalculatedPropertiesRollup"`` (non-ID property name)
+      - ``None`` or empty string
+
+    Returns:
+        The integer owner ID, or None if the value is not a valid owner ID.
+    """
+    if not value:
+        return None
+
+    raw = str(value).strip()
+    if not raw or raw in ("None", "null"):
+        return None
+
+    # Handle "userId:12345" format
+    if ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+
+    try:
+        return int(raw)
+    except ValueError, TypeError:
+        return None
+
+
 def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     """Parse a HubSpot millisecond-epoch timestamp into a UTC datetime."""
     if not value:
@@ -292,7 +321,7 @@ def handle_ticket_closed(
         logger.info("auto_assign_pending_deleted_on_close", ticket_id=hubspot_ticket_id)
 
     # Resolve closing agent info
-    closing_owner = int(owner_id) if owner_id and str(owner_id).strip() else None
+    closing_owner = _safe_parse_owner_id(owner_id)
     closing_agent_name: str | None = None
     closing_agent_obj: Agent | None = None
 
@@ -441,11 +470,15 @@ def sync_novo_stage_tickets() -> dict:
     queue.  Records that already exist (assigned or pending) are skipped so
     this operation is fully idempotent.
 
-    This is intentionally NOT assigning — it only populates the queue so that
-    tickets are ready to be picked up as soon as an agent comes online.
+    Also checks for tickets already tracked in ``assigned_conversations`` to
+    avoid duplicates across the lifecycle tables.
+
+    After populating the queue, immediately attempts assignment to any agent
+    that is already online.
 
     Returns:
-        Dict with ``created``, ``skipped``, ``total_from_hubspot`` counts.
+        Dict with ``created``, ``skipped``, ``already_assigned``,
+        ``total_from_hubspot`` counts.
     """
     logger.info("sync_novo_stage_tickets_start")
 
@@ -454,10 +487,11 @@ def sync_novo_stage_tickets() -> dict:
         tickets = client.search_tickets_in_novo_stage()
     except ExternalServiceError as exc:
         logger.error("sync_novo_stage_tickets_hubspot_fetch_failed", error=str(exc))
-        return {"created": 0, "skipped": 0, "total_from_hubspot": 0, "error": str(exc)}
+        return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0, "error": str(exc)}
 
     created = 0
     skipped = 0
+    already_assigned = 0
 
     for ticket in tickets:
         ticket_id = str(ticket["id"])
@@ -470,9 +504,14 @@ def sync_novo_stage_tickets() -> dict:
             skipped += 1
             continue
 
-        # Skip tickets already in our queue (pending or already assigned)
+        # Skip tickets already in our queue (pending)
         if NewConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
             skipped += 1
+            continue
+
+        # Skip tickets already assigned
+        if AssignedConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
+            already_assigned += 1
             continue
 
         entered_at = _parse_hubspot_timestamp(ticket.get("entered_novo_at")) or timezone.now()
@@ -487,22 +526,39 @@ def sync_novo_stage_tickets() -> dict:
             entered_queue_at=entered_at,
         )
         created += 1
-        logger.info("sync_novo_ticket_queued", ticket_id=ticket_id)
+        logger.info(
+            "sync_novo_ticket_instanced",
+            ticket_id=ticket_id,
+            subject=(ticket.get("subject") or "")[:80],
+            contact=ticket.get("contact_name") or "",
+            queue_position=NewConversation.objects.count(),
+        )
 
     logger.info(
         "sync_novo_stage_tickets_done",
         total_from_hubspot=len(tickets),
         created=created,
         skipped=skipped,
+        already_assigned=already_assigned,
     )
 
     # After populating the queue, immediately try to assign tickets to any
     # agent that is already online — so a sync that runs while agents are
     # available does not require a separate trigger.
     if created > 0:
-        assign_pending_tickets()
+        assign_result = assign_pending_tickets()
+        logger.info(
+            "sync_novo_auto_assign_triggered",
+            assigned=assign_result["assigned"],
+            remaining=assign_result["skipped"],
+        )
 
-    return {"created": created, "skipped": skipped, "total_from_hubspot": len(tickets)}
+    return {
+        "created": created,
+        "skipped": skipped,
+        "already_assigned": already_assigned,
+        "total_from_hubspot": len(tickets),
+    }
 
 
 def sync_hubspot_team_to_agents(team_id: str) -> int:

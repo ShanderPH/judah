@@ -242,6 +242,52 @@ class SyncNovoResponse(Schema):
 
     created: int
     skipped: int
+    already_assigned: int = 0
     total_from_hubspot: int
     queued_for_assignment: bool
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Business hours schemas
+# ---------------------------------------------------------------------------
+
+
+class BusinessHoursResponse(Schema):
+    """Current business hours configuration."""
+
+    name: str
+    is_active: bool
+    monday: str
+    tuesday: str
+    wednesday: str
+    thursday: str
+    friday: str
+    saturday: str
+    sunday: str
+    timezone_name: str
+    is_currently_business_hours: bool
+
+
+class SpecialScheduleResponse(Schema):
+    """A special schedule override."""
+
+    id: UUID
+    date: str
+    schedule_type: str
+    start_hour: int | None = None
+    end_hour: int | None = None
+    reason: str = ""
+
+    class Config:
+        from_attributes = True
+
+
+class CreateSpecialScheduleRequest(Schema):
+    """Request body for creating a special schedule."""
+
+    date: str
+    schedule_type: str = "closed"
+    start_hour: int | None = None
+    end_hour: int | None = None
+    reason: str = ""
