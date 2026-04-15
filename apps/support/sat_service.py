@@ -102,9 +102,7 @@ def sat_heartbeat() -> dict:
     # updates. If their webhook email doesn't match agent_email in the DB, their
     # status can get stuck.
     unmatched_emails = [
-        (a.agent_email or "N/A")
-        for a in agents
-        if (a.agent_email or "").lower() not in availability_map
+        (a.agent_email or "N/A") for a in agents if (a.agent_email or "").lower() not in availability_map
     ]
     if unmatched_emails:
         logger.warning(
@@ -427,9 +425,7 @@ def sat_reset_daily_counters() -> dict:
 
         # Collect snapshot data for batch upsert
         if agent.online_time_seconds_today > 0 or agent.away_time_seconds_today > 0:
-            daily_log_snapshots.append(
-                (agent, agent.online_time_seconds_today, agent.away_time_seconds_today)
-            )
+            daily_log_snapshots.append((agent, agent.online_time_seconds_today, agent.away_time_seconds_today))
 
         # Reset counters and anchor time
         agent.online_time_seconds_today = 0
@@ -456,4 +452,4 @@ def sat_reset_daily_counters() -> dict:
         )
 
     logger.info("sat_daily_counters_reset", agents_reset=len(agents), snapshot_date=str(yesterday))
-    return {"agents_reset": reset_count}
+    return {"agents_reset": len(agents)}

@@ -67,7 +67,7 @@ def _safe_parse_owner_id(value: str | int | None) -> int | None:
 
     try:
         return int(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -78,7 +78,7 @@ def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     try:
         ms = int(value)
         return datetime.fromtimestamp(ms / 1000, tz=UTC)
-    except (ValueError, TypeError, OSError):
+    except ValueError, TypeError, OSError:
         return None
 
 
@@ -496,12 +496,14 @@ def sync_novo_stage_tickets() -> dict:
     # Pre-fetch existing ticket IDs to avoid N+1 queries in the loop
     ticket_ids_from_hubspot = {str(t["id"]) for t in tickets}
     existing_pending = set(
-        NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot)
-        .values_list("hubspot_ticket_id", flat=True)
+        NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
     )
     existing_assigned = set(
-        AssignedConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot)
-        .values_list("hubspot_ticket_id", flat=True)
+        AssignedConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
     )
 
     for ticket in tickets:

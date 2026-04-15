@@ -451,8 +451,6 @@ class HubSpotClient:
         Raises:
             ExternalServiceError: On API failure.
         """
-        import json
-
         import requests
         from django.core.cache import cache
 
