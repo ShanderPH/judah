@@ -95,8 +95,26 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
 
     from apps.support.tasks import task_handle_ticket_closed
 
-    owner_id = payload.get("hubspot_owner_id") or payload.get("sourceId")
-    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, str(owner_id) if owner_id else None)
+    # Extract owner_id — avoid using sourceId as fallback since it may contain
+    # non-numeric values like "StageCalculatedPropertiesRollup"
+    owner_id = payload.get("hubspot_owner_id") or ""
+    owner_str = str(owner_id).strip() if owner_id else None
+
+    # Validate that it looks numeric before passing downstream
+    if owner_str:
+        # Handle "userId:12345" format from HubSpot
+        parsed = owner_str.rsplit(":", 1)[-1] if ":" in owner_str else owner_str
+        try:
+            int(parsed)
+        except ValueError, TypeError:
+            logger.debug(
+                "hubspot_ticket_closed_invalid_owner_id",
+                ticket_id=hubspot_ticket_id,
+                raw_owner_id=owner_id,
+            )
+            owner_str = None
+
+    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:

@@ -213,41 +213,41 @@ def task_handle_owner_change(
 
     from django.db import transaction
 
+    from apps.support.auto_assign_service import _safe_parse_owner_id
     from apps.support.models import Agent, AssignedConversation, ConversationReassignment
     from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
 
     try:
         previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
-        new_owner = new_owner_id.strip() if new_owner_id else ""
-        prev_owner = str(previous_owner_id).strip() if previous_owner_id else ""
 
-        # Skip if no actual change or initial assignment
-        if not prev_owner or prev_owner in ("", "None", "null"):
+        # Safely parse owner IDs — HubSpot may send formats like "userId:72733895"
+        prev_owner_int = _safe_parse_owner_id(previous_owner_id)
+        new_owner_int = _safe_parse_owner_id(new_owner_id)
+
+        # Skip if no valid previous owner (initial assignment, not a reassignment)
+        if prev_owner_int is None:
             return
-        if new_owner == prev_owner:
+        # Skip if no actual change
+        if prev_owner_int == new_owner_int:
             return
 
         logger.info(
             "task_owner_change_processing",
             ticket_id=hubspot_ticket_id,
-            from_owner_id=prev_owner,
-            to_owner_id=new_owner,
+            from_owner_id=prev_owner_int,
+            to_owner_id=new_owner_int,
         )
 
         now = timezone.now()
 
         # Resolve agents
-        import contextlib
-
         from_agent: Agent | None = None
         to_agent: Agent | None = None
 
-        with contextlib.suppress(ValueError, TypeError):
-            from_agent = Agent.objects.filter(hubspot_owner_id=int(prev_owner)).first()
+        from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
 
-        if new_owner and new_owner not in ("", "None", "null"):
-            with contextlib.suppress(ValueError, TypeError):
-                to_agent = Agent.objects.filter(hubspot_owner_id=int(new_owner)).first()
+        if new_owner_int is not None:
+            to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first()
 
         # Calculate time with previous agent
         time_with_prev_seconds: Decimal | None = None
@@ -272,7 +272,7 @@ def task_handle_owner_change(
                     assigned_conv.assignment_count += 1
                 else:
                     assigned_conv.agent = None
-                    assigned_conv.hubspot_owner_id = int(new_owner) if new_owner else None
+                    assigned_conv.hubspot_owner_id = new_owner_int
                     assigned_conv.agent_name = ""
                 assigned_conv.save(
                     update_fields=["agent", "hubspot_owner_id", "agent_name", "assignment_count", "updated_at"]
@@ -281,10 +281,10 @@ def task_handle_owner_change(
             ConversationReassignment.objects.create(
                 hubspot_ticket_id=hubspot_ticket_id,
                 from_agent=from_agent,
-                from_hubspot_owner_id=int(prev_owner) if prev_owner else None,
+                from_hubspot_owner_id=prev_owner_int,
                 from_agent_name=from_agent.name if from_agent else None,
                 to_agent=to_agent,
-                to_hubspot_owner_id=int(new_owner) if new_owner else None,
+                to_hubspot_owner_id=new_owner_int,
                 to_agent_name=to_agent.name if to_agent else None,
                 reassigned_at=now,
                 time_with_previous_agent_seconds=time_with_prev_seconds,
@@ -294,8 +294,8 @@ def task_handle_owner_change(
         logger.info(
             "task_owner_change_done",
             ticket_id=hubspot_ticket_id,
-            from_agent=from_agent.name if from_agent else prev_owner,
-            to_agent=to_agent.name if to_agent else new_owner,
+            from_agent=from_agent.name if from_agent else str(prev_owner_int),
+            to_agent=to_agent.name if to_agent else str(new_owner_int),
         )
     except Exception as exc:
         logger.warning(
@@ -521,6 +521,151 @@ def task_sync_novo_stage_tickets(self) -> dict:
     except Exception as exc:
         logger.warning("task_sync_novo_stage_tickets_retry", error=str(exc), retry=self.request.retries)
         raise self.retry(exc=exc) from exc
+
+
+@shared_task(name="support.task_reconcile_agent_counts")
+def task_reconcile_agent_counts() -> dict:
+    """Reconciliation job — compare local chat counts with HubSpot.
+
+    Runs hourly to detect and correct count drift caused by missed webhooks,
+    failed decrements, or other edge cases. This prevents agents from being
+    permanently stuck at max capacity.
+
+    Returns:
+        Dict with ``agents_checked``, ``corrections`` counts.
+    """
+    from apps.support.agent_sync_service import is_business_hours
+
+    if not is_business_hours():
+        return {"skipped_off_hours": True}
+
+    from apps.integrations.hubspot.client import get_hubspot_client
+    from apps.support.models import Agent
+
+    client = get_hubspot_client()
+    agents = list(Agent.objects.filter(is_active=True).exclude(hubspot_owner_id__isnull=True).order_by("id"))
+
+    corrections = 0
+    now = timezone.now()
+
+    for agent in agents:
+        try:
+            hubspot_count = client.count_active_tickets_by_owner(agent.hubspot_owner_id)
+        except Exception as exc:
+            logger.warning("reconcile_count_fetch_failed", agent=agent.name, error=str(exc))
+            continue
+
+        if hubspot_count < 0:
+            continue
+
+        if agent.current_simultaneous_chats != hubspot_count:
+            logger.info(
+                "reconcile_count_corrected",
+                agent=agent.name,
+                local_count=agent.current_simultaneous_chats,
+                hubspot_count=hubspot_count,
+                drift=agent.current_simultaneous_chats - hubspot_count,
+            )
+            Agent.objects.filter(pk=agent.pk).update(
+                current_simultaneous_chats=hubspot_count,
+                sat_last_count_sync_at=now,
+                updated_at=now,
+            )
+            corrections += 1
+
+    logger.info("task_reconcile_agent_counts_done", agents_checked=len(agents), corrections=corrections)
+    return {"agents_checked": len(agents), "corrections": corrections}
+
+
+@shared_task(name="support.task_requeue_stale_assignments")
+def task_requeue_stale_assignments() -> dict:
+    """Re-queue tickets that were assigned but never responded to.
+
+    Checks ``assigned_conversations`` for tickets where the agent hasn't
+    interacted within a configurable timeout. If the agent is no longer
+    online, the ticket is moved back to ``new_conversations`` for
+    reassignment.
+
+    This prevents tickets from being stuck with unresponsive agents.
+
+    Returns:
+        Dict with ``requeued``, ``checked`` counts.
+    """
+    from apps.support.agent_sync_service import is_business_hours
+
+    if not is_business_hours():
+        return {"skipped_off_hours": True}
+
+    from datetime import timedelta
+
+    from django.db import transaction
+
+    from apps.support.models import Agent, AssignedConversation, NewConversation
+    from apps.support.queue_service import decrement_agent_chat_count
+
+    # Timeout: tickets assigned more than 30 minutes ago to an agent that
+    # is no longer online get re-queued.
+    assignment_timeout_minutes = 30
+    cutoff = timezone.now() - timedelta(minutes=assignment_timeout_minutes)
+
+    # Find stale assignments: assigned before cutoff, agent is away/offline
+    stale = (
+        AssignedConversation.objects.filter(
+            assigned_at__lt=cutoff,
+            agent__isnull=False,
+        )
+        .exclude(agent__status_enum=Agent.StatusEnum.ONLINE)
+        .select_related("agent")
+    )
+
+    requeued = 0
+    checked = 0
+
+    for assigned in stale:
+        checked += 1
+
+        # Only re-queue if the agent is genuinely unavailable
+        agent = assigned.agent
+        if agent and agent.status_enum == Agent.StatusEnum.ONLINE:
+            continue
+
+        with transaction.atomic():
+            # Move back to new_conversations
+            NewConversation.objects.get_or_create(
+                hubspot_ticket_id=assigned.hubspot_ticket_id,
+                defaults={
+                    "pipeline_id": assigned.pipeline_id,
+                    "contact_name": assigned.contact_name or "",
+                    "contact_email": assigned.contact_email or "",
+                    "priority": assigned.priority or "",
+                    "subject": assigned.subject or "",
+                    "entered_queue_at": assigned.entered_queue_at or timezone.now(),
+                    "queue_status": NewConversation.QueueStatus.QUEUED,
+                    "assignment_attempts": assigned.assignment_count,
+                },
+            )
+
+            # Decrement agent's chat count
+            if agent:
+                decrement_agent_chat_count(agent)
+
+            assigned.delete()
+
+        logger.info(
+            "stale_assignment_requeued",
+            ticket_id=assigned.hubspot_ticket_id,
+            agent=agent.name if agent else "unknown",
+            assigned_at=str(assigned.assigned_at),
+            timeout_minutes=assignment_timeout_minutes,
+        )
+        requeued += 1
+
+    if requeued > 0:
+        # Trigger drain to reassign
+        task_matchmaker_drain_queue.delay()
+
+    logger.info("task_requeue_stale_assignments_done", checked=checked, requeued=requeued)
+    return {"checked": checked, "requeued": requeued}
 
 
 @shared_task(name="support.task_aggregate_agent_metrics")
