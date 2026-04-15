@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import structlog
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
@@ -172,11 +173,8 @@ def _do_assign(new_conv: NewConversation) -> bool:
         # Increment agent counters
         increment_agent_chat_count(agent)
         Agent.objects.filter(pk=agent.pk).update(
-            total_assignments=agent.total_assignments + 1,
+            total_assignments=F("total_assignments") + 1,
         )
-
-    # Log remaining queue depth after assignment
-    remaining = NewConversation.objects.count()
 
     logger.info(
         "matchmaker_assigned",
@@ -186,7 +184,6 @@ def _do_assign(new_conv: NewConversation) -> bool:
         queue_wait_seconds=float(wait_seconds) if wait_seconds else None,
         agent_current_chats=agent.current_simultaneous_chats,
         agent_max_chats=agent.max_simultaneous_chats,
-        remaining_in_queue=remaining,
     )
     return True
 
@@ -213,22 +210,31 @@ def matchmaker_drain_queue() -> dict:
         return {"assigned": 0, "remaining": total_pending, "total_pending": total_pending}
 
     assigned = 0
+    consecutive_failures = 0
     max_iterations = total_pending + 5  # Safety cap to prevent infinite loops
 
     logger.info("matchmaker_drain_started", total_pending=total_pending)
 
     while assigned < max_iterations:
-        # Re-check eligibility before each attempt
-        eligible = get_eligible_agents()
-        if not eligible:
-            logger.info("matchmaker_drain_no_eligible_agents", assigned_so_far=assigned)
-            break
+        # matchmaker_assign_next() already calls select_next_agent() which
+        # checks eligibility internally. We only re-check here after 2
+        # consecutive failures to avoid paying for the eligibility query
+        # on every successful iteration.
+        if consecutive_failures >= 2:
+            if not get_eligible_agents():
+                logger.info("matchmaker_drain_no_eligible_agents", assigned_so_far=assigned)
+                break
+            consecutive_failures = 0
 
         success = matchmaker_assign_next()
         if not success:
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                continue  # One more check before breaking
             break
-
-        assigned += 1
+        else:
+            consecutive_failures = 0
+            assigned += 1
 
     remaining = NewConversation.objects.count()
 
@@ -237,7 +243,6 @@ def matchmaker_drain_queue() -> dict:
         total_pending=total_pending,
         assigned=assigned,
         remaining=remaining,
-        eligible_agents_at_end=len(get_eligible_agents()),
     )
     return {"assigned": assigned, "remaining": remaining, "total_pending": total_pending}
 
