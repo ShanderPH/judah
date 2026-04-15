@@ -28,6 +28,14 @@
           "propertyName": "hubspot_owner_id",
           "active": true
         }
+      ],
+      "crmObjects": [
+        {
+          "objectType": "CONTACT",
+          "subscriptionType": "object.propertyChange",
+          "propertyName": "hs_availability_status",
+          "active": true
+        }
       ]
     }
   }

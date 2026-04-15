@@ -94,16 +94,18 @@ def _do_assign(new_conv: NewConversation) -> bool:
     max_chats = agent.max_simultaneous_chats or 5
 
     if reconciled_count >= max_chats:
-        # Agent is at capacity after reconciliation — try next
+        # Agent is at capacity after reconciliation — try next.
+        # Pass the ORIGINAL last_owner_id (not the rejected agent) so Rule 2
+        # correctly avoids back-to-back assignment to the previously assigned
+        # agent, rather than accidentally excluding a still-eligible agent.
         logger.info(
             "matchmaker_agent_at_capacity_after_reconcile",
             agent=agent.name,
             reconciled_count=reconciled_count,
             max_chats=max_chats,
         )
-        # Re-select excluding this agent
-        agent.refresh_from_db()
-        agent_retry = select_next_agent(last_assigned_hubspot_owner_id=agent.hubspot_owner_id)
+        # Re-select using the original last_owner_id for Rule 2
+        agent_retry = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
         if agent_retry is None:
             new_conv.queue_status = NewConversation.QueueStatus.QUEUED
             new_conv.assignment_attempts += 1

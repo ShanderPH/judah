@@ -86,6 +86,28 @@ def sat_heartbeat() -> dict:
     status_changes = 0
     agents_came_online = 0
 
+    # Diagnostic: identify agents whose emails are NOT in the HubSpot Users API.
+    # These agents rely exclusively on contact.propertyChange webhooks for status
+    # updates. If their webhook email doesn't match agent_email in the DB, their
+    # status can get stuck.
+    unmatched_emails = [
+        (a.agent_email or "N/A")
+        for a in agents
+        if (a.agent_email or "").lower() not in availability_map
+    ]
+    if unmatched_emails:
+        logger.warning(
+            "sat_heartbeat_agents_not_in_users_api",
+            count=len(unmatched_emails),
+            emails=unmatched_emails,
+            users_api_emails=list(availability_map.keys()),
+            hint=(
+                "These agents are invisible to the SAT heartbeat. "
+                "Verify their hs_email in HubSpot matches agent_email in the DB, "
+                "and that they appear in GET /crm/v3/objects/users."
+            ),
+        )
+
     for agent in agents:
         email_lower = (agent.agent_email or "").lower()
         if email_lower not in availability_map:
@@ -192,11 +214,18 @@ def sat_reconcile_agent_load(agent) -> int:
     Called by the Matchmaker before assigning a ticket to ensure the
     candidate has accurate capacity data.
 
+    Uses a "never reset downward" policy to prevent the TOCTOU race condition
+    where HubSpot's count API lags behind recent assignments. If HubSpot shows
+    a lower count than our local DB (due to propagation latency), we keep the
+    local count. HubSpot corrections upward (e.g. manual assignments we missed)
+    are always honoured. The periodic ``task_reconcile_agent_counts`` task (hourly)
+    performs full authoritative correction in both directions.
+
     Args:
         agent: Agent instance to reconcile.
 
     Returns:
-        The reconciled (authoritative) chat count from HubSpot.
+        The effective chat count to use for capacity decisions.
     """
     from apps.integrations.hubspot.client import get_hubspot_client
     from apps.support.models import Agent
@@ -211,36 +240,61 @@ def sat_reconcile_agent_load(agent) -> int:
             agent=agent.name,
             error=str(exc),
         )
-        # Return local count as fallback
+        # Return local count as fallback — do not reset to zero on transient errors
         return agent.current_simultaneous_chats
 
     if hubspot_count < 0:
         return agent.current_simultaneous_chats
 
     now = timezone.now()
+    local_count = agent.current_simultaneous_chats
 
-    if agent.current_simultaneous_chats != hubspot_count:
+    # TOCTOU guard: only accept a downward correction if HubSpot shows strictly
+    # MORE tickets than we track locally (e.g. a manual assignment we missed).
+    # If HubSpot shows LESS (API latency after a recent auto-assignment), trust
+    # the local count which was just incremented by increment_agent_chat_count().
+    if hubspot_count > local_count:
+        # HubSpot has more — sync upward
+        effective_count = hubspot_count
         with transaction.atomic():
             Agent.objects.filter(pk=agent.pk).select_for_update().update(
-                current_simultaneous_chats=hubspot_count,
+                current_simultaneous_chats=effective_count,
                 sat_last_count_sync_at=now,
                 updated_at=now,
             )
         logger.info(
-            "sat_agent_count_reconciled",
+            "sat_agent_count_reconciled_upward",
             agent=agent.name,
-            local_count=agent.current_simultaneous_chats,
+            local_count=local_count,
             hubspot_count=hubspot_count,
+            effective_count=effective_count,
         )
-        agent.current_simultaneous_chats = hubspot_count
+        agent.current_simultaneous_chats = effective_count
+    elif hubspot_count < local_count:
+        # HubSpot shows less — likely API latency after a recent assignment.
+        # Keep local count to prevent re-assigning over capacity.
+        effective_count = local_count
+        Agent.objects.filter(pk=agent.pk).update(
+            sat_last_count_sync_at=now,
+            updated_at=now,
+        )
+        logger.debug(
+            "sat_reconcile_keeping_local_count",
+            agent=agent.name,
+            local_count=local_count,
+            hubspot_count=hubspot_count,
+            hint="HubSpot count likely lagging recent assignment; hourly reconcile will correct if needed",
+        )
     else:
+        # Counts match — just update sync timestamp
+        effective_count = hubspot_count
         Agent.objects.filter(pk=agent.pk).update(
             sat_last_count_sync_at=now,
             updated_at=now,
         )
 
     agent.sat_last_count_sync_at = now
-    return hubspot_count
+    return effective_count
 
 
 def sat_accumulate_time(
