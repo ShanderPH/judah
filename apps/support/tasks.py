@@ -204,18 +204,18 @@ def task_handle_owner_change(
     Handles chat count adjustments, AssignedConversation updates, and
     ConversationReassignment logging.
 
+    Idempotent: a Redis dedup lock keyed on ``{ticket_id}:{prev}:{new}``
+    ensures that Celery retries and HubSpot webhook re-deliveries do not
+    cause double increment/decrement of agent chat counts.
+
     Args:
         hubspot_ticket_id: HubSpot ticket ID.
         new_owner_id: New hubspot_owner_id value.
         payload: Full webhook payload containing previousValue.
     """
-    from decimal import Decimal
-
-    from django.db import transaction
+    from django.core.cache import cache
 
     from apps.support.auto_assign_service import _safe_parse_owner_id
-    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
-    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
 
     try:
         previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
@@ -231,72 +231,27 @@ def task_handle_owner_change(
         if prev_owner_int == new_owner_int:
             return
 
-        logger.info(
-            "task_owner_change_processing",
-            ticket_id=hubspot_ticket_id,
-            from_owner_id=prev_owner_int,
-            to_owner_id=new_owner_int,
-        )
-
-        now = timezone.now()
-
-        # Resolve agents
-        from_agent: Agent | None = None
-        to_agent: Agent | None = None
-
-        from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
-
-        if new_owner_int is not None:
-            to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first()
-
-        # Calculate time with previous agent
-        time_with_prev_seconds: Decimal | None = None
-        assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
-
-        if assigned_conv and assigned_conv.assigned_at:
-            delta = now - assigned_conv.assigned_at
-            time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
-        with transaction.atomic():
-            if from_agent:
-                decrement_agent_chat_count(from_agent)
-
-            if to_agent:
-                increment_agent_chat_count(to_agent)
-
-            if assigned_conv:
-                if to_agent:
-                    assigned_conv.agent = to_agent
-                    assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
-                    assigned_conv.agent_name = to_agent.name
-                    assigned_conv.assignment_count += 1
-                else:
-                    assigned_conv.agent = None
-                    assigned_conv.hubspot_owner_id = new_owner_int
-                    assigned_conv.agent_name = ""
-                assigned_conv.save(
-                    update_fields=["agent", "hubspot_owner_id", "agent_name", "assignment_count", "updated_at"]
-                )
-
-            ConversationReassignment.objects.create(
-                hubspot_ticket_id=hubspot_ticket_id,
-                from_agent=from_agent,
-                from_hubspot_owner_id=prev_owner_int,
-                from_agent_name=from_agent.name if from_agent else None,
-                to_agent=to_agent,
-                to_hubspot_owner_id=new_owner_int,
-                to_agent_name=to_agent.name if to_agent else None,
-                reassigned_at=now,
-                time_with_previous_agent_seconds=time_with_prev_seconds,
-                reassignment_source="hubspot_webhook",
+        # Redis dedup lock — prevents double count adjustments when HubSpot retries
+        # the webhook or when Celery retries this task after a partial failure.
+        lock_key = f"owner_change:{hubspot_ticket_id}:{prev_owner_int}:{new_owner_int}"
+        if not cache.add(lock_key, "1", timeout=120):
+            logger.info(
+                "task_owner_change_dedup_skip",
+                ticket_id=hubspot_ticket_id,
+                from_owner=prev_owner_int,
+                to_owner=new_owner_int,
             )
+            return
 
-        logger.info(
-            "task_owner_change_done",
-            ticket_id=hubspot_ticket_id,
-            from_agent=from_agent.name if from_agent else str(prev_owner_int),
-            to_agent=to_agent.name if to_agent else str(new_owner_int),
-        )
+        try:
+            _do_handle_owner_change(
+                hubspot_ticket_id=hubspot_ticket_id,
+                prev_owner_int=prev_owner_int,
+                new_owner_int=new_owner_int,
+            )
+        finally:
+            cache.delete(lock_key)
+
     except Exception as exc:
         logger.warning(
             "task_handle_owner_change_retry",
@@ -304,6 +259,81 @@ def task_handle_owner_change(
             error=str(exc),
         )
         raise self.retry(exc=exc) from exc
+
+
+def _do_handle_owner_change(
+    hubspot_ticket_id: str,
+    prev_owner_int: int,
+    new_owner_int: int | None,
+) -> None:
+    """Internal: perform owner change adjustments after the dedup lock is held."""
+    from decimal import Decimal
+
+    from django.db import transaction
+
+    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
+    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
+
+    logger.info(
+        "task_owner_change_processing",
+        ticket_id=hubspot_ticket_id,
+        from_owner_id=prev_owner_int,
+        to_owner_id=new_owner_int,
+    )
+
+    now = timezone.now()
+
+    from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
+    to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first() if new_owner_int is not None else None
+
+    # Calculate time with previous agent
+    time_with_prev_seconds: Decimal | None = None
+    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
+
+    if assigned_conv and assigned_conv.assigned_at:
+        delta = now - assigned_conv.assigned_at
+        time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
+
+    with transaction.atomic():
+        if from_agent:
+            decrement_agent_chat_count(from_agent)
+
+        if to_agent:
+            increment_agent_chat_count(to_agent)
+
+        if assigned_conv:
+            if to_agent:
+                assigned_conv.agent = to_agent
+                assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
+                assigned_conv.agent_name = to_agent.name
+                assigned_conv.assignment_count += 1
+            else:
+                assigned_conv.agent = None
+                assigned_conv.hubspot_owner_id = new_owner_int
+                assigned_conv.agent_name = ""
+            assigned_conv.save(
+                update_fields=["agent", "hubspot_owner_id", "agent_name", "assignment_count", "updated_at"]
+            )
+
+        ConversationReassignment.objects.create(
+            hubspot_ticket_id=hubspot_ticket_id,
+            from_agent=from_agent,
+            from_hubspot_owner_id=prev_owner_int,
+            from_agent_name=from_agent.name if from_agent else None,
+            to_agent=to_agent,
+            to_hubspot_owner_id=new_owner_int,
+            to_agent_name=to_agent.name if to_agent else None,
+            reassigned_at=now,
+            time_with_previous_agent_seconds=time_with_prev_seconds,
+            reassignment_source="hubspot_webhook",
+        )
+
+    logger.info(
+        "task_owner_change_done",
+        ticket_id=hubspot_ticket_id,
+        from_agent=from_agent.name if from_agent else str(prev_owner_int),
+        to_agent=to_agent.name if to_agent else str(new_owner_int),
+    )
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=15, name="support.task_handle_availability_change")
