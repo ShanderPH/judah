@@ -202,11 +202,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_reconcile_agent_counts",
         "schedule": crontab(minute=30),  # :30 of every hour
     },
-    # Re-queue stale assignments every 15 minutes during business hours
-    "requeue-stale-assignments": {
-        "task": "support.task_requeue_stale_assignments",
-        "schedule": crontab(minute="*/15"),
-    },
 }
 
 # ---------------------------------------------------------------------------
