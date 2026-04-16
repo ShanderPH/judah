@@ -204,99 +204,54 @@ def task_handle_owner_change(
     Handles chat count adjustments, AssignedConversation updates, and
     ConversationReassignment logging.
 
+    Idempotent: a Redis dedup lock keyed on ``{ticket_id}:{prev}:{new}``
+    ensures that Celery retries and HubSpot webhook re-deliveries do not
+    cause double increment/decrement of agent chat counts.
+
     Args:
         hubspot_ticket_id: HubSpot ticket ID.
         new_owner_id: New hubspot_owner_id value.
         payload: Full webhook payload containing previousValue.
     """
-    from decimal import Decimal
+    from django.core.cache import cache
 
-    from django.db import transaction
-
-    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
-    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
+    from apps.support.auto_assign_service import _safe_parse_owner_id
 
     try:
         previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
-        new_owner = new_owner_id.strip() if new_owner_id else ""
-        prev_owner = str(previous_owner_id).strip() if previous_owner_id else ""
 
-        # Skip if no actual change or initial assignment
-        if not prev_owner or prev_owner in ("", "None", "null"):
+        # Safely parse owner IDs — HubSpot may send formats like "userId:72733895"
+        prev_owner_int = _safe_parse_owner_id(previous_owner_id)
+        new_owner_int = _safe_parse_owner_id(new_owner_id)
+
+        # Skip if no valid previous owner (initial assignment, not a reassignment)
+        if prev_owner_int is None:
             return
-        if new_owner == prev_owner:
+        # Skip if no actual change
+        if prev_owner_int == new_owner_int:
             return
 
-        logger.info(
-            "task_owner_change_processing",
-            ticket_id=hubspot_ticket_id,
-            from_owner_id=prev_owner,
-            to_owner_id=new_owner,
-        )
-
-        now = timezone.now()
-
-        # Resolve agents
-        import contextlib
-
-        from_agent: Agent | None = None
-        to_agent: Agent | None = None
-
-        with contextlib.suppress(ValueError, TypeError):
-            from_agent = Agent.objects.filter(hubspot_owner_id=int(prev_owner)).first()
-
-        if new_owner and new_owner not in ("", "None", "null"):
-            with contextlib.suppress(ValueError, TypeError):
-                to_agent = Agent.objects.filter(hubspot_owner_id=int(new_owner)).first()
-
-        # Calculate time with previous agent
-        time_with_prev_seconds: Decimal | None = None
-        assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
-
-        if assigned_conv and assigned_conv.assigned_at:
-            delta = now - assigned_conv.assigned_at
-            time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
-        with transaction.atomic():
-            if from_agent:
-                decrement_agent_chat_count(from_agent)
-
-            if to_agent:
-                increment_agent_chat_count(to_agent)
-
-            if assigned_conv:
-                if to_agent:
-                    assigned_conv.agent = to_agent
-                    assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
-                    assigned_conv.agent_name = to_agent.name
-                    assigned_conv.assignment_count += 1
-                else:
-                    assigned_conv.agent = None
-                    assigned_conv.hubspot_owner_id = int(new_owner) if new_owner else None
-                    assigned_conv.agent_name = ""
-                assigned_conv.save(
-                    update_fields=["agent", "hubspot_owner_id", "agent_name", "assignment_count", "updated_at"]
-                )
-
-            ConversationReassignment.objects.create(
-                hubspot_ticket_id=hubspot_ticket_id,
-                from_agent=from_agent,
-                from_hubspot_owner_id=int(prev_owner) if prev_owner else None,
-                from_agent_name=from_agent.name if from_agent else None,
-                to_agent=to_agent,
-                to_hubspot_owner_id=int(new_owner) if new_owner else None,
-                to_agent_name=to_agent.name if to_agent else None,
-                reassigned_at=now,
-                time_with_previous_agent_seconds=time_with_prev_seconds,
-                reassignment_source="hubspot_webhook",
+        # Redis dedup lock — prevents double count adjustments when HubSpot retries
+        # the webhook or when Celery retries this task after a partial failure.
+        lock_key = f"owner_change:{hubspot_ticket_id}:{prev_owner_int}:{new_owner_int}"
+        if not cache.add(lock_key, "1", timeout=120):
+            logger.info(
+                "task_owner_change_dedup_skip",
+                ticket_id=hubspot_ticket_id,
+                from_owner=prev_owner_int,
+                to_owner=new_owner_int,
             )
+            return
 
-        logger.info(
-            "task_owner_change_done",
-            ticket_id=hubspot_ticket_id,
-            from_agent=from_agent.name if from_agent else prev_owner,
-            to_agent=to_agent.name if to_agent else new_owner,
-        )
+        try:
+            _do_handle_owner_change(
+                hubspot_ticket_id=hubspot_ticket_id,
+                prev_owner_int=prev_owner_int,
+                new_owner_int=new_owner_int,
+            )
+        finally:
+            cache.delete(lock_key)
+
     except Exception as exc:
         logger.warning(
             "task_handle_owner_change_retry",
@@ -304,6 +259,81 @@ def task_handle_owner_change(
             error=str(exc),
         )
         raise self.retry(exc=exc) from exc
+
+
+def _do_handle_owner_change(
+    hubspot_ticket_id: str,
+    prev_owner_int: int,
+    new_owner_int: int | None,
+) -> None:
+    """Internal: perform owner change adjustments after the dedup lock is held."""
+    from decimal import Decimal
+
+    from django.db import transaction
+
+    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
+    from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
+
+    logger.info(
+        "task_owner_change_processing",
+        ticket_id=hubspot_ticket_id,
+        from_owner_id=prev_owner_int,
+        to_owner_id=new_owner_int,
+    )
+
+    now = timezone.now()
+
+    from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
+    to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first() if new_owner_int is not None else None
+
+    # Calculate time with previous agent
+    time_with_prev_seconds: Decimal | None = None
+    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
+
+    if assigned_conv and assigned_conv.assigned_at:
+        delta = now - assigned_conv.assigned_at
+        time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
+
+    with transaction.atomic():
+        if from_agent:
+            decrement_agent_chat_count(from_agent)
+
+        if to_agent:
+            increment_agent_chat_count(to_agent)
+
+        if assigned_conv:
+            if to_agent:
+                assigned_conv.agent = to_agent
+                assigned_conv.hubspot_owner_id = to_agent.hubspot_owner_id
+                assigned_conv.agent_name = to_agent.name
+                assigned_conv.assignment_count += 1
+            else:
+                assigned_conv.agent = None
+                assigned_conv.hubspot_owner_id = new_owner_int
+                assigned_conv.agent_name = ""
+            assigned_conv.save(
+                update_fields=["agent", "hubspot_owner_id", "agent_name", "assignment_count", "updated_at"]
+            )
+
+        ConversationReassignment.objects.create(
+            hubspot_ticket_id=hubspot_ticket_id,
+            from_agent=from_agent,
+            from_hubspot_owner_id=prev_owner_int,
+            from_agent_name=from_agent.name if from_agent else None,
+            to_agent=to_agent,
+            to_hubspot_owner_id=new_owner_int,
+            to_agent_name=to_agent.name if to_agent else None,
+            reassigned_at=now,
+            time_with_previous_agent_seconds=time_with_prev_seconds,
+            reassignment_source="hubspot_webhook",
+        )
+
+    logger.info(
+        "task_owner_change_done",
+        ticket_id=hubspot_ticket_id,
+        from_agent=from_agent.name if from_agent else str(prev_owner_int),
+        to_agent=to_agent.name if to_agent else str(new_owner_int),
+    )
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=15, name="support.task_handle_availability_change")
@@ -523,6 +553,169 @@ def task_sync_novo_stage_tickets(self) -> dict:
         raise self.retry(exc=exc) from exc
 
 
+@shared_task(name="support.task_reconcile_agent_counts")
+def task_reconcile_agent_counts() -> dict:
+    """Reconciliation job — compare local chat counts with HubSpot.
+
+    Runs hourly to detect and correct count drift caused by missed webhooks,
+    failed decrements, or other edge cases. This prevents agents from being
+    permanently stuck at max capacity.
+
+    Returns:
+        Dict with ``agents_checked``, ``corrections`` counts.
+    """
+    from apps.support.agent_sync_service import is_business_hours
+
+    if not is_business_hours():
+        return {"skipped_off_hours": True}
+
+    from apps.integrations.hubspot.client import get_hubspot_client
+    from apps.support.models import Agent
+
+    client = get_hubspot_client()
+    agents = list(
+        Agent.objects.filter(is_active=True)
+        .exclude(hubspot_owner_id__isnull=True)
+        .only("id", "name", "hubspot_owner_id", "current_simultaneous_chats")
+        .order_by("id")
+    )
+
+    # Parallelize HubSpot API calls (one per agent)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    count_map: dict[int, int] = {}
+
+    def _fetch_count(owner_id: int) -> tuple[int, int]:
+        try:
+            return (owner_id, client.count_active_tickets_by_owner(owner_id))
+        except Exception:
+            return (owner_id, -1)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_fetch_count, a.hubspot_owner_id): a for a in agents}
+        for future in as_completed(futures):
+            owner_id, count = future.result()
+            if count >= 0:
+                count_map[owner_id] = count
+
+    corrections = 0
+    now = timezone.now()
+
+    for agent in agents:
+        hubspot_count = count_map.get(agent.hubspot_owner_id)
+        if hubspot_count is None:
+            continue
+
+        if agent.current_simultaneous_chats != hubspot_count:
+            logger.info(
+                "reconcile_count_corrected",
+                agent=agent.name,
+                local_count=agent.current_simultaneous_chats,
+                hubspot_count=hubspot_count,
+                drift=agent.current_simultaneous_chats - hubspot_count,
+            )
+            Agent.objects.filter(pk=agent.pk).update(
+                current_simultaneous_chats=hubspot_count,
+                sat_last_count_sync_at=now,
+                updated_at=now,
+            )
+            corrections += 1
+
+    logger.info("task_reconcile_agent_counts_done", agents_checked=len(agents), corrections=corrections)
+    return {"agents_checked": len(agents), "corrections": corrections}
+
+
+@shared_task(name="support.task_requeue_stale_assignments")
+def task_requeue_stale_assignments() -> dict:
+    """Re-queue tickets that were assigned but never responded to.
+
+    Checks ``assigned_conversations`` for tickets where the agent hasn't
+    interacted within a configurable timeout. If the agent is no longer
+    online, the ticket is moved back to ``new_conversations`` for
+    reassignment.
+
+    This prevents tickets from being stuck with unresponsive agents.
+
+    Returns:
+        Dict with ``requeued``, ``checked`` counts.
+    """
+    from apps.support.agent_sync_service import is_business_hours
+
+    if not is_business_hours():
+        return {"skipped_off_hours": True}
+
+    from datetime import timedelta
+
+    from django.db import transaction
+
+    from apps.support.models import Agent, AssignedConversation, NewConversation
+    from apps.support.queue_service import decrement_agent_chat_count
+
+    # Timeout: tickets assigned more than 30 minutes ago to an agent that
+    # is no longer online get re-queued.
+    assignment_timeout_minutes = 30
+    cutoff = timezone.now() - timedelta(minutes=assignment_timeout_minutes)
+
+    # Find stale assignments: assigned before cutoff, agent is away/offline
+    stale = (
+        AssignedConversation.objects.filter(
+            assigned_at__lt=cutoff,
+            agent__isnull=False,
+        )
+        .exclude(agent__status_enum=Agent.StatusEnum.ONLINE)
+        .select_related("agent")
+    )
+
+    requeued = 0
+    checked = 0
+
+    for assigned in stale:
+        checked += 1
+
+        # Only re-queue if the agent is genuinely unavailable
+        agent = assigned.agent
+        if agent and agent.status_enum == Agent.StatusEnum.ONLINE:
+            continue
+
+        with transaction.atomic():
+            # Move back to new_conversations
+            NewConversation.objects.get_or_create(
+                hubspot_ticket_id=assigned.hubspot_ticket_id,
+                defaults={
+                    "pipeline_id": assigned.pipeline_id,
+                    "contact_name": assigned.contact_name or "",
+                    "contact_email": assigned.contact_email or "",
+                    "priority": assigned.priority or "",
+                    "subject": assigned.subject or "",
+                    "entered_queue_at": assigned.entered_queue_at or timezone.now(),
+                    "queue_status": NewConversation.QueueStatus.QUEUED,
+                    "assignment_attempts": assigned.assignment_count,
+                },
+            )
+
+            # Decrement agent's chat count
+            if agent:
+                decrement_agent_chat_count(agent)
+
+            assigned.delete()
+
+        logger.info(
+            "stale_assignment_requeued",
+            ticket_id=assigned.hubspot_ticket_id,
+            agent=agent.name if agent else "unknown",
+            assigned_at=str(assigned.assigned_at),
+            timeout_minutes=assignment_timeout_minutes,
+        )
+        requeued += 1
+
+    if requeued > 0:
+        # Trigger drain to reassign
+        task_matchmaker_drain_queue.delay()
+
+    logger.info("task_requeue_stale_assignments_done", checked=checked, requeued=requeued)
+    return {"checked": checked, "requeued": requeued}
+
+
 @shared_task(name="support.task_aggregate_agent_metrics")
 def task_aggregate_agent_metrics() -> dict:
     """Celery task: compute and persist per-agent metrics.
@@ -544,18 +737,15 @@ def task_aggregate_agent_metrics() -> dict:
     skipped = 0
 
     for agent in agents:
-        closed_qs = ClosedConversation.objects.filter(agent=agent)
-        total_chats = closed_qs.count()
-
-        handle_agg = closed_qs.filter(total_handle_time_minutes__isnull=False).aggregate(
-            avg=Avg("total_handle_time_minutes"),
+        # Combine count + aggregates into a single query
+        closed_agg = ClosedConversation.objects.filter(agent=agent).aggregate(
+            total_chats=Count("id"),
+            avg_handle=Avg("total_handle_time_minutes"),
+            avg_wait=Avg("queue_wait_seconds"),
         )
-        avg_handle = float(handle_agg.get("avg") or 0.0)
-
-        wait_agg = closed_qs.filter(queue_wait_seconds__isnull=False).aggregate(
-            avg=Avg("queue_wait_seconds"),
-        )
-        avg_wait_min = float(wait_agg.get("avg") or 0.0) / 60.0
+        total_chats = closed_agg["total_chats"]
+        avg_handle = float(closed_agg["avg_handle"] or 0.0)
+        avg_wait_min = float(closed_agg["avg_wait"] or 0.0) / 60.0
 
         total_auto = AssignmentLog.objects.filter(
             agent=agent,
@@ -563,19 +753,16 @@ def task_aggregate_agent_metrics() -> dict:
         ).count()
 
         # Compute average online/away time from daily logs (last 30 days)
-        time_logs = AgentDailyTimeLog.objects.filter(
+        # aggregate() returns None for empty querysets — no need for exists() guard
+        time_agg = AgentDailyTimeLog.objects.filter(
             agent=agent,
             log_date__gte=yesterday - timedelta(days=30),
+        ).aggregate(
+            avg_online=Avg("online_time_seconds"),
+            avg_away=Avg("away_time_seconds"),
         )
-        avg_online = 0.0
-        avg_away = 0.0
-        if time_logs.exists():
-            time_agg = time_logs.aggregate(
-                avg_online=Avg("online_time_seconds"),
-                avg_away=Avg("away_time_seconds"),
-            )
-            avg_online = float(time_agg.get("avg_online") or 0.0)
-            avg_away = float(time_agg.get("avg_away") or 0.0)
+        avg_online = float(time_agg.get("avg_online") or 0.0)
+        avg_away = float(time_agg.get("avg_away") or 0.0)
 
         _, upserted = AgentMetrics.objects.update_or_create(
             agent_id=agent.hubspot_owner_id,

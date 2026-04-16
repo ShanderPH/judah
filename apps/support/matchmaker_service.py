@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import structlog
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
@@ -42,20 +43,36 @@ logger = structlog.get_logger(__name__)
 def matchmaker_assign_next() -> bool:
     """Attempt to assign the oldest pending NewConversation to the best agent.
 
-    Uses ``select_for_update(skip_locked=True)`` to safely handle concurrent
-    workers.  Before assignment, reconciles the candidate agent's load with
-    HubSpot via the SAT service.
+    Uses a Redis lock per ticket to prevent two workers from processing the
+    same ticket simultaneously.  Before assignment, reconciles the candidate
+    agent's load with HubSpot via the SAT service.
 
     Returns:
         True if a ticket was assigned, False if no ticket or no agent available.
     """
-    # Lock the oldest pending conversation (skip if another worker has it)
+    from django.core.cache import cache
+
+    # Pick the oldest pending conversation using select_for_update
     with transaction.atomic():
         new_conv = NewConversation.objects.select_for_update(skip_locked=True).order_by("entered_queue_at").first()
-
         if new_conv is None:
             return False
 
+        # Claim this ticket with a Redis lock to prevent double-processing
+        # after the DB lock is released
+        claim_key = f"matchmaker_claim:{new_conv.hubspot_ticket_id}"
+        if not cache.add(claim_key, "1", timeout=60):
+            logger.debug("matchmaker_ticket_already_claimed", ticket_id=new_conv.hubspot_ticket_id)
+            return False
+
+    try:
+        return _do_assign(new_conv)
+    finally:
+        cache.delete(claim_key)
+
+
+def _do_assign(new_conv: NewConversation) -> bool:
+    """Internal: perform the actual assignment after claiming a ticket."""
     # Select next agent via the 4-rule algorithm
     last_owner_id = get_last_assigned_owner_id()
     agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
@@ -78,15 +95,20 @@ def matchmaker_assign_next() -> bool:
     max_chats = agent.max_simultaneous_chats or 5
 
     if reconciled_count >= max_chats:
-        # Agent is at capacity after reconciliation — try next
+        # Agent is at capacity after reconciliation — try next.
+        # Pass the ORIGINAL last_owner_id (not the rejected agent) so Rule 2
+        # correctly avoids back-to-back assignment to the previously assigned
+        # agent, rather than accidentally excluding a still-eligible agent.
         logger.info(
             "matchmaker_agent_at_capacity_after_reconcile",
             agent=agent.name,
             reconciled_count=reconciled_count,
             max_chats=max_chats,
         )
-        # Re-select excluding this agent
-        agent.refresh_from_db()
+        # Re-select excluding the capacity-rejected agent via Rule 2.
+        # We pass the REJECTED agent's owner_id so it is skipped in the
+        # next selection, not the original last_owner_id (which would
+        # incorrectly block a still-eligible agent from the previous ticket).
         agent_retry = select_next_agent(last_assigned_hubspot_owner_id=agent.hubspot_owner_id)
         if agent_retry is None:
             new_conv.queue_status = NewConversation.QueueStatus.QUEUED
@@ -96,6 +118,27 @@ def matchmaker_assign_next() -> bool:
                 update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
             )
             return False
+
+        # Also reconcile the retry agent's real-time load from HubSpot before
+        # assigning to it — the queue_service filter uses local DB counts which
+        # may lag behind actual HubSpot state.
+        retry_reconciled = sat_reconcile_agent_load(agent_retry)
+        retry_max = agent_retry.max_simultaneous_chats or 5
+        if retry_reconciled >= retry_max:
+            logger.info(
+                "matchmaker_retry_agent_also_at_capacity",
+                agent=agent_retry.name,
+                reconciled_count=retry_reconciled,
+                max_chats=retry_max,
+            )
+            new_conv.queue_status = NewConversation.QueueStatus.QUEUED
+            new_conv.assignment_attempts += 1
+            new_conv.last_assignment_attempt_at = timezone.now()
+            new_conv.save(
+                update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
+            )
+            return False
+
         agent = agent_retry
 
     # Assign via HubSpot API
@@ -154,7 +197,7 @@ def matchmaker_assign_next() -> bool:
         # Increment agent counters
         increment_agent_chat_count(agent)
         Agent.objects.filter(pk=agent.pk).update(
-            total_assignments=agent.total_assignments + 1,
+            total_assignments=F("total_assignments") + 1,
         )
 
     logger.info(
@@ -163,6 +206,8 @@ def matchmaker_assign_next() -> bool:
         agent=agent.name,
         hubspot_owner_id=agent.hubspot_owner_id,
         queue_wait_seconds=float(wait_seconds) if wait_seconds else None,
+        agent_current_chats=agent.current_simultaneous_chats,
+        agent_max_chats=agent.max_simultaneous_chats,
     )
     return True
 
@@ -189,17 +234,31 @@ def matchmaker_drain_queue() -> dict:
         return {"assigned": 0, "remaining": total_pending, "total_pending": total_pending}
 
     assigned = 0
+    consecutive_failures = 0
+    max_iterations = total_pending + 5  # Safety cap to prevent infinite loops
 
-    while True:
-        # Re-check eligibility before each attempt
-        if not get_eligible_agents():
-            break
+    logger.info("matchmaker_drain_started", total_pending=total_pending)
+
+    while assigned < max_iterations:
+        # matchmaker_assign_next() already calls select_next_agent() which
+        # checks eligibility internally. We only re-check here after 2
+        # consecutive failures to avoid paying for the eligibility query
+        # on every successful iteration.
+        if consecutive_failures >= 2:
+            if not get_eligible_agents():
+                logger.info("matchmaker_drain_no_eligible_agents", assigned_so_far=assigned)
+                break
+            consecutive_failures = 0
 
         success = matchmaker_assign_next()
         if not success:
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                continue  # One more check before breaking
             break
-
-        assigned += 1
+        else:
+            consecutive_failures = 0
+            assigned += 1
 
     remaining = NewConversation.objects.count()
 

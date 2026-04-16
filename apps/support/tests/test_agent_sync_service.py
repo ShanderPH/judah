@@ -10,7 +10,7 @@ import pytest
 from django.utils import timezone
 
 from apps.support.agent_sync_service import (
-    BUSINESS_HOURS,
+    _DEFAULT_BUSINESS_HOURS,
     get_poll_interval_seconds,
     is_business_hours,
     sync_all_agents_status_and_counts_optimized,
@@ -59,16 +59,16 @@ class TestBusinessHoursLogic:
             assert result == expected
 
     def test_business_hours_config(self) -> None:
-        """Verify BUSINESS_HOURS configuration is correct."""
+        """Verify _DEFAULT_BUSINESS_HOURS configuration is correct."""
         # Monday-Friday: 9-18
         for day in range(5):
-            assert BUSINESS_HOURS[day] == (9, 18), f"Day {day} should be 9-18"
+            assert _DEFAULT_BUSINESS_HOURS[day] == (9, 18), f"Day {day} should be 9-18"
 
         # Saturday: 9-13
-        assert BUSINESS_HOURS[5] == (9, 13)
+        assert _DEFAULT_BUSINESS_HOURS[5] == (9, 13)
 
         # Sunday: 8-12
-        assert BUSINESS_HOURS[6] == (8, 12)
+        assert _DEFAULT_BUSINESS_HOURS[6] == (8, 12)
 
     def test_get_poll_interval_seconds_business_hours(self) -> None:
         """Test that interval is 30s during business hours."""

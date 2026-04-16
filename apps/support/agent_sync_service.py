@@ -18,30 +18,77 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-# Business hours configuration (America/Sao_Paulo)
-BUSINESS_HOURS = {
-    0: None,  # Monday - will be overridden
-    1: None,  # Tuesday - will be overridden
-    2: None,  # Wednesday - will be overridden
-    3: None,  # Thursday - will be overridden
-    4: None,  # Friday - will be overridden
-    5: (9, 13),  # Saturday: 9h às 13h
-    6: (8, 12),  # Sunday: 8h às 12h
+# Default business hours configuration (America/Sao_Paulo)
+# Used as fallback when no BusinessHoursConfig is active in the database.
+_DEFAULT_BUSINESS_HOURS = {
+    0: (9, 18),  # Monday
+    1: (9, 18),  # Tuesday
+    2: (9, 18),  # Wednesday
+    3: (9, 18),  # Thursday
+    4: (9, 18),  # Friday
+    5: (9, 13),  # Saturday
+    6: (8, 12),  # Sunday
 }
 
-# Monday-Friday: 9h às 18h
-for day in range(5):
-    BUSINESS_HOURS[day] = (9, 18)
+
+def _get_business_hours_for_today() -> tuple[int, int] | None:
+    """Get today's business hours, considering special schedules and DB config.
+
+    Priority:
+      1. SpecialSchedule for today's date (overrides everything)
+      2. Active BusinessHoursConfig from database
+      3. Hardcoded defaults in _DEFAULT_BUSINESS_HOURS
+
+    Returns:
+        (start_hour, end_hour) tuple, or None if closed today.
+    """
+    now = timezone.localtime()
+    today = now.date()
+
+    # 1. Check for special schedule override
+    try:
+        from apps.support.models import SpecialSchedule
+
+        special = SpecialSchedule.objects.filter(date=today).first()
+        if special:
+            if special.schedule_type == SpecialSchedule.ScheduleType.CLOSED:
+                logger.debug("business_hours_special_closed", date=str(today), reason=special.reason)
+                return None
+            if special.start_hour is not None and special.end_hour is not None:
+                logger.debug(
+                    "business_hours_special_custom",
+                    date=str(today),
+                    start=special.start_hour,
+                    end=special.end_hour,
+                )
+                return (special.start_hour, special.end_hour)
+    except Exception:
+        pass  # Table may not exist yet during migrations
+
+    # 2. Check active BusinessHoursConfig from database
+    try:
+        from apps.support.models import BusinessHoursConfig
+
+        config = BusinessHoursConfig.objects.filter(is_active=True).first()
+        if config:
+            return config.get_hours_for_weekday(now.weekday())
+    except Exception:
+        pass  # Table may not exist yet during migrations
+
+    # 3. Fallback to hardcoded defaults
+    return _DEFAULT_BUSINESS_HOURS.get(now.weekday())
 
 
 def is_business_hours() -> bool:
     """Check if current time is within business hours.
 
+    Considers special schedules, database-configured hours, and default hours.
+
     Returns:
         True if within business hours, False otherwise.
     """
     now = timezone.localtime()
-    hours = BUSINESS_HOURS.get(now.weekday())
+    hours = _get_business_hours_for_today()
 
     if hours is None:
         return False
@@ -222,43 +269,3 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
         "count_corrections": count_corrections,
         "api_calls_made": api_calls_made,
     }
-
-
-def reschedule_agent_status_task() -> dict:
-    """Reschedule the agent status polling task based on business hours.
-
-    This function should be called periodically to adjust the polling interval
-    based on whether it's currently business hours or not.
-
-    Returns:
-        Dict with ``interval_seconds``, ``is_business_hours``, ``next_run``.
-    """
-    from django_celery_beat.models import IntervalSchedule, PeriodicTask
-
-    interval_seconds = get_poll_interval_seconds()
-
-    # Get or create the appropriate interval schedule
-    schedule, created = IntervalSchedule.objects.get_or_create(
-        every=interval_seconds,
-        period=IntervalSchedule.SECONDS,
-    )
-
-    # Update the periodic task
-    task, _ = PeriodicTask.objects.update_or_create(
-        name="poll-hubspot-agent-status",
-        defaults={
-            "interval": schedule,
-            "task": "support.task_poll_hubspot_agent_status_dynamic",
-            "enabled": True,
-        },
-    )
-
-    result = {
-        "interval_seconds": interval_seconds,
-        "is_business_hours": is_business_hours(),
-        "next_run": task.last_run_at + timezone.timedelta(seconds=interval_seconds) if task.last_run_at else None,
-        "schedule_created": created,
-    }
-
-    logger.info("agent_status_task_rescheduled", **result)
-    return result

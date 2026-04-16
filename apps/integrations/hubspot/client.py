@@ -437,6 +437,13 @@ class HubSpotClient:
           - ``"available"`` → mapped to ``"online"``
           - ``"away"`` / anything else → mapped to ``"away"``
 
+        Paginates through ALL users using the ``after`` cursor to avoid the
+        default 100-record limit. Portals with >100 users would silently miss
+        agents on page 2+ without pagination.
+
+        Results are cached in Redis for 15 seconds to avoid redundant API calls
+        when the SAT heartbeat and Matchmaker drain overlap.
+
         Returns:
             List of dicts with ``user_id``, ``email``, ``availability_status``,
             ``status_enum`` keys.
@@ -445,35 +452,64 @@ class HubSpotClient:
             ExternalServiceError: On API failure.
         """
         import requests
+        from django.core.cache import cache
+
+        # Check cache first — avoids redundant API calls within the same
+        # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
+        cache_key = "hubspot_owners_availability"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
+            return cached
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
-            response = _circuit_breaker.call(
-                requests.get,
-                "https://api.hubapi.com/crm/v3/objects/users",
-                headers=headers,
-                params={
+            result = []
+            after: str | None = None
+            page = 0
+
+            while True:
+                params: dict = {
                     "limit": 100,
                     "properties": "hs_email,hs_availability_status",
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
+                }
+                if after:
+                    params["after"] = after
 
-            result = []
-            for user in data.get("results", []):
-                props = user.get("properties") or {}
-                availability = props.get("hs_availability_status") or "available"
-                result.append(
-                    {
-                        "user_id": user.get("id"),
-                        "email": props.get("hs_email", ""),
-                        "availability_status": availability,
-                        "status_enum": "online" if availability == "available" else "away",
-                    }
+                response = _circuit_breaker.call(
+                    requests.get,
+                    "https://api.hubapi.com/crm/v3/objects/users",
+                    headers=headers,
+                    params=params,
+                    timeout=10,
                 )
-            logger.info("hubspot_owners_availability_fetched", count=len(result))
+                response.raise_for_status()
+                data = response.json()
+                page += 1
+
+                for user in data.get("results", []):
+                    props = user.get("properties") or {}
+                    availability = props.get("hs_availability_status") or "available"
+                    result.append(
+                        {
+                            "user_id": user.get("id"),
+                            "email": props.get("hs_email", ""),
+                            "availability_status": availability,
+                            "status_enum": "online" if availability == "available" else "away",
+                        }
+                    )
+
+                # Follow pagination cursor; stop when no next page
+                paging = data.get("paging") or {}
+                after = (paging.get("next") or {}).get("after")
+                if not after:
+                    break
+
+            # Cache for 15 seconds — shorter than the 20-second heartbeat interval
+            # to ensure fresh data on the next cycle.
+            cache.set(cache_key, result, timeout=15)
+
+            logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
             return result
         except Exception as exc:
             logger.error("hubspot_get_owners_availability_failed", error=str(exc))

@@ -66,6 +66,10 @@ class Agent(models.Model):
     class Meta:
         db_table = "agents"
         ordering = ["name"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["status_enum", "auto_assign_enabled"], name="idx_agent_eligible"),
+            models.Index(fields=["hubspot_owner_id"], name="idx_agent_hubspot_owner"),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -379,6 +383,9 @@ class AssignmentLog(models.Model):
     class Meta:
         db_table = "assignment_logs"
         ordering = ["-assigned_at"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["assignment_type", "-assigned_at"], name="idx_alog_type_assigned_desc"),
+        ]
 
     def __str__(self) -> str:
         return f"AssignmentLog ticket={self.ticket_id} → {self.agent_name}"
@@ -433,6 +440,95 @@ class ConversationReassignment(models.Model):
 
     def __str__(self) -> str:
         return f"Reassignment {self.hubspot_ticket_id}: {self.from_agent_name} → {self.to_agent_name}"
+
+
+class BusinessHoursConfig(models.Model):
+    """Configurable business hours for the SAT system.
+
+    When active, overrides the hardcoded BUSINESS_HOURS dictionary in
+    ``agent_sync_service.py``. Only one active config should exist at a time
+    (enforced by ``is_active`` flag).
+
+    Maps to the ``business_hours_config`` table.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, default="default")
+    is_active = models.BooleanField(default=True)
+    monday_start = models.IntegerField(default=9)
+    monday_end = models.IntegerField(default=18)
+    tuesday_start = models.IntegerField(default=9)
+    tuesday_end = models.IntegerField(default=18)
+    wednesday_start = models.IntegerField(default=9)
+    wednesday_end = models.IntegerField(default=18)
+    thursday_start = models.IntegerField(default=9)
+    thursday_end = models.IntegerField(default=18)
+    friday_start = models.IntegerField(default=9)
+    friday_end = models.IntegerField(default=18)
+    saturday_start = models.IntegerField(default=9)
+    saturday_end = models.IntegerField(default=13)
+    sunday_start = models.IntegerField(default=8)
+    sunday_end = models.IntegerField(default=12)
+    timezone_name = models.CharField(max_length=50, default="America/Sao_Paulo")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "business_hours_config"
+
+    def __str__(self) -> str:
+        return f"BusinessHours '{self.name}' (active={self.is_active})"
+
+    def get_hours_for_weekday(self, weekday: int) -> tuple[int, int] | None:
+        """Return (start_hour, end_hour) for a given weekday (0=Monday)."""
+        mapping = {
+            0: (self.monday_start, self.monday_end),
+            1: (self.tuesday_start, self.tuesday_end),
+            2: (self.wednesday_start, self.wednesday_end),
+            3: (self.thursday_start, self.thursday_end),
+            4: (self.friday_start, self.friday_end),
+            5: (self.saturday_start, self.saturday_end),
+            6: (self.sunday_start, self.sunday_end),
+        }
+        hours = mapping.get(weekday)
+        if hours and hours[0] >= hours[1]:
+            return None  # Invalid or disabled (start >= end)
+        return hours
+
+
+class SpecialSchedule(models.Model):
+    """Override business hours for a specific date.
+
+    Used for holidays, special events, or ad-hoc schedule changes.
+    Takes precedence over ``BusinessHoursConfig`` for the specified date.
+
+    Maps to the ``special_schedules`` table.
+    """
+
+    class ScheduleType(models.TextChoices):
+        CLOSED = "closed", "Closed (no operation)"
+        CUSTOM = "custom", "Custom hours"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    date = models.DateField(unique=True, db_index=True)
+    schedule_type = models.CharField(
+        max_length=20,
+        choices=ScheduleType.choices,
+        default=ScheduleType.CLOSED,
+    )
+    start_hour = models.IntegerField(null=True, blank=True)
+    end_hour = models.IntegerField(null=True, blank=True)
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "special_schedules"
+        ordering = ["-date"]  # noqa: RUF012
+
+    def __str__(self) -> str:
+        if self.schedule_type == self.ScheduleType.CLOSED:
+            return f"SpecialSchedule {self.date} — CLOSED ({self.reason})"
+        return f"SpecialSchedule {self.date} — {self.start_hour}h-{self.end_hour}h ({self.reason})"
 
 
 class AgentDailyTimeLog(models.Model):

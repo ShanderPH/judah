@@ -95,19 +95,50 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
 
     from apps.support.tasks import task_handle_ticket_closed
 
-    owner_id = payload.get("hubspot_owner_id") or payload.get("sourceId")
-    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, str(owner_id) if owner_id else None)
+    # Extract owner_id — avoid using sourceId as fallback since it may contain
+    # non-numeric values like "StageCalculatedPropertiesRollup"
+    owner_id = payload.get("hubspot_owner_id") or ""
+    owner_str = str(owner_id).strip() if owner_id else None
+
+    # Validate that it looks numeric before passing downstream
+    if owner_str:
+        # Handle "userId:12345" format from HubSpot
+        parsed = owner_str.rsplit(":", 1)[-1] if ":" in owner_str else owner_str
+        try:
+            int(parsed)
+        except ValueError, TypeError:
+            logger.debug(
+                "hubspot_ticket_closed_invalid_owner_id",
+                ticket_id=hubspot_ticket_id,
+                raw_owner_id=owner_id,
+            )
+            owner_str = None
+
+    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
     """Handle pipeline stage transitions.
 
-    When a ticket moves to FECHADO (stage 939275052), triggers the closure flow.
-    Other stage changes are logged for observability.
+    When a ticket moves to FECHADO (stage 939275052), this event is logged for
+    observability only. The actual closure flow is triggered exclusively by the
+    ``hs_v2_date_entered_939275052`` property change event (``_PROP_STAGE_CLOSED``)
+    to avoid dispatching duplicate ``task_handle_ticket_closed`` tasks.
+
+    Dispatching closure from both ``hs_pipeline_stage`` and
+    ``hs_v2_date_entered_939275052`` would cause double decrements of
+    ``current_simultaneous_chats`` even though ``handle_ticket_closed`` now
+    holds a Redis dedup lock — the lock prevents re-entry within 60 s, but
+    two rapid concurrent dispatches (one per webhook property) could both
+    reach the cache.add() check before either has committed.
     """
     if new_stage == _STAGE_FECHADO_ID:
-        logger.info("hubspot_ticket_pipeline_stage_fechado", ticket_id=object_id)
-        _handle_ticket_entered_closed(object_id, None, {})
+        # Log for observability — closure is handled by _PROP_STAGE_CLOSED handler.
+        logger.info(
+            "hubspot_ticket_pipeline_stage_fechado_logged",
+            ticket_id=object_id,
+            note="closure dispatched by hs_v2_date_entered_939275052 handler, not here",
+        )
         return
 
     from apps.support.models import Ticket

@@ -42,6 +42,35 @@ from common.exceptions import ExternalServiceError
 logger = structlog.get_logger(__name__)
 
 
+def _safe_parse_owner_id(value: str | int | None) -> int | None:
+    """Safely extract a numeric HubSpot owner ID from various formats.
+
+    HubSpot webhooks may send owner IDs in different formats:
+      - ``"72733895"`` (plain numeric string)
+      - ``"userId:72733895"`` (prefixed format)
+      - ``"StageCalculatedPropertiesRollup"`` (non-ID property name)
+      - ``None`` or empty string
+
+    Returns:
+        The integer owner ID, or None if the value is not a valid owner ID.
+    """
+    if not value:
+        return None
+
+    raw = str(value).strip()
+    if not raw or raw in ("None", "null"):
+        return None
+
+    # Handle "userId:12345" format
+    if ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+
+    try:
+        return int(raw)
+    except ValueError, TypeError:
+        return None
+
+
 def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     """Parse a HubSpot millisecond-epoch timestamp into a UTC datetime."""
     if not value:
@@ -276,12 +305,42 @@ def handle_ticket_closed(
     Updates the ``assigned_conversations`` record with closure metadata,
     calculates total handle time, and decrements the agent's chat counter.
 
+    This function is fully idempotent: concurrent or duplicate calls for the
+    same ticket are safe. A Redis dedup lock + ``select_for_update()`` on the
+    ``AssignedConversation`` row ensures only one execution performs the
+    decrement and moves the record to ``closed_conversations``.
+
+    The agent whose count is decremented is always ``assigned.agent`` — the
+    agent the ticket was auto-assigned to — regardless of who closed it.
+
     Args:
         hubspot_ticket_id: The HubSpot ticket ID.
         closed_at_ms: Value of ``hs_v2_date_entered_939275052`` (ms epoch).
-        owner_id: The ``hubspot_owner_id`` at the time of closure (the
-            agent who closed the ticket).
+        owner_id: The ``hubspot_owner_id`` at the time of closure (used only
+            for ``closed_by_*`` metadata fields, not for count management).
     """
+    from django.core.cache import cache
+
+    # Redis dedup lock — prevent concurrent/duplicate calls (e.g., when both
+    # hs_v2_date_entered_939275052 and hs_pipeline_stage webhooks fire for the
+    # same closure event).
+    lock_key = f"ticket_close:{hubspot_ticket_id}"
+    if not cache.add(lock_key, "1", timeout=60):
+        logger.info("handle_ticket_closed_dedup_skip", ticket_id=hubspot_ticket_id)
+        return
+
+    try:
+        _do_handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+    finally:
+        cache.delete(lock_key)
+
+
+def _do_handle_ticket_closed(
+    hubspot_ticket_id: str,
+    closed_at_ms: str | int | None = None,
+    owner_id: str | None = None,
+) -> None:
+    """Internal implementation of ticket closure — called only after dedup lock is held."""
     closed_at = _parse_hubspot_timestamp(closed_at_ms) or timezone.now()
 
     # If the ticket is still pending (never assigned), remove it from the queue
@@ -291,20 +350,74 @@ def handle_ticket_closed(
         pending_conv.delete()
         logger.info("auto_assign_pending_deleted_on_close", ticket_id=hubspot_ticket_id)
 
-    # Resolve closing agent info
-    closing_owner = int(owner_id) if owner_id and str(owner_id).strip() else None
+    # Resolve closing agent metadata (only used for audit fields, not count management)
+    closing_owner = _safe_parse_owner_id(owner_id)
     closing_agent_name: str | None = None
-    closing_agent_obj: Agent | None = None
 
     if closing_owner:
         closing_agent_obj = Agent.objects.filter(hubspot_owner_id=closing_owner).first()
         if closing_agent_obj:
             closing_agent_name = closing_agent_obj.name
 
+    # Use select_for_update to serialize concurrent closures for the same ticket.
+    # If the row is already gone (another process handled it), get() raises
+    # DoesNotExist which falls through to the minimal ClosedConversation path.
     try:
-        assigned = AssignedConversation.objects.get(hubspot_ticket_id=hubspot_ticket_id)
+        with transaction.atomic():
+            assigned = AssignedConversation.objects.select_for_update().get(hubspot_ticket_id=hubspot_ticket_id)
+
+            handle_time: Decimal | None = None
+            if assigned.assigned_at:
+                delta = closed_at - assigned.assigned_at
+                handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
+
+            resolution_time: Decimal | None = None
+            if assigned.entered_queue_at:
+                total_delta = closed_at - assigned.entered_queue_at
+                resolution_time = Decimal(str(round(total_delta.total_seconds() / 60, 2)))
+
+            # Determine closure source
+            closure_source = "agent"
+            if closing_owner and assigned.agent and closing_owner != assigned.hubspot_owner_id:
+                closure_source = "system"  # Closed by someone other than assigned agent
+
+            if not closing_agent_name and assigned.agent:
+                closing_agent_name = assigned.agent.name
+
+            # Decrement the ASSIGNED agent's count — always use assigned.agent,
+            # regardless of who closed the ticket. This matches the increment that
+            # was applied when the ticket was auto-assigned.
+            if assigned.agent:
+                decrement_agent_chat_count(assigned.agent)
+
+            # Move from assigned_conversations → closed_conversations
+            ClosedConversation.objects.get_or_create(
+                hubspot_ticket_id=hubspot_ticket_id,
+                defaults={
+                    "agent": assigned.agent,
+                    "hubspot_owner_id": assigned.hubspot_owner_id,
+                    "agent_name": assigned.agent_name,
+                    "pipeline_id": assigned.pipeline_id,
+                    "entered_queue_at": assigned.entered_queue_at,
+                    "assigned_at": assigned.assigned_at,
+                    "closed_at": closed_at,
+                    "closed_by_owner_id": closing_owner,
+                    "closed_by_agent_name": closing_agent_name,
+                    "queue_wait_seconds": assigned.queue_wait_seconds,
+                    "total_handle_time_minutes": handle_time,
+                    "resolution_time_minutes": resolution_time,
+                    "closure_source": closure_source,
+                    "contact_name": assigned.contact_name,
+                    "contact_email": assigned.contact_email,
+                    "priority": assigned.priority,
+                    "subject": assigned.subject,
+                },
+            )
+            assigned.delete()
+
     except AssignedConversation.DoesNotExist:
-        # Ticket was closed without ever being assigned — create a minimal closed record
+        # Ticket was closed without ever being assigned (or already processed) —
+        # create a minimal closed record so the event is not silently dropped.
         logger.info("auto_assign_close_no_assigned_record", ticket_id=hubspot_ticket_id)
         ClosedConversation.objects.get_or_create(
             hubspot_ticket_id=hubspot_ticket_id,
@@ -315,55 +428,6 @@ def handle_ticket_closed(
             },
         )
         return
-
-    handle_time: Decimal | None = None
-    if assigned.assigned_at:
-        delta = closed_at - assigned.assigned_at
-        handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
-
-    # Compute resolution time (wait + handle = total lifecycle)
-    resolution_time: Decimal | None = None
-    if assigned.entered_queue_at:
-        total_delta = closed_at - assigned.entered_queue_at
-        resolution_time = Decimal(str(round(total_delta.total_seconds() / 60, 2)))
-
-    # Determine closure source
-    closure_source = "agent"
-    if closing_owner and assigned.agent and closing_owner != assigned.hubspot_owner_id:
-        closure_source = "system"  # Closed by someone other than assigned agent
-
-    # Decrement the assigned agent's chat count
-    decrement_target = closing_agent_obj or assigned.agent
-    if decrement_target:
-        decrement_agent_chat_count(decrement_target)
-    if not closing_agent_name and assigned.agent:
-        closing_agent_name = assigned.agent.name
-
-    with transaction.atomic():
-        # Move from assigned_conversations → closed_conversations
-        ClosedConversation.objects.get_or_create(
-            hubspot_ticket_id=hubspot_ticket_id,
-            defaults={
-                "agent": assigned.agent,
-                "hubspot_owner_id": assigned.hubspot_owner_id,
-                "agent_name": assigned.agent_name,
-                "pipeline_id": assigned.pipeline_id,
-                "entered_queue_at": assigned.entered_queue_at,
-                "assigned_at": assigned.assigned_at,
-                "closed_at": closed_at,
-                "closed_by_owner_id": closing_owner,
-                "closed_by_agent_name": closing_agent_name,
-                "queue_wait_seconds": assigned.queue_wait_seconds,
-                "total_handle_time_minutes": handle_time,
-                "resolution_time_minutes": resolution_time,
-                "closure_source": closure_source,
-                "contact_name": assigned.contact_name,
-                "contact_email": assigned.contact_email,
-                "priority": assigned.priority,
-                "subject": assigned.subject,
-            },
-        )
-        assigned.delete()
 
     logger.info(
         "auto_assign_ticket_closed",
@@ -441,11 +505,15 @@ def sync_novo_stage_tickets() -> dict:
     queue.  Records that already exist (assigned or pending) are skipped so
     this operation is fully idempotent.
 
-    This is intentionally NOT assigning — it only populates the queue so that
-    tickets are ready to be picked up as soon as an agent comes online.
+    Also checks for tickets already tracked in ``assigned_conversations`` to
+    avoid duplicates across the lifecycle tables.
+
+    After populating the queue, immediately attempts assignment to any agent
+    that is already online.
 
     Returns:
-        Dict with ``created``, ``skipped``, ``total_from_hubspot`` counts.
+        Dict with ``created``, ``skipped``, ``already_assigned``,
+        ``total_from_hubspot`` counts.
     """
     logger.info("sync_novo_stage_tickets_start")
 
@@ -454,10 +522,24 @@ def sync_novo_stage_tickets() -> dict:
         tickets = client.search_tickets_in_novo_stage()
     except ExternalServiceError as exc:
         logger.error("sync_novo_stage_tickets_hubspot_fetch_failed", error=str(exc))
-        return {"created": 0, "skipped": 0, "total_from_hubspot": 0, "error": str(exc)}
+        return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0, "error": str(exc)}
 
     created = 0
     skipped = 0
+    already_assigned = 0
+
+    # Pre-fetch existing ticket IDs to avoid N+1 queries in the loop
+    ticket_ids_from_hubspot = {str(t["id"]) for t in tickets}
+    existing_pending = set(
+        NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
+    )
+    existing_assigned = set(
+        AssignedConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
+            "hubspot_ticket_id", flat=True
+        )
+    )
 
     for ticket in tickets:
         ticket_id = str(ticket["id"])
@@ -466,13 +548,17 @@ def sync_novo_stage_tickets() -> dict:
         # "new and unassigned" regardless of their pipeline stage.
         owner_id = ticket.get("owner_id", "")
         if owner_id and str(owner_id).strip() not in ("", "None", "null"):
-            logger.debug("sync_novo_ticket_has_owner_skipped", ticket_id=ticket_id, owner_id=owner_id)
             skipped += 1
             continue
 
-        # Skip tickets already in our queue (pending or already assigned)
-        if NewConversation.objects.filter(hubspot_ticket_id=ticket_id).exists():
+        # Skip tickets already in our queue (pending)
+        if ticket_id in existing_pending:
             skipped += 1
+            continue
+
+        # Skip tickets already assigned
+        if ticket_id in existing_assigned:
+            already_assigned += 1
             continue
 
         entered_at = _parse_hubspot_timestamp(ticket.get("entered_novo_at")) or timezone.now()
@@ -487,22 +573,38 @@ def sync_novo_stage_tickets() -> dict:
             entered_queue_at=entered_at,
         )
         created += 1
-        logger.info("sync_novo_ticket_queued", ticket_id=ticket_id)
+        logger.info(
+            "sync_novo_ticket_instanced",
+            ticket_id=ticket_id,
+            subject=(ticket.get("subject") or "")[:80],
+            contact=ticket.get("contact_name") or "",
+        )
 
     logger.info(
         "sync_novo_stage_tickets_done",
         total_from_hubspot=len(tickets),
         created=created,
         skipped=skipped,
+        already_assigned=already_assigned,
     )
 
     # After populating the queue, immediately try to assign tickets to any
     # agent that is already online — so a sync that runs while agents are
     # available does not require a separate trigger.
     if created > 0:
-        assign_pending_tickets()
+        assign_result = assign_pending_tickets()
+        logger.info(
+            "sync_novo_auto_assign_triggered",
+            assigned=assign_result["assigned"],
+            remaining=assign_result["skipped"],
+        )
 
-    return {"created": created, "skipped": skipped, "total_from_hubspot": len(tickets)}
+    return {
+        "created": created,
+        "skipped": skipped,
+        "already_assigned": already_assigned,
+        "total_from_hubspot": len(tickets),
+    }
 
 
 def sync_hubspot_team_to_agents(team_id: str) -> int:
