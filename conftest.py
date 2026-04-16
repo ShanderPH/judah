@@ -36,11 +36,14 @@ def isolate_db(db):
         NewConversation,
     )
 
+    # Delete in FK-safe order: dependents first, then parent tables.
+    # agent_metrics has a DB-level FK on agents.hubspot_owner_id, so it must
+    # be cleared before agents. agent_status_history has FK on agents too.
     ConversationReassignment.objects.all().delete()
-    Agent.objects.all().delete()
-    AgentMetrics.objects.all().delete()
-    AgentStatusHistory.objects.all().delete()
-    AssignmentLog.objects.all().delete()
-    NewConversation.objects.all().delete()
     AssignedConversation.objects.all().delete()
     ClosedConversation.objects.all().delete()
+    NewConversation.objects.all().delete()
+    AssignmentLog.objects.all().delete()
+    AgentMetrics.objects.all().delete()
+    AgentStatusHistory.objects.all().delete()
+    Agent.objects.all().delete()
