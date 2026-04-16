@@ -202,7 +202,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_reconcile_agent_counts",
         "schedule": crontab(minute=30),  # :30 of every hour
     },
-
 }
 
 # ---------------------------------------------------------------------------

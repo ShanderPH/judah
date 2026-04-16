@@ -625,7 +625,6 @@ def task_reconcile_agent_counts() -> dict:
     return {"agents_checked": len(agents), "corrections": corrections}
 
 
-
 @shared_task(name="support.task_aggregate_agent_metrics")
 def task_aggregate_agent_metrics() -> dict:
     """Celery task: compute and persist per-agent metrics.
