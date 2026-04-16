@@ -105,8 +105,11 @@ def _do_assign(new_conv: NewConversation) -> bool:
             reconciled_count=reconciled_count,
             max_chats=max_chats,
         )
-        # Re-select using the original last_owner_id for Rule 2
-        agent_retry = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
+        # Re-select excluding the capacity-rejected agent via Rule 2.
+        # We pass the REJECTED agent's owner_id so it is skipped in the
+        # next selection, not the original last_owner_id (which would
+        # incorrectly block a still-eligible agent from the previous ticket).
+        agent_retry = select_next_agent(last_assigned_hubspot_owner_id=agent.hubspot_owner_id)
         if agent_retry is None:
             new_conv.queue_status = NewConversation.QueueStatus.QUEUED
             new_conv.assignment_attempts += 1
@@ -115,6 +118,27 @@ def _do_assign(new_conv: NewConversation) -> bool:
                 update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
             )
             return False
+
+        # Also reconcile the retry agent's real-time load from HubSpot before
+        # assigning to it — the queue_service filter uses local DB counts which
+        # may lag behind actual HubSpot state.
+        retry_reconciled = sat_reconcile_agent_load(agent_retry)
+        retry_max = agent_retry.max_simultaneous_chats or 5
+        if retry_reconciled >= retry_max:
+            logger.info(
+                "matchmaker_retry_agent_also_at_capacity",
+                agent=agent_retry.name,
+                reconciled_count=retry_reconciled,
+                max_chats=retry_max,
+            )
+            new_conv.queue_status = NewConversation.QueueStatus.QUEUED
+            new_conv.assignment_attempts += 1
+            new_conv.last_assignment_attempt_at = timezone.now()
+            new_conv.save(
+                update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
+            )
+            return False
+
         agent = agent_retry
 
     # Assign via HubSpot API
