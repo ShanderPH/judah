@@ -63,9 +63,20 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
     and neither the v1 nor v3 signature matches.
     """
     from django.conf import settings
+    from ninja.errors import HttpError
 
     secret = settings.HUBSPOT_APP_SECRET or ""
-    signature_ok = (not secret) or _is_valid_hubspot_request(request, secret)
+    if not secret:
+        # Fail-closed: only tolerate a missing secret in explicit local DEBUG mode.
+        # In any other environment this is a misconfiguration that MUST reject
+        # traffic — silently accepting unsigned webhooks would let anyone forge
+        # HubSpot events against production.
+        if not getattr(settings, "DEBUG", False):
+            logger.error("hubspot_webhook_secret_missing")
+            raise HttpError(500, "HubSpot webhook secret not configured")
+        signature_ok = True
+    else:
+        signature_ok = _is_valid_hubspot_request(request, secret)
 
     if not signature_ok:
         logger.warning(

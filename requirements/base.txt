@@ -19,7 +19,9 @@ django-celery-beat>=2.7.0
 agno>=2.5.0
 openai>=1.60.0
 anthropic>=0.40.0
-pinecone>=6.0.0
+pinecone==5.4.2
+mcp>=1.27.0
+python-dotenv>=1.2.0
 
 # Integrations
 hubspot-api-client>=10.0.0

@@ -1,230 +1,296 @@
 # JUDAH — Backend Unificado InChurch
 
-Backend unificado da InChurch, consolidando 5 serviços separados em uma única plataforma Django moderna e escalável.
+**Status:** Pre-production. See [Known Risks](#known-risks--pre-production-checklist) before deploying.
 
-## Visão Geral
+Backend unificado da InChurch: uma plataforma Django 5.2 que consolida suporte, base de conhecimento, analytics e agentes de IA em um único serviço. Substitui os legados **Salomão v1**, **Salomão WhatsApp**, **Knowledge Base**, **Backoffice** e **Helper CX**.
 
-JUDAH substitui:
-- **Salomão v1** — Agente RAG de IA (FastAPI + OpenAI + Pinecone)
-- **Salomão WhatsApp** — Bot HubSpot WhatsApp (FastAPI + HubSpot API)
-- **Knowledge Base** — Central de Ajuda (Flask + Supabase + Pinecone)
-- **Backoffice** — Operações de suporte (Django Ninja)
-- **Helper CX** — Plataforma de helpdesk (FastAPI + Supabase)
+---
 
-## Stack Tecnológica
+## Table of Contents
 
-| Camada | Tecnologia |
-|--------|-----------|
-| Framework | Django 5.2 LTS |
-| API | Django Ninja 1.6.2 |
-| Auth | django-ninja-jwt |
-| Banco de Dados | Supabase (PostgreSQL) via psycopg3 |
-| Cache / Broker | Redis 7 |
-| Tarefas Assíncronas | Celery 5 + django-celery-beat |
-| IA / Agentes | Agno 2.5 + OpenAI GPT-4o |
-| Vector Store | Pinecone |
-| Servidor | Uvicorn (ASGI) + Gunicorn |
-| Observabilidade | structlog + Sentry |
-| Linting | Ruff |
-| Testes | pytest + pytest-django + pytest-asyncio |
+1. [Architecture Overview](#architecture-overview)
+2. [Tech Stack](#tech-stack)
+3. [Repository Layout](#repository-layout)
+4. [Local Setup](#local-setup)
+5. [Configuration](#configuration)
+6. [Running the API, Worker, and Scheduler](#running-the-api-worker-and-scheduler)
+7. [AI / Agent Architecture](#ai--agent-architecture)
+8. [Security Considerations](#security-considerations)
+9. [Testing](#testing)
+10. [Developer Guidelines](#developer-guidelines)
+11. [Deployment (Railway)](#deployment-railway)
+12. [Known Risks — Pre-production Checklist](#known-risks--pre-production-checklist)
 
-## Estrutura de Apps
+---
+
+## Architecture Overview
+
+```
+                     ┌──────────────────────────┐
+ HubSpot ────────────►  /api/v1/webhooks/       │
+                     │  (HMAC v1+v3 verified)   │
+                     └────────────┬─────────────┘
+                                  │
+                   (Celery task)  ▼
+                     ┌──────────────────────────┐
+                     │  Auto-assignment queue   │
+                     │  (Matchmaker + SAT)      │
+                     └────────────┬─────────────┘
+                                  │
+                                  ▼
+ Authenticated UI ───► /api/v1/ai/salomao/chat ─► SalomaoSupervisorAgent
+                                                    │
+                                     ┌──────────────┼────────────────┐
+                                     ▼              ▼                ▼
+                             HeimdallTriage  KnowledgeRagAgent  HelpdeskAction
+                             (gpt-4o-mini)   (Pinecone RAG)     (MCP tools)
+                                                                      │
+                                                                      ▼
+                                                              HubSpot MCP server
+                                                              (FastMCP stdio)
+```
+
+The **Supervisor** is an Agno `Team` in `coordinate` mode. It calls Heimdall first to produce a structured `TriageResult`, then routes to one of the worker agents based on the returned `rota`. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
+
+Background work (pipeline dispatch, auto-assignment, metrics aggregation) is scheduled by Celery. FastAPI-style endpoints are exposed through **Django Ninja**.
+
+---
+
+## Tech Stack
+
+| Layer              | Choice                                          |
+|--------------------|-------------------------------------------------|
+| Runtime            | Python 3.14 (**exact version required**)        |
+| Framework          | Django 5.2 LTS + Django Ninja 1.6               |
+| Auth               | django-ninja-jwt (HS256)                        |
+| Database           | PostgreSQL 16 (Supabase in dev/prod)            |
+| Cache / Broker     | Redis 7                                         |
+| Async workers      | Celery 5 + django-celery-beat                   |
+| AI runtime         | Agno 2.5 (agents, teams, knowledge)             |
+| Model providers    | OpenAI (GPT-4o, GPT-4o-mini), Anthropic fallback|
+| Vector store       | Pinecone serverless                             |
+| Tool protocol      | MCP 1.x (FastMCP server for HubSpot)            |
+| Observability      | structlog + Sentry + request IDs                |
+| Server             | Uvicorn (ASGI) / Gunicorn                       |
+| Lint / format      | Ruff (target py314)                             |
+| Tests              | pytest + pytest-django + pytest-asyncio         |
+
+---
+
+## Repository Layout
 
 ```
 apps/
-├── auth_user/      # Usuários com papéis (admin, manager, agent, viewer)
-├── church/         # Dados e operações de igrejas
-├── knowledge/      # Central de ajuda com busca semântica
-├── support/        # Helpdesk, tickets, filas, SLA
-├── ai_agents/      # Agentes IA (Salomão + Heimdall)
-├── integrations/   # HubSpot, Jira, Pinecone, Supabase
-├── webhooks/       # Recepção de webhooks externos
-└── analytics/      # Métricas e relatórios diários
+├── auth_user/      # Custom User model with roles (admin, manager, agent, viewer)
+├── church/         # Church domain objects
+├── knowledge/      # Help center articles + semantic search
+├── support/        # Tickets, queues, SAT, auto-assignment, matchmaker
+├── ai_agents/      # Salomão supervisor + Heimdall, RAG, Action agents
+│   ├── agents/          # BaseInChurchAgent + sub-agents (triage, rag, action)
+│   ├── api/             # /ai/salomao/chat + webhooks
+│   ├── mcp_servers/     # FastMCP HubSpot server
+│   ├── services/        # HubSpot hydration, pricing
+│   └── utils/           # Business rules (timezone, holidays)
+├── integrations/   # HubSpot, Jira, Pinecone, Supabase clients
+├── webhooks/       # Canonical inbound webhook router (HubSpot, Jira)
+└── analytics/      # Daily metrics aggregation
+
+common/
+├── circuit_breaker.py   # Process-local breaker (see Known Risks)
+├── exceptions.py        # JudahError hierarchy + Ninja handlers
+├── logging.py           # structlog config + correlation IDs
+├── middleware.py        # RequestLoggingMiddleware
+└── rate_limit.py        # Redis sliding-window limiter
+
+core/
+├── settings/            # base / development / staging / production / test
+├── urls.py              # NinjaAPI root + router registration
+└── celery.py            # Celery app factory
 ```
 
-## Setup Local
+---
 
-### Pré-requisitos
+## Local Setup
 
-- Python 3.14+
-- PostgreSQL 16+ (ou Docker)
-- Redis 7+ (ou Docker)
+### Prerequisites
 
-### 1. Clonar e configurar ambiente
+- **Python 3.14** (exact — see [Known Risks](#known-risks--pre-production-checklist))
+- PostgreSQL 16 (or Supabase project)
+- Redis 7
+
+### 1. Clone and create venv
 
 ```bash
 git clone <repo-url>
 cd judah
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/macOS
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-### 2. Instalar dependências
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements/dev.txt
 pre-commit install
 ```
 
-### 3. Configurar variáveis de ambiente
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
-# Edite .env com suas credenciais
+# Edit .env — do NOT commit
 ```
 
-Variáveis obrigatórias:
-- `DJANGO_SECRET_KEY` — chave secreta Django
-- `DATABASE_URL` — URL PostgreSQL (Supabase)
-- `REDIS_URL` — URL Redis
-- `OPENAI_API_KEY` — chave OpenAI
-- `SUPABASE_URL` + `SUPABASE_SERVICE_KEY`
-
-### 4. Aplicar migrações
+### 4. Migrate and create superuser
 
 ```bash
 make migrate
-```
-
-### 5. Criar superusuário
-
-```bash
 make superuser
 ```
 
-### 6. Iniciar servidor
+---
+
+## Configuration
+
+All secrets and environment-specific settings are loaded via `python-decouple`. The full set is in `.env.example`; the runtime-required subset is:
+
+| Variable                        | Required           | Notes                                                   |
+|---------------------------------|--------------------|---------------------------------------------------------|
+| `DJANGO_SECRET_KEY`             | Always             | Used for Django AND as JWT signing key (see S-08)       |
+| `DJANGO_DEBUG`                  | No (default False) | `True` enables a permissive webhook signature bypass    |
+| `DJANGO_ALLOWED_HOSTS`          | Production         | Comma-separated                                         |
+| `DATABASE_URL`                  | Always             | `postgres://...`                                        |
+| `REDIS_URL`                     | Always             | Broker, cache, and agent session store                  |
+| `OPENAI_API_KEY`                | AI endpoints       | For GPT-4o / 4o-mini and embeddings                     |
+| `PINECONE_API_KEY`              | RAG                | Pinecone serverless                                     |
+| `PINECONE_INDEX_NAME`           | RAG                |                                                         |
+| `PINECONE_HOST`                 | RAG (recommended)  | Data-plane URL — avoids cloud/region guessing           |
+| `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
+| `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
+| `HUBSPOT_PORTAL_ID`             | Optional           | Used to build ticket URLs                               |
+| `SENTRY_DSN`                    | Recommended        | Auto-initialized if set                                 |
+| `DEFAULT_MODEL`                 | Optional           | Override `gpt-4o`                                       |
+| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-4o-mini`                                  |
+| `USE_MOCK_HUBSPOT`              | Dev only           | `True` bypasses signature verification (local simulator)|
+
+---
+
+## Running the API, Worker, and Scheduler
+
+| Target         | Command                    |
+|----------------|----------------------------|
+| API (dev)      | `make run`                 |
+| API (prod)     | `gunicorn core.wsgi:application -k uvicorn.workers.UvicornWorker` |
+| Celery worker  | `make celery`              |
+| Celery beat    | `make celery-beat`         |
+| Full stack     | `make docker-up`           |
+
+OpenAPI docs: `http://localhost:8000/api/v1/docs`
+
+---
+
+## AI / Agent Architecture
+
+### Primary entry point
+
+`POST /api/v1/ai/salomao/chat` (JWT-authenticated) → `SalomaoSupervisorAgent.run_pipeline_async()`.
+
+### Supervisor flow
+
+1. **Circuit breaker** — reject if the session has consumed >15k tokens (`TokenTrackingLog` aggregate). See Known Risks H4.
+2. **Greeting injection** — first-turn system rule prepended to Team instructions (per-request).
+3. **Team.run(message)** — Agno coordinates:
+   - `HeimdallTriageAgent` (gpt-4o-mini, `output_schema=TriageResult`) classifies the message.
+   - Based on `rota`, either `KnowledgeRagAgent` (Pinecone RAG) or `HelpdeskActionAgent` (MCP tools) handles the turn.
+   - `ESCALAR_IMEDIATAMENTE` triggers a human handoff signal.
+4. **Token tracking** — tokens × model price persisted to `TokenTrackingLog` (see `utils/pricing.py`).
+
+### MCP integration
+
+`apps/ai_agents/mcp_servers/hubspot_server.py` is a FastMCP server exposing `get_ticket_status`, `create_helpdesk_ticket`, and `update_ticket`. It runs as a stdio subprocess spawned by the `HelpdeskActionAgent`. No persistent state.
+
+### Inbound webhook pipeline
+
+`POST /api/v1/ai/webhooks/hubspot/ticket-change` verifies HubSpot HMAC (v1 or v3), extracts `ticket_id`, and schedules the supervisor pipeline. **Currently dispatched via `asyncio.create_task` — see Known Risk C3 for the migration to Celery.**
+
+### Session persistence
+
+Agno sessions are stored in Redis under `inchurch:agent:{session_id}`. `session_id` is derived from:
+- `user-{request.user.pk}` for authenticated chat
+- `hubspot-ticket-{ticket_id}` for webhook-triggered runs
+
+---
+
+## Security Considerations
+
+1. **Webhook signatures.** HubSpot webhooks are verified via v1 SHA-256 *or* v3 HMAC. **Never leave `HUBSPOT_APP_SECRET` blank in production** — the current behavior silently accepts all requests in that case (tracked; see risk S-01).
+2. **JWT.** HS256 using `DJANGO_SECRET_KEY`. Rotating the secret invalidates every active session.
+3. **Rate limiting.** `common/rate_limit.py` applies a sliding window per user or IP. Race-prone under high load — see risk H8.
+4. **CORS.** Explicit origin whitelist via `CORS_ALLOWED_ORIGINS`. Credentials allowed.
+5. **Prompt injection.** Agent prompts currently do **not** isolate untrusted content (ticket bodies, user messages). Treat any deployment as internal-only until an injection guardrail is in place.
+6. **Secrets in logs.** `debug_mode=True` is still hardcoded on several agents — these expose prompts and tool arguments in logs. Disable before shipping.
+7. **PII.** No encryption at rest for agent traces; rely on the database's TDE (Supabase).
+8. **MCP subprocess.** Inherits the parent env — strip secrets before passing downstream once `env` kwarg usage is audited.
+
+---
+
+## Testing
 
 ```bash
-make run
+make test                    # pytest with coverage
+pytest apps/support/tests/   # one app
+pytest -m "not slow"         # skip slow suite
 ```
 
-A API estará disponível em `http://localhost:8000/api/v1/`  
-Documentação Swagger: `http://localhost:8000/api/v1/docs`
+**Warning:** `conftest.py:isolate_db` deletes rows from the support tables before every test. If `DATABASE_URL` points at production, this rolls back within the transaction **only** when Django actually opens one. Always confirm you are pointed at a disposable database.
 
-## Docker Compose
+Coverage target: 80% (`pyproject.toml`). AI-agents and webhooks currently have no unit tests — prioritize adding them before relying on the happy path.
 
-Para subir o ambiente completo localmente:
+---
 
-```bash
-make docker-up
-```
+## Developer Guidelines
 
-Serviços disponíveis:
-- `app` → `http://localhost:8000`
-- `db` → `localhost:5432`
-- `redis` → `localhost:6379`
-- Celery worker + beat
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/).
+- **Branches:** `feature/`, `bugfix/`, `hotfix/`, `release/`, `chore/`.
+- **Style:** Ruff; `line-length = 120`, `target-version = py314`.
+- **Types:** 100% on public APIs; `from __future__ import annotations` in new files.
+- **Docstrings:** Mandatory on public classes, functions, and MCP tools (LLMs read them).
+- **Logs:** Use `structlog`. Never log secret prefixes; never log full request bodies.
+- **Migrations:** Generate with `make migrations`, review manually, name descriptively.
 
-```bash
-make docker-down   # parar
-make docker-logs   # ver logs
-```
+---
 
-## Comandos Make
+## Deployment (Railway)
 
-| Comando | Descrição |
-|---------|-----------|
-| `make run` | Inicia Uvicorn (desenvolvimento) |
-| `make test` | Executa pytest com coverage |
-| `make lint` | Ruff check + format (com correções) |
-| `make lint-check` | Ruff sem correções (modo CI) |
-| `make migrate` | Aplica migrações |
-| `make migrations` | Gera novas migrações |
-| `make shell` | Abre Django shell (IPython) |
-| `make superuser` | Cria superusuário admin |
-| `make celery` | Inicia worker Celery |
-| `make celery-beat` | Inicia scheduler Celery Beat |
-| `make docker-up` | Sobe todos os serviços Docker |
-| `make docker-down` | Para os serviços Docker |
+- `Dockerfile` — API container
+- `Dockerfile.worker` — Celery worker
+- `Dockerfile.beat` — Celery beat
+- `railway.toml` / `railway.worker.toml` / `railway.beat.toml` — service declarations
 
-## Endpoints da API
+Railway terminates TLS at the edge; Django trusts `X-Forwarded-Proto` (`SECURE_PROXY_SSL_HEADER`). Do not enable `SECURE_SSL_REDIRECT` — it breaks the internal health check (see `core/settings/production.py`).
 
-### Auth (`/api/v1/auth/`)
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| POST | `/register` | Registrar novo usuário |
-| POST | `/login` | Login (retorna JWT) |
-| POST | `/refresh` | Renovar access token |
-| GET | `/me` | Perfil do usuário autenticado |
-| PATCH | `/me` | Atualizar perfil |
-| POST | `/me/change-password` | Alterar senha |
+`ALLOWED_HOSTS` is extended automatically to include `.railway.app` and `healthcheck.railway.app`.
 
-### AI Agents (`/api/v1/ai/`)
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| POST | `/chat/` | Chat com Salomão |
-| POST | `/triage/` | Triagem com Heimdall |
+---
 
-### Knowledge Base (`/api/v1/knowledge/`)
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| GET | `/articles/` | Listar artigos publicados |
-| GET | `/articles/{slug}` | Buscar artigo por slug |
-| POST | `/search/` | Busca semântica |
+## Known Risks — Pre-production Checklist
 
-### Support (`/api/v1/support/`)
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| GET | `/tickets/` | Listar tickets |
-| POST | `/tickets/` | Criar ticket |
-| GET | `/tickets/{id}` | Buscar ticket |
-| PATCH | `/tickets/{id}` | Atualizar ticket |
+The following must be resolved before production cutover. See the full audit report for detail.
 
-### Health (`/api/v1/health/`)
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| GET | `/` | Health check (db + cache) |
+- [ ] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
+- [ ] **C2** — Add a prompt-injection guardrail around ticket content.
+- [ ] **C3** — Replace `asyncio.create_task` in `ai_agents/api/webhooks.py` with a Celery task.
+- [ ] **C4** — Consolidate the two HubSpot webhook entry points.
+- [ ] **C5** — Gate `conftest.py:isolate_db` behind an explicit test-env marker.
+- [ ] **H1** — Fix `except ValueError, TypeError:` in `auto_assign_service.py` and `hubspot_handler.py`.
+- [ ] **H2** — Remove `debug_mode=True` from Salomão agents; remove the `loading_openai_key` log line.
+- [ ] **H3** — Stop mutating `self._team.instructions` per request.
+- [ ] **H4** — Switch the token budget to a rolling window.
+- [ ] **H5** — Use `output_schema` instead of string-matching for handoff detection and citations.
+- [ ] **H6** — Cache Pinecone / Knowledge / MCPTools at process startup.
+- [ ] **H7** — Delete the legacy module-level `salomao_agent` / `heimdall_agent` + `services.chat_with_agent`.
+- [ ] **H8** — Replace the custom rate limiter with an atomic implementation.
+- [ ] **H9** — Move pipeline stage IDs into settings.
+- [ ] **H10** — Enable Agno tracing + persist `TriageResult` in `AgentTrace`.
 
-## Testes
-
-```bash
-# Todos os testes
-make test
-
-# Com relatório HTML
-pytest --cov=apps --cov=common --cov-report=html
-
-# Apenas um app
-pytest apps/auth_user/tests/ -v
-
-# Marcar como lento
-pytest -m "not slow"
-```
-
-## Arquitetura dos Agentes IA
-
-```
-ai_agents/
-├── agents/
-│   ├── salomao.py    # Agente de suporte ao cliente (GPT-4o)
-│   ├── heimdall.py   # Agente de triagem (GPT-4o-mini)
-│   └── tools/
-│       ├── knowledge_tools.py   # Busca na KB via Pinecone
-│       ├── hubspot_tools.py     # Tickets e contatos HubSpot
-│       └── jira_tools.py        # Issues Jira
-```
-
-## Convenções de Código
-
-- **Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
-- **Branches**: `feature/`, `bugfix/`, `hotfix/`, `release/`, `chore/`
-- **Estilo**: Ruff (PEP 8, linha máx 120 chars)
-- **Type hints**: 100% do código público
-- **Docstrings**: Todas as classes e funções públicas
-
-## Troubleshooting
-
-**Erro `DATABASE_URL not set`**  
-→ Verifique se o `.env` existe e está preenchido.
-
-**Erro de conexão Redis**  
-→ Certifique-se de que o Redis está rodando: `redis-cli ping`
-
-**Migrações falhando**  
-→ Verifique `DATABASE_URL` e que a base existe: `psql -c "CREATE DATABASE judah_dev;"`
-
-**Agentes retornando erro**  
-→ Verifique `OPENAI_API_KEY` e `PINECONE_API_KEY` no `.env`
+Once these are green the system can be promoted to production with a staged rollout.

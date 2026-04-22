@@ -1,0 +1,33 @@
+# Arquivos sensíveis — nunca devem ser lidos, enviados como contexto, ou
+# compartilhados via seleção de IDE para o Claude Code.
+
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Credenciais e segredos
+**/secrets.*
+**/*.secret
+**/*credentials*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+
+# Tokens e configurações locais com segredos
+.netrc
+.npmrc
+.pypirc
+.aws/credentials
+.ssh/
+gcloud/
+service-account*.json
+
+# Dumps e backups de banco que podem vazar dados
+*.sql.gz
+*.dump
+dump.rdb

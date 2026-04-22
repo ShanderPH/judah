@@ -22,6 +22,6 @@ heimdall_agent = Agent(
         "Identifique bugs críticos e escale para o Jira quando necessário.",
     ],
     tools=[GetTicketInfo(), SearchJiraIssues()],
-    show_tool_calls=False,
+    debug_mode=False,
     markdown=False,
 )
