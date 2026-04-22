@@ -12,6 +12,7 @@ authors = [
 target-version = "py314"
 line-length = 120
 src = ["apps", "core", "common"]
+extend-exclude = ["scripts"]
 
 [tool.ruff.lint]
 select = [
@@ -45,6 +46,7 @@ DJANGO_SETTINGS_MODULE = "core.settings.test"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+testpaths = ["apps", "common", "core"]
 addopts = "-v --tb=short --strict-markers -p no:warnings"
 asyncio_mode = "auto"
 markers = [

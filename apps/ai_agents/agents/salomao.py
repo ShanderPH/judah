@@ -21,6 +21,5 @@ salomao_agent = Agent(
         "Para perguntas sobre status de ticket, use a ferramenta de busca do HubSpot.",
     ],
     tools=[SearchKnowledgeBase(), GetTicketInfo()],
-    show_tool_calls=True,
     markdown=True,
 )

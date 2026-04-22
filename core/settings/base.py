@@ -159,6 +159,22 @@ CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_SOFT_TIME_LIMIT = 300
 CELERY_TASK_TIME_LIMIT = 600
 
+# Dedicated queue for AI supervisor pipeline. Keeps long-running LLM
+# workloads isolated from the latency-sensitive support / matchmaker
+# queues so that a runaway agent cannot starve auto-assignment workers.
+# The queue is declared here but ``run_supervisor_pipeline_task`` only
+# dispatches when ``AI_ROUTING_ENABLED`` is true.
+CELERY_TASK_ROUTES = {
+    "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
+}
+
+# --- Feature flags ---
+
+# AI routing is disabled by default. When False, the ``/ai/`` Ninja router is
+# not mounted and the supervisor pipeline task is not dispatched from webhooks.
+# This isolates the dormant AI drop from the legacy auto-assignment system.
+AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
+
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {

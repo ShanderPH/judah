@@ -67,7 +67,7 @@ def _safe_parse_owner_id(value: str | int | None) -> int | None:
 
     try:
         return int(raw)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):  # fmt: skip  # keep parenthesized form for py<3.14 compat
         return None
 
 
@@ -78,7 +78,7 @@ def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
     try:
         ms = int(value)
         return datetime.fromtimestamp(ms / 1000, tz=UTC)
-    except ValueError, TypeError, OSError:
+    except (ValueError, TypeError, OSError):  # fmt: skip  # keep parenthesized form for py<3.14 compat
         return None
 
 

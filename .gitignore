@@ -83,4 +83,11 @@ node_modules/
 # OS
 Thumbs.db
 
+# AI Agents
 /.claude
+/.gemini
+/.agents
+/.windsurf
+/.vscode
+/.pytest_cache
+/.ruff_cache

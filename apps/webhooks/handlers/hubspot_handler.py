@@ -106,7 +106,7 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
         parsed = owner_str.rsplit(":", 1)[-1] if ":" in owner_str else owner_str
         try:
             int(parsed)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):  # fmt: skip  # keep parenthesized form for py<3.14 compat
             logger.debug(
                 "hubspot_ticket_closed_invalid_owner_id",
                 ticket_id=hubspot_ticket_id,

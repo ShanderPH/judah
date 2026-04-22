@@ -1,4 +1,11 @@
-"""Business logic for AI agents app."""
+"""Business logic for AI agents app.
+
+Este pacote agrupa os serviços de domínio do app `ai_agents`. A lógica
+legada permanece exposta no nível do pacote para manter compatibilidade
+com imports existentes (`from apps.ai_agents.services import ...`).
+"""
+
+from __future__ import annotations
 
 import time
 import uuid
@@ -19,19 +26,7 @@ def get_or_create_session(
     church_external_id: str,
     hubspot_contact_id: str,
 ) -> AgentSession:
-    """Retrieve an existing session or create a new one.
-
-    Args:
-        session_id: Optional existing session identifier.
-        agent_type: The agent to use for this session.
-        channel: The communication channel (api, whatsapp, etc.).
-        user_identifier: Opaque identifier for the end user.
-        church_external_id: Church external ID if available.
-        hubspot_contact_id: HubSpot contact ID if available.
-
-    Returns:
-        An AgentSession instance.
-    """
+    """Retrieve an existing session or create a new one."""
     if session_id:
         try:
             return AgentSession.objects.get(session_id=session_id, is_active=True)
@@ -49,14 +44,7 @@ def get_or_create_session(
 
 
 def chat_with_agent(payload: ChatRequest) -> ChatResponse:
-    """Send a message to the specified AI agent and return its response.
-
-    Args:
-        payload: Chat request including message and session context.
-
-    Returns:
-        ChatResponse with the agent's reply and metadata.
-    """
+    """Send a message to the specified AI agent and return its response."""
     from apps.ai_agents.agents.heimdall import heimdall_agent
     from apps.ai_agents.agents.salomao import salomao_agent
 
@@ -101,14 +89,7 @@ def chat_with_agent(payload: ChatRequest) -> ChatResponse:
 
 
 def triage_message(payload: TriageRequest) -> TriageResult:
-    """Use Heimdall to classify and triage an incoming message.
-
-    Args:
-        payload: Triage request with message and context.
-
-    Returns:
-        TriageResult with intent classification and routing suggestions.
-    """
+    """Use Heimdall to classify and triage an incoming message."""
     from apps.ai_agents.agents.heimdall import heimdall_agent
 
     try:
@@ -131,3 +112,14 @@ def triage_message(payload: TriageRequest) -> TriageResult:
             requires_human=True,
             reasoning="Triage failed; defaulting to human handoff.",
         )
+
+
+__all__ = [
+    "ChatRequest",
+    "ChatResponse",
+    "TriageRequest",
+    "TriageResult",
+    "chat_with_agent",
+    "get_or_create_session",
+    "triage_message",
+]

@@ -1,6 +1,7 @@
 """Models for AI agents domain."""
 
 import uuid
+from decimal import Decimal
 
 from django.db import models
 
@@ -76,3 +77,33 @@ class AgentTrace(models.Model):
 
     def __str__(self) -> str:
         return f"{self.session.session_id} — {self.role}"
+
+
+class TokenTrackingLog(models.Model):
+    """Registro de consumo de tokens e custo por execução do pipeline.
+
+    Alimentado ao fim de cada `run_pipeline_async()` do Supervisor para que o
+    time de FinOps consiga agregar custo por ticket/sessão/modelo. Decimal
+    com 6 casas é suficiente para representar frações de centavo em modelos
+    pequenos (gpt-4o-mini: $0.15 / 1M tokens ≈ $1.5e-7 por token).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session_id = models.CharField(max_length=100, db_index=True)
+    ticket_id = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    model_name = models.CharField(max_length=100)
+    prompt_tokens = models.IntegerField(default=0)
+    completion_tokens = models.IntegerField(default=0)
+    total_cost_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal("0"),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "token_tracking_logs"
+        ordering = ["-created_at"]  # noqa: RUF012
+
+    def __str__(self) -> str:
+        return f"{self.session_id} — {self.model_name} — ${self.total_cost_usd}"
