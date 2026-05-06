@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ninja import Router
 
+from apps.support.admin_api import router as admin_router
 from apps.support.schemas import (
     AssignedConversationResponse,
     BusinessHoursResponse,
@@ -21,7 +22,6 @@ from apps.support.schemas import (
     TicketResponse,
     UpdateTicketRequest,
 )
-from apps.support.admin_api import router as admin_router
 from apps.support.services import create_ticket, get_ticket, list_tickets, update_ticket
 from common.pagination import StandardPagination, paginate
 

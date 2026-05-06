@@ -103,9 +103,7 @@ def create_agent(request, payload: CreateAgentRequest) -> tuple[int, Agent]:
     transitions afterwards.
     """
     if Agent.objects.filter(hubspot_owner_id=payload.hubspot_owner_id).exists():
-        raise ConflictError(
-            f"Agent with hubspot_owner_id={payload.hubspot_owner_id} already exists."
-        )
+        raise ConflictError(f"Agent with hubspot_owner_id={payload.hubspot_owner_id} already exists.")
     if Agent.objects.filter(agent_email__iexact=payload.agent_email).exists():
         raise ConflictError(f"Agent with email '{payload.agent_email}' already exists.")
 
@@ -267,9 +265,7 @@ def agent_metrics_summary(request, days: int = 30) -> dict:
     total_chats = sum(r.total_chats for r in rows)
     chats_closed = sum(r.chats_closed for r in rows)
     handle_times = [float(r.average_ticket_time_min) for r in rows if r.average_ticket_time_min]
-    first_responses = [
-        float(r.first_response_time_avg_min) for r in rows if r.first_response_time_avg_min is not None
-    ]
+    first_responses = [float(r.first_response_time_avg_min) for r in rows if r.first_response_time_avg_min is not None]
     resolution_rates = [float(r.resolution_rate) for r in rows if r.resolution_rate is not None]
     csats = [float(r.customer_satisfaction_avg) for r in rows if r.customer_satisfaction_avg is not None]
 
@@ -302,10 +298,7 @@ def list_agent_time_logs(request, agent_id: str, days: int = 30) -> list[AgentDa
         raise NotFoundError(f"Agent with id={agent_id} not found.") from err
 
     cutoff = timezone.localdate() - timedelta(days=min(days, 365))
-    return (
-        AgentDailyTimeLog.objects.filter(agent=agent, log_date__gte=cutoff)
-        .order_by("-log_date")
-    )
+    return AgentDailyTimeLog.objects.filter(agent=agent, log_date__gte=cutoff).order_by("-log_date")
 
 
 @router.get(
@@ -335,9 +328,7 @@ def list_reassignments(
     cutoff = timezone.now() - timedelta(days=min(days, 365))
     qs = ConversationReassignment.objects.filter(reassigned_at__gte=cutoff)
     if agent_owner_id is not None:
-        qs = qs.filter(
-            Q(from_hubspot_owner_id=agent_owner_id) | Q(to_hubspot_owner_id=agent_owner_id)
-        )
+        qs = qs.filter(Q(from_hubspot_owner_id=agent_owner_id) | Q(to_hubspot_owner_id=agent_owner_id))
     return qs.order_by("-reassigned_at")
 
 
@@ -414,7 +405,7 @@ def _hubspot_assign(hubspot_ticket_id: str, owner_id: int) -> None:
 
         client = get_hubspot_client()
         client.assign_ticket_owner(hubspot_ticket_id, owner_id)
-    except Exception as exc:  # noqa: BLE001 — log but don't break local state
+    except Exception as exc:
         logger.warning(
             "manual_assign_hubspot_sync_failed",
             ticket_id=hubspot_ticket_id,
@@ -439,20 +430,14 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
         raise NotFoundError(f"Agent with id={payload.agent_id} not found.") from err
 
     new_conv = NewConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
-    already_assigned = AssignedConversation.objects.filter(
-        hubspot_ticket_id=payload.hubspot_ticket_id
-    ).first()
+    already_assigned = AssignedConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
 
     if not new_conv and not already_assigned:
-        raise NotFoundError(
-            f"No pending or assigned conversation for ticket {payload.hubspot_ticket_id}."
-        )
+        raise NotFoundError(f"No pending or assigned conversation for ticket {payload.hubspot_ticket_id}.")
 
     if already_assigned:
         # Treat as a force-reassign for an already-assigned ticket.
-        return _force_reassign_internal(
-            payload.hubspot_ticket_id, agent, reason="manual_assign_existing"
-        )
+        return _force_reassign_internal(payload.hubspot_ticket_id, agent, reason="manual_assign_existing")
 
     now = timezone.now()
     wait_seconds: Decimal | None = None
@@ -516,9 +501,7 @@ def _force_reassign_internal(
     """Force-reassign a ticket already present in assigned_conversations."""
     assigned = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if not assigned:
-        raise NotFoundError(
-            f"No assigned conversation for ticket {hubspot_ticket_id} — cannot force reassign."
-        )
+        raise NotFoundError(f"No assigned conversation for ticket {hubspot_ticket_id} — cannot force reassign.")
     if assigned.hubspot_owner_id == target_agent.hubspot_owner_id:
         return {
             "success": True,
@@ -532,9 +515,7 @@ def _force_reassign_internal(
     previous_agent = assigned.agent
     duration_with_previous: Decimal | None = None
     if assigned.assigned_at:
-        duration_with_previous = Decimal(
-            str(round((now - assigned.assigned_at).total_seconds(), 2))
-        )
+        duration_with_previous = Decimal(str(round((now - assigned.assigned_at).total_seconds(), 2)))
 
     _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
 
@@ -612,9 +593,7 @@ def force_reassign(request, payload: ForceReassignRequest) -> dict:
     try:
         target = Agent.objects.get(pk=payload.target_agent_id)
     except Agent.DoesNotExist as err:
-        raise NotFoundError(
-            f"Target agent with id={payload.target_agent_id} not found."
-        ) from err
+        raise NotFoundError(f"Target agent with id={payload.target_agent_id} not found.") from err
 
     actor_email = getattr(getattr(request, "auth", None), "email", "admin")
     return _force_reassign_internal(

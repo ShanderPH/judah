@@ -56,7 +56,7 @@ def _is_valid_hubspot_request(request: HttpRequest, secret: str) -> bool:
 
 def _verify_jira_signature(request: HttpRequest, secret: str) -> bool:
     """Verify Jira webhook signature: HMAC-SHA256 of the raw body.
-    
+
     Sent in the ``X-Hub-Signature`` header as ``sha256=<hmac>``.
     """
     signature_header = request.headers.get("x-hub-signature", "")
@@ -137,10 +137,7 @@ def jira_webhook(request: HttpRequest, payload: dict[str, Any]) -> tuple[int, di
         signature_ok = _verify_jira_signature(request, secret)
 
     if not signature_ok:
-        logger.warning(
-            "jira_webhook_invalid_signature",
-            signature_header=request.headers.get("x-hub-signature", "")
-        )
+        logger.warning("jira_webhook_invalid_signature", signature_header=request.headers.get("x-hub-signature", ""))
         raise HttpError(401, "Invalid Jira webhook signature")
 
     event_type = payload.get("webhookEvent", "unknown")

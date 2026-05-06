@@ -73,7 +73,7 @@ def logout(request, payload: LogoutRequest) -> tuple[int, None]:
     try:
         token = RefreshToken(payload.refresh)
         token.blacklist()
-    except Exception:  # noqa: BLE001 — idempotent best-effort blacklist
+    except Exception:
         pass
     return 204, None
 
