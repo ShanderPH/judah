@@ -1,24 +1,18 @@
-You are an expert in Python, Django, and scalable RESTful API development.
-
-
+Expert in Python, Django, scalable RESTful API dev.
 
 Core Principles
 
-\- Django-First Approach: Use Django's built-in features and tools wherever possible to leverage its full capabilities
+\- Django-First: use Django built-ins to full capability
 
-\- Code Quality: Prioritize readability and maintainability; follow Django's coding style guide (PEP 8 compliance)
+\- Code Quality: readable, maintainable; PEP 8 + Django style
 
-\- Naming Conventions: Use descriptive variable and function names; adhere to naming conventions (lowercase with underscores for functions and variables)
+\- Naming: descriptive; lowercase_with_underscores for functions/vars
 
-\- Modular Architecture: Structure your project in a modular way using Django apps to promote reusability and separation of concerns
+\- Modular Architecture: split project into Django apps for reuse + separation
 
-\- Performance Awareness: Always consider scalability and performance implications in your design decisions
-
-
+\- Performance Awareness: weigh scalability + perf in design
 
 Project Structure
-
-
 
 Application Structure
 
@@ -39,8 +33,6 @@ app\_name/
 ├── tasks.py           # Celery tasks (if applicable)
 
 └── \_\_init\_\_.py        # Package initialization
-
-
 
 API Structure
 
@@ -64,8 +56,6 @@ api/
 
 &#x20;   └── urls.py                # Main API URL configuration
 
-
-
 Core Structure
 
 core/
@@ -83,8 +73,6 @@ core/
 ├── logging.py         # Structured logging utilities
 
 └── validators.py      # Reusable validators
-
-
 
 Configuration Structure
 
@@ -104,99 +92,77 @@ config/
 
 └── wsgi.py           # WSGI configuration
 
-
-
 Django/Python Development Guidelines
-
-
 
 Views and API Design
 
-\- Use Class-Based Views: Leverage Django's class-based views (CBVs) with DRF's APIViews
+\- Class-Based Views: use CBVs with DRF APIViews
 
-\- RESTful Design: Follow RESTful principles strictly with proper HTTP methods and status codes
+\- RESTful Design: strict REST, proper HTTP methods + status codes
 
-\- Keep Views Light: Focus views on request handling; keep business logic in models, managers, and services
+\- Keep Views Light: views handle requests; business logic in models, managers, services
 
-\- Consistent Response Format: Use unified response structure for both success and error cases
-
-
+\- Consistent Response Format: unified structure for success + error
 
 Models and Database
 
-\- ORM First: Leverage Django's ORM for database interactions; avoid raw SQL queries unless necessary for performance
+\- ORM First: use Django ORM; avoid raw SQL unless perf-critical
 
-\- Business Logic in Models: Keep business logic in models and custom managers
+\- Business Logic in Models: put logic in models + custom managers
 
-\- Query Optimization: Use select\_related and prefetch\_related for related object fetching
+\- Query Optimization: use select\_related + prefetch\_related for related fetches
 
-\- Database Indexing: Implement proper database indexing for frequently queried fields
+\- Database Indexing: index frequently queried fields
 
-\- Transactions: Use transaction.atomic() for data consistency in critical operations
-
-
+\- Transactions: use transaction.atomic() for critical ops
 
 Serializers and Validation
 
-\- DRF Serializers: Use Django REST Framework serializers for data validation and serialization
+\- DRF Serializers: validate + serialize via DRF
 
-\- Custom Validation: Implement custom validators for complex business rules
+\- Custom Validation: custom validators for complex rules
 
-\- Field-Level Validation: Use serializer field validation for input sanitization
+\- Field-Level Validation: sanitize input via serializer fields
 
-\- Nested Serializers: Properly handle nested relationships with appropriate serializers
-
-
+\- Nested Serializers: handle nested relationships correctly
 
 Authentication and Permissions
 
-\- JWT Authentication: Use djangorestframework\_simplejwt for JWT token-based authentication
+\- JWT Authentication: djangorestframework\_simplejwt for JWT auth
 
-\- Custom Permissions: Implement granular permission classes for different user roles
+\- Custom Permissions: granular permission classes per role
 
-\- Security Best Practices: Implement proper CSRF protection, CORS configuration, and input sanitization
-
-
+\- Security: CSRF, CORS, input sanitization
 
 URL Configuration
 
-\- URL Patterns: Use urlpatterns to define clean URL patterns with each path() mapping routes to views
+\- URL Patterns: clean urlpatterns; path() maps routes to views
 
-\- Nested Routing: Use include() for modular URL organization
+\- Nested Routing: include() for modular URLs
 
-\- API Versioning: Implement proper API versioning strategy (URL-based versioning recommended)
-
-
+\- API Versioning: URL-based versioning preferred
 
 Performance and Scalability
 
-
-
 Query Optimization
 
-\- N+1 Problem Prevention: Always use select\_related and prefetch\_related appropriately
+\- N+1 Prevention: always use select\_related + prefetch\_related
 
-\- Query Monitoring: Monitor query counts and execution time in development
+\- Query Monitoring: track query count + exec time in dev
 
-\- Database Connection Pooling: Implement connection pooling for high-traffic applications
+\- Database Connection Pooling: pool connections for high traffic
 
-\- Caching Strategy: Use Django's cache framework with Redis/Memcached for frequently accessed data
-
-
+\- Caching Strategy: Django cache framework + Redis/Memcached for hot data
 
 Response Optimization
 
-\- Pagination: Standardize pagination across all list endpoints
+\- Pagination: standard pagination on all list endpoints
 
-\- Field Selection: Allow clients to specify required fields to reduce payload size
+\- Field Selection: clients pick fields, shrink payload
 
-\- Compression: Enable response compression for large payloads
-
-
+\- Compression: enable response compression for big payloads
 
 Error Handling and Logging
-
-
 
 Unified Error Responses
 
@@ -216,25 +182,18 @@ Unified Error Responses
 
 }
 
-
-
 Exception Handling
 
-\- Custom Exception Handler: Implement global exception handling for consistent error responses
+\- Custom Exception Handler: global handler for consistent errors
 
-\- Django Signals: Use Django signals to decouple error handling and post-model activities
+\- Django Signals: decouple error handling + post-model work
 
-\- Proper HTTP Status Codes: Use appropriate HTTP status codes (400, 401, 403, 404, 422, 500, etc.)
-
-
+\- HTTP Status Codes: use correct codes (400, 401, 403, 404, 422, 500, etc.)
 
 Logging Strategy
 
-\- Structured Logging: Implement structured logging for API monitoring and debugging
+\- Structured Logging: for API monitoring + debugging
 
-\- Request/Response Logging: Log API calls with execution time, user info, and response status
+\- Request/Response Logging: log calls with exec time, user, status
 
-\- Performance Monitoring: Log slow queries and performance bottlenecks
-
-
-
+\- Performance Monitoring: log slow queries + bottlenecks

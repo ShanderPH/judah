@@ -54,6 +54,19 @@ def _is_valid_hubspot_request(request: HttpRequest, secret: str) -> bool:
     return _verify_hubspot_signature_v1(request, secret) or _verify_hubspot_signature_v3(request, secret)
 
 
+def _verify_jira_signature(request: HttpRequest, secret: str) -> bool:
+    """Verify Jira webhook signature: HMAC-SHA256 of the raw body.
+    
+    Sent in the ``X-Hub-Signature`` header as ``sha256=<hmac>``.
+    """
+    signature_header = request.headers.get("x-hub-signature", "")
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    signature = signature_header[7:]
+    expected = hmac.new(secret.encode("utf-8"), request.body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
 @router.post("/hubspot/", response={202: dict}, auth=None, summary="HubSpot webhook receiver")
 def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, dict]:
     """Receive and queue HubSpot CRM webhook events.
@@ -111,6 +124,25 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
 @router.post("/jira/", response={202: dict}, auth=None, summary="Jira webhook receiver")
 def jira_webhook(request: HttpRequest, payload: dict[str, Any]) -> tuple[int, dict]:
     """Receive and queue Jira webhook events."""
+    from django.conf import settings
+    from ninja.errors import HttpError
+
+    secret = getattr(settings, "JIRA_WEBHOOK_SECRET", "")
+    if not secret:
+        if not getattr(settings, "DEBUG", False):
+            logger.error("jira_webhook_secret_missing")
+            raise HttpError(500, "Jira webhook secret not configured")
+        signature_ok = True
+    else:
+        signature_ok = _verify_jira_signature(request, secret)
+
+    if not signature_ok:
+        logger.warning(
+            "jira_webhook_invalid_signature",
+            signature_header=request.headers.get("x-hub-signature", "")
+        )
+        raise HttpError(401, "Invalid Jira webhook signature")
+
     event_type = payload.get("webhookEvent", "unknown")
     event = record_webhook_event(source="jira", event_type=event_type, payload=payload)
     process_webhook_event(event.pk)

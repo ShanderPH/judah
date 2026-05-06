@@ -10,8 +10,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -88,6 +88,14 @@ Thumbs.db
 /.gemini
 /.agents
 /.windsurf
+/.playwright-mcp/
 /.vscode
 /.pytest_cache
 /.ruff_cache
+
+# Webapp local artifacts
+/webapp/.next/
+/webapp/node_modules/
+/webapp/.dev.log
+/webapp/.dev.pid
+/webapp/tsconfig.tsbuildinfo

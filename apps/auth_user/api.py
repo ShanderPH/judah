@@ -10,6 +10,7 @@ from ninja_jwt.tokens import RefreshToken
 from apps.auth_user.schemas import (
     ChangePasswordRequest,
     LoginRequest,
+    LogoutRequest,
     RegisterRequest,
     TokenResponse,
     UpdateProfileRequest,
@@ -58,6 +59,23 @@ def refresh_token(request, refresh: str) -> TokenResponse:
         )
     except Exception as exc:
         raise UnauthorizedError("Invalid or expired refresh token.") from exc
+
+
+@router.post("/logout", response={204: None}, auth=None, summary="Logout — blacklist refresh token")
+def logout(request, payload: LogoutRequest) -> tuple[int, None]:
+    """Invalidate the supplied refresh token by adding it to the blacklist.
+
+    The frontend remains responsible for clearing its HttpOnly cookies
+    after a successful response. Calling logout with a token that is
+    already blacklisted, expired, or malformed succeeds silently to keep
+    the operation idempotent.
+    """
+    try:
+        token = RefreshToken(payload.refresh)
+        token.blacklist()
+    except Exception:  # noqa: BLE001 — idempotent best-effort blacklist
+        pass
+    return 204, None
 
 
 @router.get("/me", response=UserResponse, summary="Get current user profile")
