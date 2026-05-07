@@ -43,7 +43,11 @@ class Command(BaseCommand):
         user.set_password(password)
         if options.get("activate"):
             user.is_active = True
-        user.save(update_fields=["password", "is_active", "updated_at"] if options.get("activate") else ["password", "updated_at"])
+        user.save(
+            update_fields=["password", "is_active", "updated_at"]
+            if options.get("activate")
+            else ["password", "updated_at"]
+        )
 
         self.stdout.write(
             self.style.SUCCESS(
