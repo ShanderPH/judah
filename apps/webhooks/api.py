@@ -7,7 +7,7 @@ import hmac
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from ninja import Router
+from ninja import Body, Router
 
 from apps.webhooks.services import process_webhook_event, record_webhook_event
 
@@ -122,7 +122,7 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
 
 
 @router.post("/jira/", response={202: dict}, auth=None, summary="Jira webhook receiver")
-def jira_webhook(request: HttpRequest, payload: dict[str, Any]) -> tuple[int, dict]:
+def jira_webhook(request: HttpRequest, payload: Body[dict[str, Any]]) -> tuple[int, dict]:
     """Receive and queue Jira webhook events."""
     from django.conf import settings
     from ninja.errors import HttpError

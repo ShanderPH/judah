@@ -22,7 +22,7 @@ def get_ticket(ticket_id: UUID | str) -> Ticket:
     """
     try:
         return Ticket.objects.get(pk=ticket_id)
-    except (Ticket.DoesNotExist, ValueError):
+    except Ticket.DoesNotExist, ValueError:
         try:
             return Ticket.objects.get(ticket_id=str(ticket_id))
         except Ticket.DoesNotExist as err:

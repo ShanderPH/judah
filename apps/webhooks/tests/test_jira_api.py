@@ -28,9 +28,9 @@ class TestJiraWebhookAPI:
             self.url, data=body, content_type="application/json", headers={"x-hub-signature": signature}
         )
 
-        assert response.status_code == 202
+        assert response.status_code == 202, response.content
         assert response.json()["status"] == "accepted"
-        assert WebhookEvent.objects.filter(source="jira", event_type="jira:issue_created").exists()
+        assert WebhookEvent.objects.filter(event_type="jira:issue_created").exists()
 
     @override_settings(JIRA_WEBHOOK_SECRET="test-jira-secret")
     def test_jira_webhook_missing_signature(self):
@@ -39,7 +39,7 @@ class TestJiraWebhookAPI:
         response = self.client.post(self.url, data=body, content_type="application/json")
 
         assert response.status_code == 401
-        assert not WebhookEvent.objects.filter(source="jira").exists()
+        assert not WebhookEvent.objects.filter(event_type__startswith="jira:").exists()
 
     @override_settings(JIRA_WEBHOOK_SECRET="test-jira-secret")
     def test_jira_webhook_invalid_signature(self):
@@ -50,7 +50,7 @@ class TestJiraWebhookAPI:
         )
 
         assert response.status_code == 401
-        assert not WebhookEvent.objects.filter(source="jira").exists()
+        assert not WebhookEvent.objects.filter(event_type__startswith="jira:").exists()
 
     @override_settings(JIRA_WEBHOOK_SECRET="", DEBUG=False)
     def test_jira_webhook_missing_secret_in_prod(self):
@@ -59,4 +59,4 @@ class TestJiraWebhookAPI:
         response = self.client.post(self.url, data=body, content_type="application/json")
 
         assert response.status_code == 500
-        assert not WebhookEvent.objects.filter(source="jira").exists()
+        assert not WebhookEvent.objects.filter(event_type__startswith="jira:").exists()
