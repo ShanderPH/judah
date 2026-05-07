@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -151,7 +151,7 @@ class QueueMetricsResponse(Schema):
     """Daily queue performance metrics."""
 
     id: UUID
-    metric_date: str
+    metric_date: date
     total_entered_queue: int
     total_assigned: int
     total_closed: int
@@ -279,7 +279,7 @@ class SpecialScheduleResponse(Schema):
     """A special schedule override."""
 
     id: UUID
-    date: str
+    date: date
     schedule_type: str
     start_hour: int | None = None
     end_hour: int | None = None
@@ -292,7 +292,7 @@ class SpecialScheduleResponse(Schema):
 class CreateSpecialScheduleRequest(Schema):
     """Request body for creating a special schedule."""
 
-    date: str
+    date: date
     schedule_type: str = "closed"
     start_hour: int | None = None
     end_hour: int | None = None
@@ -386,7 +386,7 @@ class AgentMetricsResponse(Schema):
 class AgentDailyTimeLogResponse(Schema):
     id: UUID
     agent_id: UUID
-    log_date: str
+    log_date: date
     online_time_seconds: int
     away_time_seconds: int
     status_transitions: int
