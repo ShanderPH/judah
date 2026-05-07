@@ -58,8 +58,7 @@ def readiness_check(request) -> JsonResponse:
 
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT to_regclass('public.auth_users'), "
-                "to_regclass('public.token_blacklist_outstandingtoken')",
+                "SELECT to_regclass('public.auth_users'), to_regclass('public.token_blacklist_outstandingtoken')",
             )
             row = cur.fetchone() or (None, None)
         if row[0] is None:
