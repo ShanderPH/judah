@@ -31,6 +31,7 @@ DJANGO_APPS = [
 THIRD_PARTY_APPS = [
     "ninja",
     "ninja_jwt",
+    "ninja_jwt.token_blacklist",
     "corsheaders",
     "django_celery_beat",
 ]
@@ -290,6 +291,7 @@ HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
 JIRA_SERVER_URL = config("JIRA_SERVER_URL", default="")
 JIRA_API_TOKEN = config("JIRA_API_TOKEN", default="")
 JIRA_USER_EMAIL = config("JIRA_USER_EMAIL", default="")
+JIRA_WEBHOOK_SECRET = config("JIRA_WEBHOOK_SECRET", default="")
 
 # --- Sentry ---
 

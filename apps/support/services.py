@@ -1,95 +1,90 @@
 """Business logic for support/helpdesk app."""
 
-import contextlib
+from __future__ import annotations
+
+from uuid import UUID
 
 import structlog
+from django.utils import timezone
 
-from apps.support.models import Queue, Ticket
+from apps.support.models import Ticket
 from apps.support.schemas import CreateTicketRequest, UpdateTicketRequest
 from common.exceptions import NotFoundError
 
 logger = structlog.get_logger(__name__)
 
 
-def get_ticket(ticket_id: int) -> Ticket:
-    """Fetch a ticket by primary key.
+def get_ticket(ticket_id: UUID | str) -> Ticket:
+    """Fetch a ticket by primary key (UUID) or by external ``ticket_id``.
 
     Raises:
-        NotFoundError: If no ticket with the given ID exists.
+        NotFoundError: If no ticket with the given identifier exists.
     """
     try:
-        return Ticket.objects.select_related("queue", "sla", "assigned_to").get(pk=ticket_id)
-    except Ticket.DoesNotExist as err:
-        raise NotFoundError(f"Ticket with id={ticket_id} not found.") from err
+        return Ticket.objects.get(pk=ticket_id)
+    except Ticket.DoesNotExist, ValueError:
+        try:
+            return Ticket.objects.get(ticket_id=str(ticket_id))
+        except Ticket.DoesNotExist as err:
+            raise NotFoundError(f"Ticket with id={ticket_id} not found.") from err
 
 
 def list_tickets(
     status: str | None = None,
-    queue_slug: str | None = None,
+    church: str | None = None,
     priority: str | None = None,
 ) -> list[Ticket]:
-    """Return tickets filtered by optional status, queue slug, and priority."""
-    qs = Ticket.objects.select_related("queue", "assigned_to")
+    """Return tickets filtered by optional status, church, and priority."""
+    qs = Ticket.objects.all()
     if status:
         qs = qs.filter(status=status)
-    if queue_slug:
-        qs = qs.filter(queue__slug=queue_slug)
+    if church:
+        qs = qs.filter(ticket_church=church)
     if priority:
         qs = qs.filter(priority=priority)
     return list(qs.order_by("-created_at"))
 
 
 def create_ticket(payload: CreateTicketRequest) -> Ticket:
-    """Create a new support ticket.
-
-    Args:
-        payload: Validated ticket creation data.
-
-    Returns:
-        The newly created Ticket instance.
-    """
-    queue = None
-    if payload.queue_id:
-        with contextlib.suppress(Queue.DoesNotExist):
-            queue = Queue.objects.get(pk=payload.queue_id)
-
+    """Create a new support ticket."""
     ticket = Ticket.objects.create(
-        subject=payload.subject,
-        description=payload.description,
-        priority=payload.priority,
-        channel=payload.channel,
-        customer_email=payload.customer_email,
+        ticket_id=payload.ticket_id,
         customer_name=payload.customer_name,
-        church_external_id=payload.church_external_id,
-        queue=queue,
+        ticket_church=payload.ticket_church,
+        category=payload.category,
+        priority=payload.priority,
+        status=payload.status,
+        affected_device=payload.affected_device,
+        scope_of_impact=payload.scope_of_impact,
+        affected_module=payload.affected_module,
+        affected_functionality=payload.affected_functionality,
+        created_at=payload.created_at or timezone.now(),
     )
-    logger.info("ticket_created", ticket_id=ticket.pk, subject=ticket.subject)
+    logger.info("ticket_created", ticket_id=str(ticket.pk), external_id=ticket.ticket_id)
     return ticket
 
 
-def update_ticket(ticket_id: int, payload: UpdateTicketRequest) -> Ticket:
-    """Partially update an existing ticket.
-
-    Raises:
-        NotFoundError: If the ticket does not exist.
-    """
+def update_ticket(ticket_id: UUID | str, payload: UpdateTicketRequest) -> Ticket:
+    """Partially update an existing ticket."""
     ticket = get_ticket(ticket_id)
     updated_fields: list[str] = []
 
-    if payload.status is not None:
-        ticket.status = payload.status
-        updated_fields.append("status")
-    if payload.priority is not None:
-        ticket.priority = payload.priority
-        updated_fields.append("priority")
-    if payload.queue_id is not None:
-        try:
-            ticket.queue = Queue.objects.get(pk=payload.queue_id)
-            updated_fields.append("queue")
-        except Queue.DoesNotExist:
-            pass
+    for field in (
+        "status",
+        "priority",
+        "category",
+        "affected_device",
+        "scope_of_impact",
+        "affected_module",
+        "affected_functionality",
+        "closed_at",
+    ):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(ticket, field, value)
+            updated_fields.append(field)
 
     if updated_fields:
         ticket.save(update_fields=[*updated_fields, "updated_at"])
-        logger.info("ticket_updated", ticket_id=ticket.pk, fields=updated_fields)
+        logger.info("ticket_updated", ticket_id=str(ticket.pk), fields=updated_fields)
     return ticket

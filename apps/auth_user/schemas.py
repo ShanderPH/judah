@@ -44,6 +44,12 @@ class RefreshRequest(Schema):
     refresh: str
 
 
+class LogoutRequest(Schema):
+    """Payload to log out and blacklist a refresh token."""
+
+    refresh: str
+
+
 class UserResponse(Schema):
     """Public user representation."""
 

@@ -11,7 +11,7 @@ from ninja import Field, Schema
 
 
 class QueueResponse(Schema):
-    id: int
+    id: UUID
     name: str
     slug: str
     is_active: bool
@@ -21,13 +21,13 @@ class QueueResponse(Schema):
 
 
 class TicketListResponse(Schema):
-    id: int
-    subject: str
-    status: str
-    priority: str
-    channel: str
-    customer_email: str
-    hubspot_ticket_id: str | None
+    id: UUID
+    ticket_id: str
+    customer_name: str | None = None
+    ticket_church: str | None = None
+    category: str | None = None
+    priority: str | None = None
+    status: str | None = None
     created_at: datetime
 
     class Config:
@@ -35,42 +35,48 @@ class TicketListResponse(Schema):
 
 
 class TicketResponse(Schema):
-    id: int
-    hubspot_ticket_id: str | None
-    subject: str
-    description: str
-    status: str
-    priority: str
-    channel: str
-    customer_email: str
-    customer_name: str
-    church_external_id: str
-    sla_breached: bool
-    first_response_at: datetime | None
-    resolved_at: datetime | None
+    id: UUID
+    ticket_id: str
+    customer_name: str | None = None
+    ticket_church: str | None = None
+    category: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    affected_device: str | None = None
+    scope_of_impact: str | None = None
+    affected_module: str | None = None
+    affected_functionality: str | None = None
     created_at: datetime
-    updated_at: datetime
+    closed_at: datetime | None = None
+    updated_at: datetime | None = None
 
     class Config:
         from_attributes = True
 
 
 class CreateTicketRequest(Schema):
-    subject: str
-    description: str = ""
-    priority: str = "medium"
-    channel: str = "email"
-    customer_email: str = ""
-    customer_name: str = ""
-    church_external_id: str = ""
-    queue_id: int | None = None
+    ticket_id: str
+    customer_name: str | None = None
+    ticket_church: str | None = None
+    category: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    affected_device: str | None = None
+    scope_of_impact: str | None = None
+    affected_module: str | None = None
+    affected_functionality: str | None = None
+    created_at: datetime | None = None
 
 
 class UpdateTicketRequest(Schema):
     status: str | None = None
     priority: str | None = None
-    assigned_to_id: int | None = None
-    queue_id: int | None = None
+    category: str | None = None
+    affected_device: str | None = None
+    scope_of_impact: str | None = None
+    affected_module: str | None = None
+    affected_functionality: str | None = None
+    closed_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -291,3 +297,161 @@ class CreateSpecialScheduleRequest(Schema):
     start_hour: int | None = None
     end_hour: int | None = None
     reason: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Agent administration schemas
+# ---------------------------------------------------------------------------
+
+
+class AgentResponse(Schema):
+    """Public detail of a support agent."""
+
+    id: UUID
+    name: str
+    agent_email: str
+    hubspot_owner_id: int
+    team: str | None = None
+    manager_email: str | None = None
+    status_enum: str
+    current_simultaneous_chats: int
+    max_simultaneous_chats: int
+    auto_assign_enabled: bool
+    is_active: bool | None = None
+    timezone: str
+    last_assignment_at: datetime | None = None
+    total_assignments: int
+    online_time_seconds_today: int
+    away_time_seconds_today: int
+    last_status_change_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class CreateAgentRequest(Schema):
+    """Payload for creating a new agent."""
+
+    name: str
+    agent_email: str
+    hubspot_owner_id: int
+    team: str | None = None
+    manager_email: str | None = None
+    timezone: str = "America/Sao_Paulo"
+    max_simultaneous_chats: int = 5
+    auto_assign_enabled: bool = True
+
+
+class UpdateAgentRequest(Schema):
+    """Payload for partially updating an agent."""
+
+    name: str | None = None
+    team: str | None = None
+    manager_email: str | None = None
+    timezone: str | None = None
+    max_simultaneous_chats: int | None = Field(default=None, ge=0, le=50)
+    auto_assign_enabled: bool | None = None
+    is_active: bool | None = None
+    status_enum: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Metrics / time-log / reassignment read schemas
+# ---------------------------------------------------------------------------
+
+
+class AgentMetricsResponse(Schema):
+    id: UUID
+    agent_id: int
+    period_start: str | None = None
+    period_end: str | None = None
+    average_online_time: float
+    average_away_time: float
+    average_daily_tickets: int
+    average_response_time_min: float
+    average_ticket_time_min: float
+    tickets_transfer: int
+    csat: int
+    total_chats: int
+    chats_closed: int
+    first_response_time_avg_min: Decimal | None = None
+    resolution_rate: Decimal | None = None
+    customer_satisfaction_avg: Decimal | None = None
+    last_time_updated: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AgentDailyTimeLogResponse(Schema):
+    id: UUID
+    agent_id: UUID
+    log_date: str
+    online_time_seconds: int
+    away_time_seconds: int
+    status_transitions: int
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationReassignmentResponse(Schema):
+    id: UUID
+    hubspot_ticket_id: str
+    from_agent_name: str | None = None
+    from_hubspot_owner_id: int | None = None
+    to_agent_name: str | None = None
+    to_hubspot_owner_id: int | None = None
+    reassigned_at: datetime
+    time_with_previous_agent_seconds: Decimal | None = None
+    reassignment_source: str
+
+    class Config:
+        from_attributes = True
+
+
+class ReassignmentSummary(Schema):
+    """Aggregated reassignment counts for an agent."""
+
+    hubspot_owner_id: int
+    agent_name: str | None = None
+    transferred_in: int
+    transferred_out: int
+    net: int
+
+
+class AgentMetricsSummary(Schema):
+    """High-level aggregation over the period filter."""
+
+    period_days: int
+    total_agents_with_data: int
+    total_chats: int
+    total_chats_closed: int
+    avg_handle_time_min: float
+    avg_first_response_min: float
+    avg_resolution_rate: float
+    avg_csat: float
+
+
+# ---------------------------------------------------------------------------
+# Manual assignment schemas
+# ---------------------------------------------------------------------------
+
+
+class ManualAssignRequest(Schema):
+    hubspot_ticket_id: str
+    agent_id: UUID
+
+
+class ForceReassignRequest(Schema):
+    hubspot_ticket_id: str
+    target_agent_id: UUID
+    reason: str | None = None
+
+
+class AssignmentActionResponse(Schema):
+    success: bool
+    hubspot_ticket_id: str
+    agent_id: str | None = None
+    agent_name: str | None = None
+    detail: str

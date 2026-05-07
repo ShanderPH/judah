@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ninja import Router
 
+from apps.support.admin_api import router as admin_router
 from apps.support.schemas import (
     AssignedConversationResponse,
     BusinessHoursResponse,
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from apps.support.models import AssignedConversation, NewConversation, QueuePerformanceMetrics, Ticket
 
 router = Router()
+router.add_router("", admin_router)
 
 
 @router.get("/tickets/", response=list[TicketListResponse], summary="List tickets")
@@ -35,11 +37,11 @@ router = Router()
 def list_tickets_endpoint(
     request,
     status: str | None = None,
-    queue: str | None = None,
+    church: str | None = None,
     priority: str | None = None,
 ) -> list[Ticket]:
     """Return paginated tickets with optional filters."""
-    return list_tickets(status=status, queue_slug=queue, priority=priority)
+    return list_tickets(status=status, church=church, priority=priority)
 
 
 @router.post("/tickets/", response={201: TicketResponse}, summary="Create ticket")
@@ -49,13 +51,13 @@ def create_ticket_endpoint(request, payload: CreateTicketRequest) -> tuple[int, 
 
 
 @router.get("/tickets/{ticket_id}", response=TicketResponse, summary="Get ticket")
-def get_ticket_endpoint(request, ticket_id: int) -> Ticket:
-    """Return a single ticket by ID."""
+def get_ticket_endpoint(request, ticket_id: str) -> Ticket:
+    """Return a single ticket by primary key (UUID) or external ``ticket_id``."""
     return get_ticket(ticket_id)
 
 
 @router.patch("/tickets/{ticket_id}", response=TicketResponse, summary="Update ticket")
-def update_ticket_endpoint(request, ticket_id: int, payload: UpdateTicketRequest) -> Ticket:
+def update_ticket_endpoint(request, ticket_id: str, payload: UpdateTicketRequest) -> Ticket:
     """Partially update a ticket."""
     return update_ticket(ticket_id, payload)
 
