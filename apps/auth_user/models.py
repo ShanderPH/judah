@@ -19,7 +19,7 @@ class User(AbstractUser):
         default=Role.VIEWER,
         db_index=True,
     )
-    avatar_url = models.URLField(blank=True)
+    avatar_url = models.URLField(blank=True, null=True)
     hubspot_owner_id = models.CharField(max_length=50, blank=True, db_index=True)
     is_ai_agent = models.BooleanField(default=False)
 

@@ -196,3 +196,45 @@ class TestLoginEndpoint:
             content_type="application/json",
         )
         assert response.status_code == 422
+
+
+@pytest.mark.django_db
+class TestMeEndpoint:
+    """Tests for GET /api/v1/auth/me — the post-login profile fetch."""
+
+    def _login(self, client: Client, identity: str, password: str) -> str:
+        response = client.post(
+            "/api/v1/auth/login",
+            data={"username": identity, "password": password},
+            content_type="application/json",
+        )
+        assert response.status_code == 200, response.content
+        return response.json()["access"]
+
+    def test_me_returns_profile_when_avatar_url_is_null(
+        self, client: Client, existing_user: User
+    ) -> None:
+        # Production users seeded without an avatar carry NULL in
+        # auth_users.avatar_url. The response schema must accept None (or '')
+        # or /auth/me 500s with a Pydantic ValidationError, breaking login UX.
+        User.objects.filter(pk=existing_user.pk).update(avatar_url=None)
+        access = self._login(client, "testuser", "TestPass1")
+        response = client.get(
+            "/api/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {access}"
+        )
+        assert response.status_code == 200, response.content
+        body = response.json()
+        assert body["username"] == "testuser"
+        assert body["avatar_url"] is None
+
+    def test_me_returns_profile_when_avatar_url_is_set(
+        self, client: Client, existing_user: User
+    ) -> None:
+        existing_user.avatar_url = "https://cdn.example.com/a.png"
+        existing_user.save(update_fields=["avatar_url"])
+        access = self._login(client, "testuser", "TestPass1")
+        response = client.get(
+            "/api/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {access}"
+        )
+        assert response.status_code == 200
+        assert response.json()["avatar_url"] == "https://cdn.example.com/a.png"
