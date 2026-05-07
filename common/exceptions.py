@@ -1,5 +1,9 @@
 """Custom application exceptions for JUDAH."""
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 
 class JudahError(Exception):
     """Base exception for all JUDAH errors."""
@@ -122,3 +126,22 @@ def register_exception_handlers(api: object) -> None:
     @api.exception_handler(CircuitOpenError)
     def handle_circuit_open(request, exc: CircuitOpenError):
         return api.create_response(request, {"detail": exc.message}, status=503)
+
+    @api.exception_handler(Exception)
+    def handle_unhandled(request, exc: Exception):
+        # Surface traceback in production logs (Ninja's default 500 handler
+        # re-raises, but Django's request logger may be silenced; this guarantees
+        # the trace lands in stdout/Sentry with the request_id correlation.
+        logger.exception(
+            "unhandled_api_exception",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            path=getattr(request, "path", None),
+            method=getattr(request, "method", None),
+            request_id=getattr(request, "META", {}).get("X_REQUEST_ID"),
+        )
+        return api.create_response(
+            request,
+            {"detail": "Internal server error.", "error_code": "INTERNAL_ERROR"},
+            status=500,
+        )

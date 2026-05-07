@@ -2,16 +2,32 @@
 
 from datetime import UTC, datetime
 
+from django.http import JsonResponse
 from ninja import Router
 
 router = Router()
 
 
-@router.get("/", auth=None, summary="Health check")
+@router.get("/", auth=None, summary="Liveness probe")
 def health_check(request) -> dict:
-    """Return service health status.
+    """Liveness probe — always 200 if the process is running.
 
-    Checks database, Redis cache, and returns uptime metadata.
+    Used by Railway / k8s liveness probes which only need to know whether
+    the process is alive, *not* whether dependencies are healthy.
+    """
+    return {
+        "status": "alive",
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+        "version": "1.0.0",
+    }
+
+
+@router.get("/ready", auth=None, summary="Readiness probe")
+def readiness_check(request) -> JsonResponse:
+    """Readiness probe — verifies DB + cache + auth-critical migrations.
+
+    Returns 503 (not 200) if any critical dependency is degraded so
+    upstream load balancers stop routing traffic until recovery.
     """
     checks: dict[str, str] = {}
 
@@ -19,6 +35,9 @@ def health_check(request) -> dict:
         from django.db import connection
 
         connection.ensure_connection()
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
         checks["database"] = "ok"
     except Exception as exc:
         checks["database"] = f"error: {exc}"
@@ -31,11 +50,31 @@ def health_check(request) -> dict:
     except Exception as exc:
         checks["cache"] = f"error: {exc}"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    # Verify auth-critical tables exist — these are the ones whose absence
+    # surfaces as a silent 500 on /auth/login when token_blacklist or
+    # auth_users migrations failed to apply.
+    try:
+        from django.db import connection
 
-    return {
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT to_regclass('public.auth_users'), to_regclass('public.token_blacklist_outstandingtoken')",
+            )
+            row = cur.fetchone() or (None, None)
+        if row[0] is None:
+            checks["auth_schema"] = "error: auth_users table missing"
+        elif row[1] is None:
+            checks["auth_schema"] = "error: token_blacklist tables missing"
+        else:
+            checks["auth_schema"] = "ok"
+    except Exception as exc:
+        checks["auth_schema"] = f"error: {exc}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    body = {
         "status": "healthy" if all_ok else "degraded",
         "timestamp": datetime.now(tz=UTC).isoformat(),
         "version": "1.0.0",
         "checks": checks,
     }
+    return JsonResponse(body, status=200 if all_ok else 503)

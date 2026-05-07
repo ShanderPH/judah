@@ -1,8 +1,22 @@
 """Production settings — Railway deployment."""
 
 import os
+import sys
 
 from .base import *
+
+# --- Required environment variables ---
+# Fail fast at boot rather than crash with a 500 on first request.
+_REQUIRED_ENV: tuple[str, ...] = (
+    "DJANGO_SECRET_KEY",
+    "DATABASE_URL",
+)
+_missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
+if _missing:
+    sys.stderr.write(
+        f"FATAL: missing required production env vars: {', '.join(_missing)}\n",
+    )
+    raise SystemExit(78)  # EX_CONFIG
 
 # --- Allowed hosts ---
 # Railway's internal health checker always sends Host: healthcheck.railway.app.

@@ -426,6 +426,19 @@ LOGGING: dict = {
             "level": "WARNING",
             "propagate": False,
         },
+        # Unhandled-exception logger — Django emits ERROR with traceback here
+        # for any uncaught view exception. Keep it explicit so production never
+        # silently swallows 500s when other "django" loggers raise their level.
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "django.server": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
         # Application code
         "apps": {
             "handlers": ["console"],

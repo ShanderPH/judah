@@ -7,10 +7,16 @@ dockerfilePath = "Dockerfile"
 [deploy]
 # Runs once per new deploy, before the new instance accepts traffic.
 # Migrations run here so the DB schema is ready when the app starts.
-releaseCommand = "python manage.py migrate --noinput && python manage.py collectstatic --noinput --clear"
+# collectstatic is intentionally NOT here — Railway runs releaseCommand in
+# an ephemeral container whose filesystem is discarded before the runtime
+# container boots, so static files written here never reach /app/staticfiles
+# in the live image. collectstatic now runs at Docker build time instead.
+releaseCommand = "python manage.py migrate --noinput"
 
 # Railway pings this path to determine if the container is healthy.
-# Must return 2xx for the deploy to be marked successful.
+# Must return 2xx for the deploy to be marked successful. The plain `/health/`
+# endpoint is a liveness probe and never returns 503 just because Redis is
+# slow; readiness gating uses /api/v1/health/ready instead.
 healthcheckPath = "/api/v1/health/"
 healthcheckTimeout = 300
 

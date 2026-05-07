@@ -41,6 +41,16 @@ RUN addgroup --system appgroup && \
 
 COPY . .
 
+# Run collectstatic at build time so /app/staticfiles exists in the runtime
+# image. Railway's releaseCommand runs in an ephemeral container whose
+# filesystem is NOT shared with the runtime container — files written
+# during `releaseCommand` (e.g. collectstatic) vanish before the app starts.
+# DJANGO_ENV=development is used at build only because production.py refuses
+# to import without DATABASE_URL — the static manifest is the same either way.
+RUN DJANGO_ENV=development \
+    DJANGO_SECRET_KEY=build-time-only \
+    python manage.py collectstatic --noinput --clear || mkdir -p /app/staticfiles
+
 RUN chown -R appuser:appgroup /app
 
 USER appuser
