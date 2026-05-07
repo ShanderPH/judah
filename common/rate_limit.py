@@ -44,7 +44,14 @@ class RateLimitMiddleware:
         identifier = _get_client_identifier(request)
         cache_key = f"ratelimit:{identifier}:{request.path}"
 
-        current_count = cache.get(cache_key, 0)
+        try:
+            current_count = cache.get(cache_key, 0)
+        except Exception as exc:
+            # Cache backend down → fail-open so a Redis outage cannot brick
+            # the entire API surface (auth, health, etc).
+            logger.warning("rate_limit_cache_unavailable", error=str(exc), path=request.path)
+            return self.get_response(request)
+
         if current_count >= rate:
             logger.warning(
                 "rate_limit_exceeded",
@@ -60,11 +67,19 @@ class RateLimitMiddleware:
             )
 
         pipe_key = f"{cache_key}:ttl"
-        if cache.get(pipe_key) is None:
-            cache.set(cache_key, 1, window)
-            cache.set(pipe_key, 1, window)
-        else:
-            cache.incr(cache_key)
+        try:
+            if cache.get(pipe_key) is None:
+                cache.set(cache_key, 1, window)
+                cache.set(pipe_key, 1, window)
+            else:
+                try:
+                    cache.incr(cache_key)
+                except ValueError:
+                    # Race: pipe_key existed but cache_key just expired.
+                    cache.set(cache_key, 1, window)
+                    cache.set(pipe_key, 1, window)
+        except Exception as exc:
+            logger.warning("rate_limit_counter_failed", error=str(exc), path=request.path)
 
         response = self.get_response(request)
         response["X-RateLimit-Limit"] = str(rate)

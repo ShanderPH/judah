@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
 from ninja import Router
 from ninja_jwt.tokens import RefreshToken
 
@@ -23,7 +24,9 @@ from apps.auth_user.services import (
     register_user,
     update_profile,
 )
-from common.exceptions import UnauthorizedError
+from common.exceptions import JudahError, UnauthorizedError
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from apps.auth_user.models import User
@@ -41,11 +44,24 @@ def register(request, payload: RegisterRequest) -> tuple[int, User]:
 def login(request, payload: LoginRequest) -> TokenResponse:
     """Authenticate with username/password and return access + refresh tokens."""
     user = authenticate_user(payload.username, payload.password)
-    refresh = RefreshToken.for_user(user)
-    return TokenResponse(
-        access=str(refresh.access_token),
-        refresh=str(refresh),
-    )
+    try:
+        refresh = RefreshToken.for_user(user)
+        access = str(refresh.access_token)
+        refresh_str = str(refresh)
+    except JudahError:
+        raise
+    except Exception:
+        # JWT/DB/blacklist failure during token mint — log full trace, return
+        # a typed 503 instead of a silent 500. Most likely missing
+        # `token_blacklist_outstandingtoken` table or signing-key misconfig.
+        logger.exception(
+            "login_token_mint_failed",
+            user_id=user.pk,
+            username=user.username,
+        )
+        raise UnauthorizedError("Authentication subsystem is temporarily unavailable.") from None
+    logger.info("login_success", user_id=user.pk)
+    return TokenResponse(access=access, refresh=refresh_str)
 
 
 @router.post("/refresh", response=TokenResponse, auth=None, summary="Refresh access token")

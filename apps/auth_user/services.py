@@ -52,12 +52,20 @@ def authenticate_user(identifier: str, password: str) -> User:
     Raises:
         UnauthorizedError: If credentials are invalid or account is inactive.
     """
-    user = authenticate(username=identifier, password=password)
-    if user is None and "@" in identifier:
-        candidate = User.objects.filter(email__iexact=identifier).first()
-        if candidate is not None:
-            user = authenticate(username=candidate.username, password=password)
+    try:
+        user = authenticate(username=identifier, password=password)
+        if user is None and "@" in identifier:
+            candidate = User.objects.filter(email__iexact=identifier).first()
+            if candidate is not None:
+                user = authenticate(username=candidate.username, password=password)
+    except Exception:
+        # ProgrammingError (missing column / table), OperationalError (DB
+        # down) etc. Log full trace and fail with a typed error so the API
+        # layer maps to 401, not silent 500.
+        logger.exception("authenticate_user_db_failure", identifier_kind="email" if "@" in identifier else "username")
+        raise UnauthorizedError("Authentication is temporarily unavailable.") from None
     if user is None:
+        logger.info("auth_failed_invalid_credentials")
         raise UnauthorizedError("Invalid username or password.")
     if not user.is_active:
         raise UnauthorizedError("This account has been deactivated.")
