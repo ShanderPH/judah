@@ -59,7 +59,7 @@ class UserResponse(Schema):
     first_name: str
     last_name: str
     role: str
-    avatar_url: str
+    avatar_url: str | None = None
     is_ai_agent: bool
 
     class Config:
