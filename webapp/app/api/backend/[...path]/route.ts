@@ -1,9 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { AUTH_COOKIE_NAMES } from "@/src/lib/auth/constants";
-import { backendFetch } from "@/src/lib/backend";
+import {
+  BackendConfigurationError,
+  BackendUnreachableError,
+  backendFetch,
+  refreshBackendTokens,
+} from "@/src/lib/backend";
 import { clearAuthCookies, writeAuthCookies } from "@/src/lib/auth/server-session";
-import { refreshBackendTokens } from "@/src/lib/backend";
+import type { ApiErrorPayload } from "@/src/types/api";
 
 async function proxyRequest(
   request: NextRequest,
@@ -31,43 +36,65 @@ async function proxyRequest(
       token,
     );
 
-  let backendResponse = await forward(accessToken);
-  let refreshedTokens = null;
+  try {
+    let backendResponse = await forward(accessToken);
+    let refreshedTokens = null;
 
-  if (backendResponse.status === 401 && refreshToken) {
-    refreshedTokens = await refreshBackendTokens(refreshToken);
+    if (backendResponse.status === 401 && refreshToken) {
+      refreshedTokens = await refreshBackendTokens(refreshToken);
+
+      if (refreshedTokens) {
+        backendResponse = await forward(refreshedTokens.access);
+      }
+    }
+
+    const response = new NextResponse(await backendResponse.text(), {
+      status: backendResponse.status,
+    });
+
+    const passthroughHeaders = [
+      "content-type",
+      "retry-after",
+      "x-request-id",
+      "x-ratelimit-limit",
+      "x-ratelimit-remaining",
+    ];
+
+    for (const header of passthroughHeaders) {
+      const value = backendResponse.headers.get(header);
+      if (value) {
+        response.headers.set(header, value);
+      }
+    }
 
     if (refreshedTokens) {
-      backendResponse = await forward(refreshedTokens.access);
+      writeAuthCookies(response.cookies, refreshedTokens);
+    } else if (backendResponse.status === 401) {
+      clearAuthCookies(response.cookies);
     }
-  }
 
-  const response = new NextResponse(await backendResponse.text(), {
-    status: backendResponse.status,
-  });
-
-  const passthroughHeaders = [
-    "content-type",
-    "retry-after",
-    "x-request-id",
-    "x-ratelimit-limit",
-    "x-ratelimit-remaining",
-  ];
-
-  for (const header of passthroughHeaders) {
-    const value = backendResponse.headers.get(header);
-    if (value) {
-      response.headers.set(header, value);
+    return response;
+  } catch (cause) {
+    if (cause instanceof BackendConfigurationError) {
+      console.error(`[api/backend${backendPath}] backend misconfigured`, cause);
+      return NextResponse.json(
+        { detail: "Configuracao do servidor incompleta. Contate o administrador." } satisfies ApiErrorPayload,
+        { status: 503 },
+      );
     }
+    if (cause instanceof BackendUnreachableError) {
+      console.error(`[api/backend${backendPath}] backend unreachable`, cause.cause ?? cause);
+      return NextResponse.json(
+        { detail: "Backend Judah indisponivel no momento. Tente novamente em instantes." } satisfies ApiErrorPayload,
+        { status: 502 },
+      );
+    }
+    console.error(`[api/backend${backendPath}] unexpected failure`, cause);
+    return NextResponse.json(
+      { detail: "Erro interno ao consultar o backend." } satisfies ApiErrorPayload,
+      { status: 500 },
+    );
   }
-
-  if (refreshedTokens) {
-    writeAuthCookies(response.cookies, refreshedTokens);
-  } else if (backendResponse.status === 401) {
-    clearAuthCookies(response.cookies);
-  }
-
-  return response;
 }
 
 export const GET = proxyRequest;

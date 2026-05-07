@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Button, Input, Label, TextField } from "@heroui/react";
+import { Alert, Button, CloseButton, Input, Label, TextField } from "@heroui/react";
 import gsap from "gsap";
 import { ArrowRight, LockKeyhole, Mail, ShieldCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -9,6 +9,56 @@ import { useRouter } from "next/navigation";
 import { authClient, ApiClientError } from "@/src/lib/api/client";
 import { LoginCarousel } from "@/src/features/auth/login-carousel";
 
+interface LoginErrorView {
+  title: string;
+  description: string;
+}
+
+const KNOWN_BACKEND_MESSAGES: Record<string, LoginErrorView> = {
+  "Invalid username or password.": {
+    title: "Credenciais invalidas",
+    description: "Email ou senha incorretos. Verifique e tente novamente.",
+  },
+  "This account has been deactivated.": {
+    title: "Conta desativada",
+    description: "Esta conta foi desativada. Contate um administrador para reativar.",
+  },
+};
+
+function describeLoginFailure(cause: unknown): LoginErrorView {
+  if (cause instanceof ApiClientError) {
+    const known = KNOWN_BACKEND_MESSAGES[cause.detail];
+    if (known) return known;
+
+    if (cause.status === 401 || cause.status === 403) {
+      return {
+        title: "Credenciais invalidas",
+        description: cause.detail || "Email ou senha incorretos.",
+      };
+    }
+    if (cause.status === 422 || cause.status === 400) {
+      return {
+        title: "Dados invalidos",
+        description: cause.detail || "Revise os campos e tente novamente.",
+      };
+    }
+    if (cause.status === 502 || cause.status === 503 || cause.status === 504) {
+      return {
+        title: "Backend indisponivel",
+        description: cause.detail || "Nao foi possivel contatar o backend Judah. Tente em instantes.",
+      };
+    }
+    return {
+      title: "Falha ao autenticar",
+      description: cause.detail || "Erro inesperado durante o login.",
+    };
+  }
+  return {
+    title: "Falha de rede",
+    description: "Nao foi possivel iniciar a sessao. Verifique sua conexao e tente novamente.",
+  };
+}
+
 export function LoginForm({
   nextPath = "/dashboard",
 }: {
@@ -16,7 +66,8 @@ export function LoginForm({
 }) {
   const router = useRouter();
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const alertRef = useRef<HTMLDivElement | null>(null);
+  const [error, setError] = useState<LoginErrorView | null>(null);
   const [identity, setIdentity] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -47,7 +98,10 @@ export function LoginForm({
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!identity.trim() || !password) {
-      setError("Preencha email e senha para continuar.");
+      setError({
+        title: "Campos obrigatorios",
+        description: "Preencha email e senha para continuar.",
+      });
       return;
     }
     setIsSubmitting(true);
@@ -56,12 +110,21 @@ export function LoginForm({
       await authClient.login({ identity, password });
       router.replace(nextPath);
     } catch (cause) {
-      if (cause instanceof ApiClientError) setError(cause.detail);
-      else setError("Nao foi possivel iniciar a sessao no backend Judah.");
+      setError(describeLoginFailure(cause));
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  useEffect(() => {
+    if (!error || !alertRef.current) return;
+    alertRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    gsap.fromTo(
+      alertRef.current,
+      { autoAlpha: 0, y: -8, scale: 0.98 },
+      { autoAlpha: 1, y: 0, scale: 1, duration: 0.32, ease: "power2.out" },
+    );
+  }, [error]);
 
   return (
     <div className="relative z-10 mx-auto grid min-h-svh w-full max-w-[1480px] gap-4 px-3 py-4 md:gap-6 md:px-6 md:py-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(420px,480px)] lg:items-stretch">
@@ -97,11 +160,11 @@ export function LoginForm({
             data-card-desc
             className="text-pretty text-sm leading-relaxed text-[var(--ink-600)]"
           >
-            Backend autentica via{" "}
+            Use seu{" "}
             <span className="judah-mono rounded-md bg-[var(--surface-tertiary)] px-1.5 py-0.5 text-xs">
-              username + password
-            </span>
-            . Use seu email cadastrado.
+              email
+            </span>{" "}
+            cadastrado e a senha do painel.
           </p>
         </header>
 
@@ -110,13 +173,31 @@ export function LoginForm({
           onSubmit={handleSubmit}
         >
           {error ? (
-            <Alert status="danger" className="rounded-[var(--radius-md)]">
-              <Alert.Indicator />
-              <Alert.Content>
-                <Alert.Title>Acesso negado</Alert.Title>
-                <Alert.Description>{error}</Alert.Description>
-              </Alert.Content>
-            </Alert>
+            <div
+              ref={alertRef}
+              role="alert"
+              aria-live="assertive"
+              className="w-full"
+            >
+              <Alert
+                status="danger"
+                className="w-full rounded-[var(--radius-md)] shadow-sm sm:items-start"
+              >
+                <Alert.Indicator />
+                <Alert.Content className="gap-1">
+                  <Alert.Title className="text-sm font-semibold leading-tight sm:text-base">
+                    {error.title}
+                  </Alert.Title>
+                  <Alert.Description className="text-xs leading-relaxed text-pretty sm:text-sm">
+                    {error.description}
+                  </Alert.Description>
+                </Alert.Content>
+                <CloseButton
+                  aria-label="Fechar alerta"
+                  onPress={() => setError(null)}
+                />
+              </Alert>
+            </div>
           ) : null}
 
           <div data-card-field>

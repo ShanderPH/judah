@@ -4,11 +4,36 @@ import type { AuthTokens, User } from "@/src/types/api";
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:8000/api/v1";
 
-const backendApiUrl = (process.env.JUDAH_API_URL ?? DEFAULT_BACKEND_URL).replace(/\/$/, "");
+export class BackendConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BackendConfigurationError";
+  }
+}
+
+export class BackendUnreachableError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "BackendUnreachableError";
+  }
+}
+
+function resolveBackendApiUrl(): string {
+  const raw = process.env.JUDAH_API_URL;
+  if (!raw || raw.trim() === "") {
+    if (process.env.NODE_ENV === "production") {
+      throw new BackendConfigurationError(
+        "JUDAH_API_URL nao esta definido. Configure a variavel de ambiente apontando para o backend Judah em producao.",
+      );
+    }
+    return DEFAULT_BACKEND_URL;
+  }
+  return raw.replace(/\/$/, "");
+}
 
 function buildBackendUrl(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${backendApiUrl}${normalizedPath}`;
+  return `${resolveBackendApiUrl()}${normalizedPath}`;
 }
 
 export async function backendFetch(
@@ -27,11 +52,21 @@ export async function backendFetch(
     headers.set("Authorization", `Bearer ${accessToken}`);
   }
 
-  return fetch(buildBackendUrl(path), {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
+  try {
+    return await fetch(buildBackendUrl(path), {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+  } catch (cause) {
+    if (cause instanceof BackendConfigurationError) {
+      throw cause;
+    }
+    throw new BackendUnreachableError(
+      "Nao foi possivel contatar o backend Judah.",
+      cause,
+    );
+  }
 }
 
 export async function parseJsonResponse<T>(response: Response): Promise<T | null> {
@@ -45,26 +80,40 @@ export async function parseJsonResponse<T>(response: Response): Promise<T | null
 }
 
 export async function refreshBackendTokens(refreshToken: string): Promise<AuthTokens | null> {
-  const response = await backendFetch(
-    `/auth/refresh?refresh=${encodeURIComponent(refreshToken)}`,
-    {
-      method: "POST",
-    },
-  );
+  try {
+    const response = await backendFetch(
+      `/auth/refresh?refresh=${encodeURIComponent(refreshToken)}`,
+      {
+        method: "POST",
+      },
+    );
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return null;
+    }
+
+    return parseJsonResponse<AuthTokens>(response);
+  } catch (cause) {
+    if (cause instanceof BackendConfigurationError) {
+      throw cause;
+    }
     return null;
   }
-
-  return parseJsonResponse<AuthTokens>(response);
 }
 
 export async function fetchCurrentUser(accessToken: string): Promise<User | null> {
-  const response = await backendFetch("/auth/me", {}, accessToken);
+  try {
+    const response = await backendFetch("/auth/me", {}, accessToken);
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return null;
+    }
+
+    return parseJsonResponse<User>(response);
+  } catch (cause) {
+    if (cause instanceof BackendConfigurationError) {
+      throw cause;
+    }
     return null;
   }
-
-  return parseJsonResponse<User>(response);
 }
