@@ -55,7 +55,7 @@ export function DashboardOverview() {
           icon={ServerCog}
           label="API"
           value={apiHealthy ? "Online" : "Degraded"}
-          detail={`${Object.keys(data.health.checks).length} checks ativos`}
+          detail={`${Object.keys(data.health.checks ?? {}).length} checks ativos`}
           tone={apiHealthy ? "success" : "danger"}
         />
         <MetricCard
@@ -222,7 +222,7 @@ export function DashboardOverview() {
             </Card.Title>
           </Card.Header>
           <div className="space-y-2 text-sm">
-            {Object.entries(data.health.checks).map(([name, status]) => (
+            {Object.entries(data.health.checks ?? {}).map(([name, status]) => (
               <div
                 key={name}
                 className="flex items-center justify-between rounded-xl border border-[var(--border)]/60 bg-[var(--surface)]/50 px-4 py-3"

@@ -65,7 +65,7 @@ export function StatusRail() {
             </div>
             <div className="judah-divider" />
             <div className="space-y-2 text-sm">
-              {Object.entries(overview.data.health.checks).map(([service, status]) => (
+              {Object.entries(overview.data.health.checks ?? {}).map(([service, status]) => (
                 <div key={service} className="flex items-center justify-between gap-3">
                   <span className="capitalize text-[var(--muted)]">{service}</span>
                   <span

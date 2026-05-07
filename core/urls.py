@@ -18,7 +18,7 @@ api = NinjaAPI(
 
 register_exception_handlers(api)
 
-api.add_router("/auth/", "apps.auth_user.api.router", tags=["Auth"], auth=None)
+api.add_router("/auth/", "apps.auth_user.api.router", tags=["Auth"])
 api.add_router("/church/", "apps.church.api.router", tags=["Church"])
 api.add_router("/knowledge/", "apps.knowledge.api.router", tags=["Knowledge"])
 api.add_router("/support/", "apps.support.api.router", tags=["Support"])

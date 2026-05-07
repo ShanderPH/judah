@@ -24,7 +24,7 @@ from apps.auth_user.services import (
     register_user,
     update_profile,
 )
-from common.exceptions import JudahError, UnauthorizedError
+from common.exceptions import CircuitOpenError, JudahError, UnauthorizedError
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +43,13 @@ def register(request, payload: RegisterRequest) -> tuple[int, User]:
 @router.post("/login", response=TokenResponse, auth=None, summary="Obtain JWT token pair")
 def login(request, payload: LoginRequest) -> TokenResponse:
     """Authenticate with username/password and return access + refresh tokens."""
+    identity_preview = (payload.username or "")[:80]
+    logger.info(
+        "login_attempt",
+        identity=identity_preview,
+        identity_kind="email" if "@" in identity_preview else "username",
+        has_password=bool(payload.password),
+    )
     user = authenticate_user(payload.username, payload.password)
     try:
         refresh = RefreshToken.for_user(user)
@@ -51,9 +58,10 @@ def login(request, payload: LoginRequest) -> TokenResponse:
     except JudahError:
         raise
     except Exception as exc:
-        # JWT/DB/blacklist failure during token mint — log full trace, return
-        # a typed 503 instead of a silent 500. Most likely missing
+        # JWT/DB/blacklist failure during token mint. Most likely missing
         # `token_blacklist_outstandingtoken` table or signing-key misconfig.
+        # Map to 503 (subsystem degraded) — NOT 401 — so the frontend stops
+        # showing a misleading "Credenciais invalidas" alert.
         logger.exception(
             "login_token_mint_failed",
             user_id=user.pk,
@@ -62,8 +70,8 @@ def login(request, payload: LoginRequest) -> TokenResponse:
             error_message=str(exc),
             error_module=type(exc).__module__,
         )
-        raise UnauthorizedError("Authentication subsystem is temporarily unavailable.") from None
-    logger.info("login_success", user_id=user.pk)
+        raise CircuitOpenError("Authentication subsystem is temporarily unavailable.") from None
+    logger.info("login_success", user_id=user.pk, username=user.username)
     return TokenResponse(access=access, refresh=refresh_str)
 
 

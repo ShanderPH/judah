@@ -34,10 +34,10 @@ export interface SessionPayload {
 }
 
 export interface HealthResponse {
-  status: "healthy" | "degraded";
+  status: "healthy" | "degraded" | "alive";
   timestamp: string;
   version: string;
-  checks: Record<string, string>;
+  checks?: Record<string, string>;
 }
 
 export interface QueueAgentSnapshot {
