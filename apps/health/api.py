@@ -70,7 +70,26 @@ def readiness_check(request) -> JsonResponse:
     except Exception as exc:
         checks["auth_schema"] = f"error: {exc}"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    # Replicate the exact failure path of /auth/login without persisting
+    # anything: encode an access token for the first available user. This
+    # exposes signing-key issues (HS256 needs a non-empty SECRET_KEY) and
+    # any blacklist-app issue that doesn't manifest as a missing table.
+    try:
+        from ninja_jwt.tokens import AccessToken
+
+        from apps.auth_user.models import User
+
+        u = User.objects.only("id").first()
+        if u is None:
+            checks["jwt_mint"] = "skipped: no users"
+        else:
+            token = AccessToken.for_user(u)
+            _ = str(token)
+            checks["jwt_mint"] = "ok"
+    except Exception as exc:
+        checks["jwt_mint"] = f"error: {type(exc).__name__}: {exc}"
+
+    all_ok = all(v == "ok" or v.startswith("skipped") for v in checks.values())
     body = {
         "status": "healthy" if all_ok else "degraded",
         "timestamp": datetime.now(tz=UTC).isoformat(),

@@ -50,7 +50,7 @@ def login(request, payload: LoginRequest) -> TokenResponse:
         refresh_str = str(refresh)
     except JudahError:
         raise
-    except Exception:
+    except Exception as exc:
         # JWT/DB/blacklist failure during token mint — log full trace, return
         # a typed 503 instead of a silent 500. Most likely missing
         # `token_blacklist_outstandingtoken` table or signing-key misconfig.
@@ -58,6 +58,9 @@ def login(request, payload: LoginRequest) -> TokenResponse:
             "login_token_mint_failed",
             user_id=user.pk,
             username=user.username,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            error_module=type(exc).__module__,
         )
         raise UnauthorizedError("Authentication subsystem is temporarily unavailable.") from None
     logger.info("login_success", user_id=user.pk)
