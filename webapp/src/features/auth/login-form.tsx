@@ -23,6 +23,14 @@ const KNOWN_BACKEND_MESSAGES: Record<string, LoginErrorView> = {
     title: "Conta desativada",
     description: "Esta conta foi desativada. Contate um administrador para reativar.",
   },
+  "Authentication is temporarily unavailable.": {
+    title: "Servico de autenticacao indisponivel",
+    description: "O backend nao conseguiu validar credenciais agora. Tente novamente em instantes.",
+  },
+  "Authentication subsystem is temporarily unavailable.": {
+    title: "Servico de autenticacao indisponivel",
+    description: "O backend autenticou, mas falhou ao emitir o token. Tente novamente em instantes.",
+  },
 };
 
 function describeLoginFailure(cause: unknown): LoginErrorView {
@@ -44,8 +52,9 @@ function describeLoginFailure(cause: unknown): LoginErrorView {
     }
     if (cause.status === 502 || cause.status === 503 || cause.status === 504) {
       return {
-        title: "Backend indisponivel",
-        description: cause.detail || "Nao foi possivel contatar o backend Judah. Tente em instantes.",
+        title: "Servico de autenticacao indisponivel",
+        description:
+          cause.detail || "Nao foi possivel contatar o backend Judah. Tente novamente em instantes.",
       };
     }
     return {
