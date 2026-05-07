@@ -102,6 +102,26 @@ async function request<T>(
   return payload as T;
 }
 
+// Django Ninja's paginator returns `{items, count}`. The webapp expects the
+// DRF-style `{results, count, next, previous}` shape. Normalize at the edge so
+// every list endpoint can share the `PaginatedResponse<T>` type without each
+// component having to know which envelope it gets.
+async function requestPaginated<T>(
+  path: string,
+  init?: RequestInit & {
+    query?: QueryValue;
+  },
+): Promise<PaginatedResponse<T>> {
+  const raw = await request<{ items?: T[]; results?: T[]; count?: number }>(path, init);
+  const results = raw.results ?? raw.items ?? [];
+  return {
+    count: raw.count ?? results.length,
+    next: null,
+    previous: null,
+    results,
+  };
+}
+
 export const authClient = {
   login: (payload: LoginPayload) =>
     request<SessionPayload>("/api/auth/login", {
@@ -126,25 +146,25 @@ export const judahApi = {
       method: "POST",
     }),
   listPendingConversations: (params?: QueryValue) =>
-    request<PaginatedResponse<PendingConversation>>("/api/backend/support/queue/pending/", {
+    requestPaginated<PendingConversation>("/api/backend/support/queue/pending/", {
       query: params,
     }),
   listAssignedConversations: (params?: QueryValue) =>
-    request<PaginatedResponse<AssignedConversation>>("/api/backend/support/queue/assigned/", {
+    requestPaginated<AssignedConversation>("/api/backend/support/queue/assigned/", {
       query: params,
     }),
   listQueueMetrics: (params?: QueryValue) =>
-    request<PaginatedResponse<QueueMetric>>("/api/backend/support/queue/metrics/", {
+    requestPaginated<QueueMetric>("/api/backend/support/queue/metrics/", {
       query: params,
     }),
   listReports: (params?: QueryValue) =>
-    request<PaginatedResponse<DailyReport>>("/api/backend/analytics/reports/", {
+    requestPaginated<DailyReport>("/api/backend/analytics/reports/", {
       query: params,
     }),
 
   // ----- Agents administration -----
   listAgents: (params?: QueryValue) =>
-    request<PaginatedResponse<Agent>>("/api/backend/support/agents/", { query: params }),
+    requestPaginated<Agent>("/api/backend/support/agents/", { query: params }),
   retrieveAgent: (agentId: string) =>
     request<Agent>(`/api/backend/support/agents/${agentId}`),
   createAgent: (payload: CreateAgentPayload) =>
@@ -168,7 +188,7 @@ export const judahApi = {
 
   // ----- Aggregated reads -----
   listAgentMetrics: (params?: QueryValue) =>
-    request<PaginatedResponse<AgentMetricsRow>>("/api/backend/support/metrics/agents/", {
+    requestPaginated<AgentMetricsRow>("/api/backend/support/metrics/agents/", {
       query: params,
     }),
   getAgentMetricsSummary: (params?: QueryValue) =>
@@ -176,21 +196,21 @@ export const judahApi = {
       query: params,
     }),
   listAgentMetricsForAgent: (agentId: string, params?: QueryValue) =>
-    request<PaginatedResponse<AgentMetricsRow>>(
+    requestPaginated<AgentMetricsRow>(
       `/api/backend/support/agents/${agentId}/metrics/`,
       { query: params },
     ),
   listAgentTimeLogs: (agentId: string, params?: QueryValue) =>
-    request<PaginatedResponse<AgentDailyTimeLog>>(
+    requestPaginated<AgentDailyTimeLog>(
       `/api/backend/support/agents/${agentId}/time-logs/`,
       { query: params },
     ),
   listAllTimeLogs: (params?: QueryValue) =>
-    request<PaginatedResponse<AgentDailyTimeLog>>("/api/backend/support/time-logs/", {
+    requestPaginated<AgentDailyTimeLog>("/api/backend/support/time-logs/", {
       query: params,
     }),
   listReassignments: (params?: QueryValue) =>
-    request<PaginatedResponse<ConversationReassignment>>(
+    requestPaginated<ConversationReassignment>(
       "/api/backend/support/reassignments/",
       { query: params },
     ),
