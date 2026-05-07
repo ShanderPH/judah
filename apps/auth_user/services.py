@@ -39,11 +39,11 @@ def register_user(payload: RegisterRequest) -> User:
     return user
 
 
-def authenticate_user(username: str, password: str) -> User:
-    """Authenticate a user by username and password.
+def authenticate_user(identifier: str, password: str) -> User:
+    """Authenticate a user by username **or** email plus password.
 
     Args:
-        username: The user's username.
+        identifier: Either the user's ``username`` or registered ``email``.
         password: The raw password.
 
     Returns:
@@ -52,7 +52,11 @@ def authenticate_user(username: str, password: str) -> User:
     Raises:
         UnauthorizedError: If credentials are invalid or account is inactive.
     """
-    user = authenticate(username=username, password=password)
+    user = authenticate(username=identifier, password=password)
+    if user is None and "@" in identifier:
+        candidate = User.objects.filter(email__iexact=identifier).first()
+        if candidate is not None:
+            user = authenticate(username=candidate.username, password=password)
     if user is None:
         raise UnauthorizedError("Invalid username or password.")
     if not user.is_active:
