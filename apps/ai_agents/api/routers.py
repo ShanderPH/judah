@@ -15,6 +15,7 @@ from ninja import Router, Schema
 from pydantic import BaseModel
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
+from apps.integrations.salomao_v1 import is_salomao_v1_configured, send_chat_to_salomao_v1
 from common.exceptions import ExternalServiceError
 
 if TYPE_CHECKING:
@@ -111,6 +112,47 @@ async def chat_with_salomao(
     )
 
     start_time = time.perf_counter()
+
+    if is_salomao_v1_configured():
+        try:
+            salomao_v1_result = await send_chat_to_salomao_v1(
+                message=payload.message,
+                session_id=session_id,
+            )
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
+
+            logger.info(
+                "chat_request_completed_via_salomao_v1",
+                session_id=session_id,
+                user_id=user_id,
+                latency_ms=latency_ms,
+                model_used=salomao_v1_result.model_used,
+                transfer_requested=salomao_v1_result.transfer_requested,
+            )
+
+            return 200, ChatSuccessResponse(
+                session_id=salomao_v1_result.session_id,
+                message=salomao_v1_result.response,
+                sources=[],
+                requires_human_handoff=salomao_v1_result.transfer_requested,
+                handoff_reason="Salomao v1 requested transfer." if salomao_v1_result.transfer_requested else None,
+                agent_trace=["salomao_v1: POST /chat"],
+                tokens_used=salomao_v1_result.tokens.total,
+                latency_ms=latency_ms,
+            )
+        except TimeoutError as exc:
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
+            logger.error(
+                "chat_salomao_v1_timeout",
+                session_id=session_id,
+                user_id=user_id,
+                latency_ms=latency_ms,
+                error=str(exc),
+            )
+            return 503, ErrorResponse(
+                detail="O Salomao v1 demorou muito para responder. Tente novamente em alguns instantes.",
+                error_code="SALOMAO_V1_TIMEOUT",
+            )
 
     try:
         supervisor = SalomaoSupervisorAgent(

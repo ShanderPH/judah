@@ -121,6 +121,38 @@ _run_supervisor_pipeline
 TokenTrackingLog
 ```
 
+### 3.3 Webhook HubSpot Conversations → Salomao v1 bridge
+
+```text
+HubSpot conversation.newMessage
+  │
+  ▼
+/api/v1/webhooks/hubspot/  [apps/webhooks/api.py]
+  │ 1. Verifica HMAC v1/v3
+  │ 2. Persiste WebhookEvent
+  ▼
+apps/webhooks/handlers/hubspot_handler.py
+  │ 1. Ignora mensagens OUTGOING para evitar loop
+  │ 2. Verifica AI_ROUTING_ENABLED + SALOMAO_V1_BASE_URL
+  ▼
+run_salomao_v1_thread_pipeline_task.delay
+  │ 1. Redis lock por thread
+  │ 2. hydrate_thread_context (HubSpot API)
+  │ 3. POST /chat no Salomao v1
+  ▼
+send_salomao_reply_to_hubspot_thread
+  │
+  ▼
+HubSpot thread reply
+```
+
+### Regras da bridge Salomao v1
+
+- O endpoint canonico do HubSpot continua sendo `/api/v1/webhooks/hubspot/`; nao e necessario ngrok quando Judah esta publicado no Railway.
+- A bridge so roda quando `AI_ROUTING_ENABLED=true` e `SALOMAO_V1_BASE_URL` esta configurado.
+- O session id e estavel por ticket (`hubspot-ticket-{id}`) ou por thread (`hubspot-thread-{id}`).
+- Respostas de erro sensivel do provider de IA nao sao reenviadas para a thread do HubSpot.
+
 ### Arquivos relacionados
 
 - [`apps/ai_agents/api/routers.py`](../../apps/ai_agents/api/routers.py)

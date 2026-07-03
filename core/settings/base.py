@@ -284,9 +284,14 @@ OPENAI_API_KEY = config("OPENAI_API_KEY", default="")
 ANTHROPIC_API_KEY = config("ANTHROPIC_API_KEY", default="")
 PINECONE_API_KEY = config("PINECONE_API_KEY", default="")
 PINECONE_INDEX_NAME = config("PINECONE_INDEX_NAME", default="inchurch-knowledge")
+PINECONE_HOST = config("PINECONE_HOST", default="")
+
+SALOMAO_V1_BASE_URL = config("SALOMAO_V1_BASE_URL", default="")
+SALOMAO_V1_TIMEOUT_SECONDS = config("SALOMAO_V1_TIMEOUT_SECONDS", default=45.0, cast=float)
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
+HUBSPOT_SALOMAO_SENDER_ACTOR_ID = config("HUBSPOT_SALOMAO_SENDER_ACTOR_ID", default="")
 
 JIRA_SERVER_URL = config("JIRA_SERVER_URL", default="")
 JIRA_API_TOKEN = config("JIRA_API_TOKEN", default="")

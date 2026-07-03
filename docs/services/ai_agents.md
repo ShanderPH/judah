@@ -16,6 +16,7 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 - Executar ações no HubSpot/Jira via MCP.
 - Persistir sessões, memórias, traces e custos.
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
+- Orquestrar a bridge para Salomao v1 externo quando `SALOMAO_V1_BASE_URL` estiver configurado.
 
 ## Agentes
 
@@ -82,12 +83,16 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 ## Services principais
 
 - `hydrate_ticket_context(ticket_id)`: expande payload mínimo do webhook em contexto completo do ticket.
+- `hydrate_thread_context(thread_id)`: expande uma thread do HubSpot Conversations para contexto de IA.
+- `build_salomao_prompt_from_hubspot_context(context)`: monta o prompt enviado ao Salomao v1 standalone.
+- `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
 ## Tasks Celery
 
 - `run_supervisor_pipeline_task(ticket_id, is_off_hours)`: executa pipeline com lock Redis.
+- `run_salomao_v1_thread_pipeline_task(thread_id)`: executa bridge HubSpot Conversations -> Salomao v1 com lock Redis.
 
 ## Regras de negócio
 
@@ -99,6 +104,8 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Prioridade `CRITICA` → handoff humano mesmo sem rota de escalation.
 - Circuit breaker: > 15k tokens por sessão → bloqueio.
 - Primeira mensagem: greeting obrigatório. Demais: não repetir.
+- Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat`, `/api/v1/ai/triage/` e eventos `conversation.newMessage` podem ser roteados para o Salomao v1 externo.
+- Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.
 
 ## Arquivos relacionados
 
@@ -111,6 +118,7 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - [`apps/ai_agents/api/webhooks.py`](../../apps/ai_agents/api/webhooks.py)
 - [`apps/ai_agents/tasks.py`](../../apps/ai_agents/tasks.py)
 - [`apps/ai_agents/services/hubspot.py`](../../apps/ai_agents/services/hubspot.py)
+- [`apps/integrations/salomao_v1/client.py`](../../apps/integrations/salomao_v1/client.py)
 - [`apps/ai_agents/utils/pricing.py`](../../apps/ai_agents/utils/pricing.py)
 - [`apps/ai_agents/mcp_servers/hubspot_server.py`](../../apps/ai_agents/mcp_servers/hubspot_server.py)
 

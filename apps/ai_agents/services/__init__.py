@@ -90,6 +90,49 @@ def chat_with_agent(payload: ChatRequest) -> ChatResponse:
 
 def triage_message(payload: TriageRequest) -> TriageResult:
     """Use Heimdall to classify and triage an incoming message."""
+    from asgiref.sync import async_to_sync
+
+    from apps.integrations.salomao_v1 import is_salomao_v1_configured, send_chat_to_salomao_v1
+
+    if is_salomao_v1_configured():
+        session_source = payload.user_identifier or payload.church_external_id or str(uuid.uuid4())
+        session_id = f"{payload.channel}-{session_source}"
+
+        try:
+            result = async_to_sync(send_chat_to_salomao_v1)(
+                message=payload.message,
+                session_id=session_id,
+            )
+            logger.info(
+                "triage_salomao_v1_success",
+                session_id=session_id,
+                channel=payload.channel,
+                transfer_requested=result.transfer_requested,
+            )
+            return TriageResult(
+                intent="salomao_v1_answer",
+                confidence=1.0,
+                suggested_queue="human" if result.transfer_requested else "ai",
+                suggested_priority="medium",
+                requires_human=result.transfer_requested,
+                reasoning=result.response,
+            )
+        except Exception as exc:
+            logger.error(
+                "triage_salomao_v1_error",
+                channel=payload.channel,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return TriageResult(
+                intent="salomao_v1_unavailable",
+                confidence=0.0,
+                suggested_queue="human",
+                suggested_priority="high",
+                requires_human=True,
+                reasoning="Salomao v1 indisponivel no momento.",
+            )
+
     from apps.ai_agents.agents.heimdall import heimdall_agent
 
     try:

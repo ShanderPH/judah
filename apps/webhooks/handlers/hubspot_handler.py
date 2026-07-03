@@ -182,7 +182,9 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
       - conversation.propertyChange
       - conversation.newMessage
 
-    Currently logged for auditing; extend as needed for specific use cases.
+    ``conversation.newMessage`` can trigger the Salomao v1 bridge when AI
+    routing is enabled. The task re-fetches the thread and skips non-incoming
+    messages, protecting against loops caused by Judah's own outgoing replies.
     """
     object_id = str(payload.get("objectId", ""))
     logger.debug(
@@ -191,6 +193,32 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         object_id=object_id,
         message_id=payload.get("messageId"),
     )
+
+    if event_type != "conversation.newMessage" or not object_id:
+        return
+
+    direction = str(payload.get("direction") or payload.get("messageDirection") or "").upper()
+    if direction and direction != "INCOMING":
+        logger.debug("hubspot_conversation_outgoing_skipped", object_id=object_id, direction=direction)
+        return
+
+    from django.conf import settings
+
+    if not getattr(settings, "AI_ROUTING_ENABLED", False) or not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
+        logger.debug("hubspot_conversation_ai_routing_disabled", object_id=object_id)
+        return
+
+    from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task
+
+    thread_id = (
+        payload.get("threadId")
+        or payload.get("conversationThreadId")
+        or payload.get("conversationsThreadId")
+        or object_id
+    )
+
+    run_salomao_v1_thread_pipeline_task.delay(str(thread_id))
+    logger.info("hubspot_conversation_salomao_v1_dispatched", thread_id=str(thread_id), object_id=object_id)
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:
