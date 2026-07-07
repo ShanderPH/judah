@@ -101,6 +101,10 @@ class SalomaoChatDraft(BaseModel):
     missing_data: list[str] = Field(default_factory=list)
     recommended_actions: list[ActionIntent] = Field(default_factory=list)
     customer_visible_protocol: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model_name: str | None = None
 
 
 class SupervisorDecision(BaseModel):
