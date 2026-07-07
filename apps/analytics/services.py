@@ -51,17 +51,15 @@ def compute_daily_report(report_date: date) -> DailyReport:
     from apps.support.models import Ticket
 
     day_start = report_date
-    report_date + timedelta(days=1)
 
     opened = Ticket.objects.filter(created_at__date=day_start).count()
-    resolved = Ticket.objects.filter(
-        resolved_at__date=day_start,
-        status=Ticket.Status.RESOLVED,
-    ).count()
-    escalated = Ticket.objects.filter(
-        created_at__date=day_start,
-        sla_breached=True,
-    ).count()
+    # TODO: confirmar definição de "resolvido". O modelo Ticket não possui
+    # resolved_at nem Status.RESOLVED; usamos closed_at como proxy até que
+    # o campo semântico correto seja adicionado.
+    resolved = Ticket.objects.filter(closed_at__date=day_start).count()
+    # TODO: confirmar como detectar tickets escalados. O modelo Ticket não
+    # possui sla_breached nem status de escalation.
+    escalated = 0
 
     report, _ = DailyReport.objects.update_or_create(
         date=report_date,
@@ -71,5 +69,11 @@ def compute_daily_report(report_date: date) -> DailyReport:
             "total_tickets_escalated": escalated,
         },
     )
-    logger.info("daily_report_computed", date=str(report_date), opened=opened, resolved=resolved)
+    logger.info(
+        "daily_report_computed",
+        date=str(report_date),
+        opened=opened,
+        resolved=resolved,
+        escalated=escalated,
+    )
     return report

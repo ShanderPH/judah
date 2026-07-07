@@ -45,6 +45,7 @@ LOCAL_APPS = [
     "apps.integrations",
     "apps.webhooks",
     "apps.analytics",
+    "apps.health",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS

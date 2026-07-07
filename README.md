@@ -103,7 +103,7 @@ common/
 └── rate_limit.py        # Redis sliding-window limiter
 
 core/
-├── settings/            # base / development / staging / production / test
+├── settings/            # base / development / production / test (selected by DJANGO_ENV)
 ├── urls.py              # NinjaAPI root + router registration
 └── celery.py            # Celery app factory
 ```
@@ -185,7 +185,7 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | Target         | Command                    |
 |----------------|----------------------------|
 | API (dev)      | `make run`                 |
-| API (prod)     | `gunicorn core.wsgi:application -k uvicorn.workers.UvicornWorker` |
+| API (prod)     | `gunicorn core.asgi:application -k uvicorn.workers.UvicornWorker` |
 | Celery worker  | `make celery`              |
 | Celery beat    | `make celery-beat`         |
 | Full stack     | `make docker-up`           |
@@ -216,7 +216,7 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
 ### Inbound webhook pipeline
 
-`POST /api/v1/ai/webhooks/hubspot/ticket-change` verifies HubSpot HMAC (v1 or v3), extracts `ticket_id`, and schedules the supervisor pipeline. **Currently dispatched via `asyncio.create_task` — see Known Risk C3 for the migration to Celery.**
+`POST /api/v1/webhooks/hubspot/` is the canonical webhook router. It verifies HubSpot HMAC (v1 or v3) and, when `AI_ROUTING_ENABLED=true`, schedules the supervisor pipeline via Celery (`run_supervisor_pipeline_task.delay`). The alternate `POST /api/v1/ai/webhooks/hubspot/ticket-change` router exists in `apps/ai_agents/api/webhooks.py` but is **not mounted** in `core/urls.py` and should be treated as experimental/pending.
 
 ### Session persistence
 
@@ -249,7 +249,7 @@ pytest -m "not slow"         # skip slow suite
 
 **Warning:** `conftest.py:isolate_db` deletes rows from the support tables before every test. If `DATABASE_URL` points at production, this rolls back within the transaction **only** when Django actually opens one. Always confirm you are pointed at a disposable database.
 
-Coverage target: 80% (`pyproject.toml`). AI-agents and webhooks currently have no unit tests — prioritize adding them before relying on the happy path.
+Coverage target: 80% (`pyproject.toml`). CI currently enforces a 50% floor while the project target remains 80%. Both `apps/ai_agents` and `apps/webhooks` have unit tests; expand coverage before relying on edge-case paths.
 
 ---
 
@@ -322,10 +322,11 @@ The following must be resolved before production cutover. See the full audit rep
 
 - [ ] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
 - [ ] **C2** — Add a prompt-injection guardrail around ticket content.
-- [ ] **C3** — Replace `asyncio.create_task` in `ai_agents/api/webhooks.py` with a Celery task.
-- [ ] **C4** — Consolidate the two HubSpot webhook entry points.
+- [x] **C3** — Replace `asyncio.create_task` in `ai_agents/api/webhooks.py` with a Celery task. *(Done — `run_supervisor_pipeline_task.delay` is used.)*
+- [ ] **C4** — Consolidate the two HubSpot webhook entry points. *(Note: `/api/v1/ai/webhooks/hubspot/ticket-change` exists in code but is not mounted in `core/urls.py`.)*
 - [ ] **C5** — Gate `conftest.py:isolate_db` behind an explicit test-env marker.
-- [ ] **H1** — Fix `except ValueError, TypeError:` in `auto_assign_service.py` and `hubspot_handler.py`.
+- [x] **H1** — Fix `except Ticket.DoesNotExist, ValueError:` in `support/services.py`. *(Done — syntax corrected.)*
+- [ ] **H1b** — Audit `auto_assign_service.py` and `hubspot_handler.py` for any remaining Python 2 exception syntax.
 - [ ] **H2** — Remove `debug_mode=True` from Salomão agents; remove the `loading_openai_key` log line.
 - [ ] **H3** — Stop mutating `self._team.instructions` per request.
 - [ ] **H4** — Switch the token budget to a rolling window.

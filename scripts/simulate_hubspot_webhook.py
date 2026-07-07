@@ -1,20 +1,20 @@
 """Simulador local do webhook do HubSpot (sem Ngrok, sem API real).
 
 Uso:
-    1. Exporte USE_MOCK_HUBSPOT=True no ambiente do servidor Django.
-    2. Rode o servidor Django (ex.: `python manage.py runserver`).
-    3. Execute este script: `python scripts/simulate_hubspot_webhook.py`.
+    1. Rode o servidor Django em DEBUG (ex.: `python manage.py runserver`).
+    2. Execute este script: `python scripts/simulate_hubspot_webhook.py`.
 
 O que faz:
     - Monta um payload JSON-array no mesmo formato que o HubSpot envia
       quando a propriedade `triagem_status` de um ticket muda.
-    - POSTa no endpoint `/api/v1/ai/webhooks/hubspot/ticket-change`.
-    - Como o servidor está com `USE_MOCK_HUBSPOT=True`, a validação HMAC
-      é ignorada e `hydrate_ticket_context` devolve um mock fixo — não
-      encosta na API do HubSpot.
-    - Imprime `status_code` e corpo da resposta. O pipeline Salomão roda
-      em `asyncio.create_task` no servidor; observe o console do Django
-      para ver o Supervisor instanciando + tomando decisão (BOLETO).
+    - POSTa no endpoint canônico `/api/v1/webhooks/hubspot/`.
+    - Em DEBUG sem `HUBSPOT_APP_SECRET` configurado, a validação HMAC é
+      tolerada para facilitar testes locais.
+    - Imprime `status_code` e corpo da resposta.
+
+    NOTA: o endpoint legado `/api/v1/ai/webhooks/hubspot/ticket-change`
+    existe no código mas NÃO está montado em `core/urls.py`; use sempre
+    o endpoint canônico deste script.
 
 Este arquivo roda standalone (sem Django settings), por `httpx` puro.
 """
@@ -26,7 +26,7 @@ import sys
 
 import httpx
 
-WEBHOOK_URL = "http://localhost:8000/api/v1/ai/webhooks/hubspot/ticket-change"
+WEBHOOK_URL = "http://localhost:8000/api/v1/webhooks/hubspot/"
 
 # Payload no formato exato que o HubSpot envia (lista de eventos).
 PAYLOAD: list[dict[str, object]] = [

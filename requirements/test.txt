@@ -1,6 +1,10 @@
 -r base.txt
 
 # Testing
+# Type checking (also used in CI lint job)
+mypy>=1.11.0
+django-stubs[compatible-mypy]>=5.1.0
+
 pytest>=8.3.0
 pytest-django>=4.9.0
 pytest-asyncio>=0.24.0

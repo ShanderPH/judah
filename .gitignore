@@ -27,6 +27,8 @@ MANIFEST
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+.test.sqlite3
+.test.sqlite3-journal
 media/
 staticfiles/
 
@@ -85,6 +87,7 @@ Thumbs.db
 
 # AI Agents
 /.claude
+/.codex/
 /.gemini
 /.agents
 /.windsurf
