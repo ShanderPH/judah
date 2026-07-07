@@ -32,6 +32,8 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `PINECONE_DIMENSION` | `apps/ai_agents/agents/rag.py` | Dimensão do embedding (padrão: `1536`). |
 | `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding (padrão: `text-embedding-ada-002`). |
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
+| `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py` | URL base do servico standalone Salomao v1. Quando preenchida, Judah chama `POST /chat` neste servico. |
+| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP da bridge Salomao v1 (padrao: `45`). |
 
 ## Variáveis de HubSpot
 
@@ -42,6 +44,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_PORTAL_ID` | `apps/ai_agents/mcp_servers/hubspot_server.py` | Portal ID para construir URLs de ticket. |
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
+| `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
 
 ## Variáveis de Jira
 
@@ -106,10 +109,13 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 PINECONE_API_KEY=your-pinecone-key
 PINECONE_INDEX_NAME=inchurch-knowledge
+SALOMAO_V1_BASE_URL=http://localhost:8001
+SALOMAO_V1_TIMEOUT_SECONDS=45
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
 HUBSPOT_PORTAL_ID=your-portal-id
+HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
 
 JIRA_SERVER_URL=https://inchurch.atlassian.net
 JIRA_API_TOKEN=your-jira-token

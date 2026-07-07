@@ -28,6 +28,7 @@ logger = structlog.get_logger(__name__)
 # HubSpot's retry window runs out.
 _IDEMPOTENCY_TTL_SECONDS = 600
 _LOCK_KEY_PREFIX = "salomao:supervisor:ticket"
+_THREAD_LOCK_KEY_PREFIX = "salomao:v1:thread"
 
 
 def _redis_client() -> redis.Redis:
@@ -84,4 +85,52 @@ def run_supervisor_pipeline_task(ticket_id: str, is_off_hours: bool = False) -> 
                 )
 
 
-__all__ = ["run_supervisor_pipeline_task"]
+@shared_task(name="ai_agents.run_salomao_v1_thread_pipeline_task")
+def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
+    """Run Salomao v1 for a HubSpot conversation thread.
+
+    This is used by ``conversation.newMessage`` webhooks. The task re-fetches
+    the thread before responding and only answers if the latest usable message
+    is incoming from the visitor.
+    """
+    thread_id = str(thread_id)
+    lock_key = f"{_THREAD_LOCK_KEY_PREFIX}:{thread_id}"
+
+    client: redis.Redis | None
+    try:
+        client = _redis_client()
+        acquired = bool(client.set(lock_key, "1", nx=True, ex=_IDEMPOTENCY_TTL_SECONDS))
+    except redis.RedisError as exc:
+        logger.warning(
+            "salomao_v1_thread_lock_unavailable",
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        client = None
+        acquired = True
+
+    if not acquired:
+        logger.info(
+            "salomao_v1_thread_duplicate_skipped",
+            thread_id=thread_id,
+            lock_key=lock_key,
+        )
+        return
+
+    from apps.ai_agents.api.webhooks import _run_salomao_v1_thread_pipeline
+
+    try:
+        asyncio.run(_run_salomao_v1_thread_pipeline(thread_id))
+    finally:
+        if client is not None:
+            try:
+                client.delete(lock_key)
+            except redis.RedisError as exc:
+                logger.warning(
+                    "salomao_v1_thread_lock_release_failed",
+                    thread_id=thread_id,
+                    error=str(exc),
+                )
+
+
+__all__ = ["run_salomao_v1_thread_pipeline_task", "run_supervisor_pipeline_task"]

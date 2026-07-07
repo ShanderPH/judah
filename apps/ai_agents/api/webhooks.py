@@ -27,7 +27,13 @@ from ninja import Router, Schema
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
 from apps.ai_agents.models import TokenTrackingLog
-from apps.ai_agents.services.hubspot import USE_MOCK_HUBSPOT, hydrate_ticket_context
+from apps.ai_agents.services.hubspot import (
+    USE_MOCK_HUBSPOT,
+    build_salomao_prompt_from_hubspot_context,
+    hydrate_thread_context,
+    hydrate_ticket_context,
+    send_salomao_reply_to_hubspot_thread,
+)
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
     is_business_hours,
@@ -35,6 +41,7 @@ from apps.ai_agents.utils.business_rules import (
     off_hours_reason,
 )
 from apps.ai_agents.utils.pricing import calculate_cost
+from apps.integrations.salomao_v1 import SalomaoV1ChatResult, is_salomao_v1_configured, send_chat_to_salomao_v1
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -197,6 +204,60 @@ async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse
         )
 
 
+async def _record_salomao_v1_usage(ticket_id: str | None, session_id: str, result: SalomaoV1ChatResult) -> None:
+    """Persist best-effort token usage returned by Salomao v1."""
+    if result.tokens.total <= 0:
+        return
+
+    try:
+        await _persist_token_tracking(
+            session_id=session_id,
+            ticket_id=ticket_id,
+            model_name=result.model_used or "salomao-v1",
+            prompt_tokens=result.tokens.prompt,
+            completion_tokens=result.tokens.completion,
+            cost_usd=0.0,
+        )
+    except Exception as exc:
+        logger.error(
+            "salomao_v1_token_tracking_failed",
+            ticket_id=ticket_id,
+            session_id=session_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+async def _run_salomao_v1_for_hubspot_context(
+    context: dict[str, Any],
+    *,
+    session_id: str,
+    ticket_id: str | None = None,
+) -> None:
+    """Call Salomao v1 from HubSpot context and send its answer back to HubSpot."""
+    message = build_salomao_prompt_from_hubspot_context(context)
+    if not message:
+        logger.info("salomao_v1_hubspot_no_incoming_message", ticket_id=ticket_id, session_id=session_id)
+        return
+
+    result = await send_chat_to_salomao_v1(
+        message=message,
+        session_id=session_id,
+    )
+    reply_result = await send_salomao_reply_to_hubspot_thread(context, result.response)
+    await _record_salomao_v1_usage(ticket_id, session_id, result)
+
+    logger.info(
+        "salomao_v1_hubspot_completed",
+        ticket_id=ticket_id,
+        session_id=session_id,
+        reply_sent=reply_result.get("sent"),
+        reply_reason=reply_result.get("reason"),
+        tokens_used=result.tokens.total,
+        transfer_requested=result.transfer_requested,
+    )
+
+
 async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -> None:
     """Hidrata o contexto e executa o Supervisor — roda desconectado do HTTP.
 
@@ -210,6 +271,15 @@ async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -
             return
 
         session_id = f"hubspot-ticket-{ticket_id}"
+
+        if is_salomao_v1_configured():
+            await _run_salomao_v1_for_hubspot_context(
+                context,
+                session_id=session_id,
+                ticket_id=ticket_id,
+            )
+            return
+
         user_metadata: dict[str, Any] = {
             "user_id": 0,
             "hubspot_ticket_id": ticket_id,
@@ -251,6 +321,31 @@ async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -
         logger.error(
             "supervisor_pipeline_failed",
             ticket_id=ticket_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+async def _run_salomao_v1_thread_pipeline(thread_id: str) -> None:
+    """Run Salomao v1 for a HubSpot conversation thread event."""
+    try:
+        context = await hydrate_thread_context(thread_id)
+        if context.get("errors") and not context.get("conversation_history"):
+            logger.error("salomao_v1_thread_pipeline_aborted", thread_id=thread_id, errors=context["errors"])
+            return
+
+        ticket_id = context.get("ticket_id") or None
+        session_id = f"hubspot-ticket-{ticket_id}" if ticket_id else f"hubspot-thread-{thread_id}"
+
+        await _run_salomao_v1_for_hubspot_context(
+            context,
+            session_id=session_id,
+            ticket_id=ticket_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "salomao_v1_thread_pipeline_failed",
+            thread_id=thread_id,
             error=str(exc),
             error_type=type(exc).__name__,
         )

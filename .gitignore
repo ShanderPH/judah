@@ -99,3 +99,4 @@ Thumbs.db
 /webapp/.dev.log
 /webapp/.dev.pid
 /webapp/tsconfig.tsbuildinfo
+.local-test-token

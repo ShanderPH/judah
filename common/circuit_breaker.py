@@ -1,15 +1,13 @@
 """Circuit breaker implementation for external API calls."""
 
 import time
+from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 
 from common.exceptions import CircuitOpenError
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = structlog.get_logger(__name__)
 
@@ -78,6 +76,26 @@ class CircuitBreaker:
 
         try:
             result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except Exception as exc:
+            self._on_failure()
+            raise exc
+
+    async def async_call(self, func: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any:
+        """Execute an async function through the circuit breaker."""
+        current_state = self.state
+
+        if current_state == CircuitState.OPEN:
+            raise CircuitOpenError(f"Circuit '{self.name}' is open.")
+
+        if current_state == CircuitState.HALF_OPEN:
+            if self._half_open_calls >= self.half_open_max_calls:
+                raise CircuitOpenError(f"Circuit '{self.name}' is in half-open state, max probe calls reached.")
+            self._half_open_calls += 1
+
+        try:
+            result = await func(*args, **kwargs)
             self._on_success()
             return result
         except Exception as exc:

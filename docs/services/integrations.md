@@ -51,11 +51,23 @@ Os clients são singletons lazy-initialized e usam circuit breaker (`common/circ
 - **Client:** `get_supabase_client()` em [`client.py`](../../apps/integrations/supabase_client/client.py).
 - Uso: acesso ao PostgreSQL/REST do Supabase. **TODO: confirmar** onde é usado ativamente; o banco principal é acessado via Django ORM.
 
+### `apps.integrations.salomao_v1`
+
+- **Client:** `SalomaoV1Client` em [`client.py`](../../apps/integrations/salomao_v1/client.py).
+- **Schemas:** `SalomaoV1ChatResult`, `SalomaoV1TokenUsage`.
+- **Uso:** bridge operacional para chamar o servico standalone Salomao v1 via HTTP enquanto o JUDAH atua como entrada canonica de HubSpot.
+- **Metodos principais:**
+  - `chat`
+  - `send_chat_to_salomao_v1`
+  - `is_salomao_v1_configured`
+
 ## Regras de negócio
 
 - HubSpotClient é singleton; recriação só ocorre se `_hubspot_client` for None.
 - Chamadas ao HubSpot usam circuit breaker com 5 falhas e 60s de recovery.
 - `count_active_tickets_by_owner` retorna `-1` em erro; chamadores devem tratar.
+- Quando `SALOMAO_V1_BASE_URL` esta configurado, endpoints e tasks de IA podem rotear para o servico externo Salomao v1.
+- Erros sensiveis de provider retornados em texto pelo Salomao v1 sao mascarados antes de chegar ao HubSpot/usuario final.
 
 ## Arquivos relacionados
 
@@ -63,6 +75,7 @@ Os clients são singletons lazy-initialized e usam circuit breaker (`common/circ
 - [`apps/integrations/jira/client.py`](../../apps/integrations/jira/client.py)
 - [`apps/integrations/pinecone_client/client.py`](../../apps/integrations/pinecone_client/client.py)
 - [`apps/integrations/supabase_client/client.py`](../../apps/integrations/supabase_client/client.py)
+- [`apps/integrations/salomao_v1/client.py`](../../apps/integrations/salomao_v1/client.py)
 - [`common/circuit_breaker.py`](../../common/circuit_breaker.py)
 
 ## Pontos de atenção

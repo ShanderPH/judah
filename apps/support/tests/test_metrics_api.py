@@ -67,9 +67,7 @@ def agent(db) -> Agent:
 class TestQueueMetricsEndpoint:
     """GET /api/v1/support/queue/metrics/."""
 
-    def test_returns_200_and_iso_metric_date(
-        self, client: Client, access_token: str
-    ) -> None:
+    def test_returns_200_and_iso_metric_date(self, client: Client, access_token: str) -> None:
         today = timezone.localdate()
         QueuePerformanceMetrics.objects.create(
             metric_date=today,
@@ -86,9 +84,7 @@ class TestQueueMetricsEndpoint:
         assert body["count"] == 1
         assert body["items"][0]["metric_date"] == today.isoformat()
 
-    def test_returns_200_with_empty_table(
-        self, client: Client, access_token: str
-    ) -> None:
+    def test_returns_200_with_empty_table(self, client: Client, access_token: str) -> None:
         response = client.get(
             "/api/v1/support/queue/metrics/?days=7",
             HTTP_AUTHORIZATION=f"Bearer {access_token}",
@@ -101,9 +97,7 @@ class TestQueueMetricsEndpoint:
 class TestTimeLogsEndpoint:
     """GET /api/v1/support/time-logs/."""
 
-    def test_returns_200_and_iso_log_date(
-        self, client: Client, access_token: str, agent: Agent
-    ) -> None:
+    def test_returns_200_and_iso_log_date(self, client: Client, access_token: str, agent: Agent) -> None:
         today = timezone.localdate()
         AgentDailyTimeLog.objects.create(
             agent=agent,
