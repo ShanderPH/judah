@@ -1,7 +1,7 @@
 """Local AgentOS entrypoint for the JUDAH AI agents.
 
 Run with:
-    uvicorn apps.ai_agents.agent_os:app --host 0.0.0.0 --port 7777 --reload
+    uvicorn apps.ai_agents.agent_os:app --host 127.0.0.1 --port 7777 --reload
 """
 
 from __future__ import annotations
@@ -72,4 +72,9 @@ app = agent_os.get_app()
 
 
 if __name__ == "__main__":
-    agent_os.serve(app="apps.ai_agents.agent_os:app", host="0.0.0.0", port=7777, reload=True)
+    agent_os.serve(
+        app="apps.ai_agents.agent_os:app",
+        host=os.getenv("AGENTOS_HOST", "127.0.0.1"),
+        port=int(os.getenv("AGENTOS_PORT", "7777")),
+        reload=True,
+    )

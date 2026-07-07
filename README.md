@@ -166,8 +166,9 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `PINECONE_API_KEY`              | RAG                | Pinecone serverless                                     |
 | `PINECONE_INDEX_NAME`           | RAG                |                                                         |
 | `PINECONE_HOST`                 | RAG (recommended)  | Data-plane URL — avoids cloud/region guessing           |
-| `SALOMAO_V1_BASE_URL`           | Salomao v1 bridge  | When set, `/api/v1/ai/salomao/chat` calls Salomao v1 `/chat` on a separate service URL |
-| `SALOMAO_V1_TIMEOUT_SECONDS`    | Salomao v1 bridge  | HTTP timeout for the Salomao v1 bridge                  |
+| `SALOMAO_V1_BASE_URL`           | Salomao v1 adapter | When set, the Supervisor can expose Salomao v1 as an internal Team member |
+| `SALOMAO_V1_TIMEOUT_SECONDS`    | Salomao v1 adapter | HTTP timeout for the Salomao v1 adapter                 |
+| `SALOMAO_V1_AS_TEAM_AGENT`      | Salomao v1 adapter | Enables the internal `SalomaoChat` Team member, default `true` |
 | `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
 | `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | HubSpot chat AI   | HubSpot actor ID used by Salomao to answer conversation threads |
@@ -275,12 +276,12 @@ Railway terminates TLS at the edge; Django trusts `X-Forwarded-Proto` (`SECURE_P
 
 `ALLOWED_HOSTS` is extended automatically to include `.railway.app` and `healthcheck.railway.app`.
 
-### Salomao v1 bridge on Railway
+### Salomao v1 adapter on Railway
 
 For a real HubSpot chat test without ngrok, deploy both services on Railway:
 
 1. **Salomao v1 service** exposes `POST /chat` and `GET /health`.
-2. **Judah API service** receives HubSpot webhooks and calls Salomao v1.
+2. **Judah API service** receives HubSpot webhooks and runs the Supervisor.
 3. **Judah worker service** runs Celery tasks for webhook processing.
 
 Set these variables on the Judah API and worker services:
@@ -289,6 +290,7 @@ Set these variables on the Judah API and worker services:
 AI_ROUTING_ENABLED=true
 SALOMAO_V1_BASE_URL=https://salomao-v1-production.up.railway.app
 SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_AS_TEAM_AGENT=true
 HUBSPOT_ACCESS_TOKEN=...
 HUBSPOT_APP_SECRET=...
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=...
@@ -309,7 +311,7 @@ conversation.newMessage
 The runtime flow is:
 
 ```text
-HubSpot chat -> Judah Railway webhook -> Judah Celery worker -> Salomao v1 Railway -> HubSpot thread reply
+HubSpot chat -> Judah Railway webhook -> Judah Celery worker -> Supervisor -> SalomaoChat member -> Salomao v1 Railway -> HubSpot thread reply
 ```
 
 ---

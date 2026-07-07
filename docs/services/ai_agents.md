@@ -16,7 +16,7 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 - Executar ações no HubSpot/Jira via MCP.
 - Persistir sessões, memórias, traces e custos.
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
-- Orquestrar a bridge para Salomao v1 externo quando `SALOMAO_V1_BASE_URL` estiver configurado.
+- Expor o Salomao v1 externo como membro interno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado.
 
 ## Agentes
 
@@ -40,10 +40,18 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 - Fallback estático com `GetTicketInfo`, `SearchJiraIssues`, `InChurchDiagnosticsTool`.
 - Deve fechar loop atualizando ticket no HubSpot.
 
+### `SalomaoChatAgent`
+
+- Modelo: `DEFAULT_MINI_MODEL`.
+- Adapter interno para o servico standalone Salomao v1.
+- Disponivel somente quando `SALOMAO_V1_BASE_URL` e `SALOMAO_V1_AS_TEAM_AGENT=true`.
+- Saida normalizada: `SalomaoChatDraft`.
+- Em erro de provider, devolve draft seguro com handoff humano sem vazar tokens, chaves ou stack traces.
+
 ### `SalomaoSupervisorAgent`
 
 - Wrapper sobre `agno.team.Team` modo `coordinate`.
-- Orquestra Heimdall → RAG/Action.
+- Orquestra Heimdall -> RAG/Action/SalomaoChat.
 - Implementa circuit breaker e greeting injection.
 - Saída: `SalomaoResponse`.
 
@@ -84,7 +92,8 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 
 - `hydrate_ticket_context(ticket_id)`: expande payload mínimo do webhook em contexto completo do ticket.
 - `hydrate_thread_context(thread_id)`: expande uma thread do HubSpot Conversations para contexto de IA.
-- `build_salomao_prompt_from_hubspot_context(context)`: monta o prompt enviado ao Salomao v1 standalone.
+- `build_salomao_prompt_from_hubspot_context(context)`: extrai a mensagem atual do cliente para eventos de conversa.
+- `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
@@ -92,7 +101,7 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 ## Tasks Celery
 
 - `run_supervisor_pipeline_task(ticket_id, is_off_hours)`: executa pipeline com lock Redis.
-- `run_salomao_v1_thread_pipeline_task(thread_id)`: executa bridge HubSpot Conversations -> Salomao v1 com lock Redis.
+- `run_salomao_v1_thread_pipeline_task(thread_id)`: executa o Supervisor para HubSpot Conversations com lock Redis; o nome foi mantido por compatibilidade.
 
 ## Regras de negócio
 
@@ -104,7 +113,8 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Prioridade `CRITICA` → handoff humano mesmo sem rota de escalation.
 - Circuit breaker: > 15k tokens por sessão → bloqueio.
 - Primeira mensagem: greeting obrigatório. Demais: não repetir.
-- Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat`, `/api/v1/ai/triage/` e eventos `conversation.newMessage` podem ser roteados para o Salomao v1 externo.
+- Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
+- `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.
 
 ## Arquivos relacionados

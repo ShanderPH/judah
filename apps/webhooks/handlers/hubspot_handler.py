@@ -182,9 +182,10 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
       - conversation.propertyChange
       - conversation.newMessage
 
-    ``conversation.newMessage`` can trigger the Salomao v1 bridge when AI
-    routing is enabled. The task re-fetches the thread and skips non-incoming
-    messages, protecting against loops caused by Judah's own outgoing replies.
+    ``conversation.newMessage`` can trigger the AI Supervisor when AI routing
+    and the Salomao v1 adapter are enabled. The task re-fetches the thread and
+    skips non-incoming messages, protecting against loops caused by Judah's own
+    outgoing replies.
     """
     object_id = str(payload.get("objectId", ""))
     logger.debug(
@@ -218,7 +219,7 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
     )
 
     run_salomao_v1_thread_pipeline_task.delay(str(thread_id))
-    logger.info("hubspot_conversation_salomao_v1_dispatched", thread_id=str(thread_id), object_id=object_id)
+    logger.info("hubspot_conversation_supervisor_dispatched", thread_id=str(thread_id), object_id=object_id)
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:

@@ -23,6 +23,7 @@ from typing import Any
 import structlog
 from agno.team import Team
 from agno.team.team import TeamMode
+from django.conf import settings
 from pydantic import BaseModel
 
 from apps.ai_agents.agents.action import HelpdeskActionAgent, MCPServerConfig
@@ -33,7 +34,9 @@ from apps.ai_agents.agents.base import (
     build_primary_model,
 )
 from apps.ai_agents.agents.rag import KnowledgeRagAgent
+from apps.ai_agents.agents.salomao_chat import SalomaoChatAgent
 from apps.ai_agents.agents.triage import HeimdallTriageAgent
+from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
 logger = structlog.get_logger(__name__)
 
@@ -137,6 +140,14 @@ class SalomaoSupervisorAgent:
             mcp_tools=mcp_tools,
             extra_mcp_configs=extra_mcp_configs,
         )
+        self._salomao_chat = (
+            SalomaoChatAgent(
+                session_id=session_id,
+                user_metadata=user_metadata,
+            )
+            if self._should_enable_salomao_chat_agent()
+            else None
+        )
 
         # --- Montagem do Team Agno ---
         # TeamMode.coordinate: o model do Team atua como maestro — decide quais
@@ -155,9 +166,19 @@ class SalomaoSupervisorAgent:
                 "Faça o transbordo via HelpdeskActionAgent (atualizando o ticket) sempre que o problema não puder ser resolvido pela IA.",
             ]
 
+        salomao_chat_routing = []
+        if self._salomao_chat is not None:
+            salomao_chat_routing = [
+                "CAPACIDADE INTERNA: O membro SalomaoChat encapsula o Salomao v1 como adapter agent.",
+                "Depois do Heimdall e antes da resposta final, acione o SalomaoChat para gerar um SalomaoChatDraft quando houver pergunta do cliente.",
+                "Use o SalomaoChatDraft para decidir resposta final, dados faltantes e transbordo; nao trate o Salomao v1 como bypass externo.",
+                "Se o SalomaoChatDraft indicar requires_human_handoff=true, sintetize a resposta final com handoff humano seguro.",
+            ]
+
         instructions = (
             _SUPERVISOR_INSTRUCTIONS
             + dynamic_routing
+            + salomao_chat_routing
             + [
                 "FLUXO DE TRANSBORDO DO RAG:",
                 "Se a resposta devolvida pelo KnowledgeRagAgent contiver a tag <REQUIRES_ESCALATION>, significa que a Inteligência não pôde sanar a dúvida.",
@@ -173,7 +194,7 @@ class SalomaoSupervisorAgent:
             model=build_primary_model(),
             fallback_config=_build_fallback_config(),
             db=_build_redis_db(session_id),
-            members=[self._triage, self._rag, self._action],
+            members=[member for member in [self._triage, self._rag, self._action, self._salomao_chat] if member],
             instructions=instructions,
             session_id=session_id,
             # Propaga o histórico do Team para os membros, permitindo
@@ -185,6 +206,10 @@ class SalomaoSupervisorAgent:
         )
 
         self._logger.info("supervisor_initialized", team_mode=TeamMode.coordinate)
+
+    def _should_enable_salomao_chat_agent(self) -> bool:
+        """Return True when Salomao v1 should be exposed as a Team member."""
+        return bool(getattr(settings, "SALOMAO_V1_AS_TEAM_AGENT", True)) and is_salomao_v1_configured()
 
     @property
     def team(self) -> Team:

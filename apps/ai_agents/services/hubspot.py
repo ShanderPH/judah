@@ -16,14 +16,17 @@ Decisões:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal, cast
 
 import httpx
 import structlog
 
+from apps.ai_agents.contracts import ConversationContext, ConversationMessage
+
 logger = structlog.get_logger(__name__)
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
+ConversationChannel = Literal["hubspot", "webchat_central", "api"]
 
 # QA/dev switch: quando True, `hydrate_ticket_context` devolve um payload
 # sintético sem tocar na API do HubSpot. Usado pelo simulador local de
@@ -387,6 +390,61 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
     )
 
 
+def build_conversation_context_from_hubspot_context(
+    context: dict[str, Any],
+    *,
+    channel: str = "hubspot",
+    session_id: str,
+    is_off_hours: bool = False,
+) -> ConversationContext:
+    """Normalize hydrated HubSpot context into the internal ConversationContext contract."""
+    history = context.get("conversation_history") or []
+    messages = [
+        ConversationMessage(
+            direction=(message.get("direction") or "UNKNOWN").upper()
+            if (message.get("direction") or "").upper() in {"INCOMING", "OUTGOING", "UNKNOWN"}
+            else "UNKNOWN",
+            text=(message.get("text") or "").strip(),
+            created_at=message.get("created_at"),
+            actor_id=message.get("sender"),
+            message_id=str(message.get("id")) if message.get("id") else None,
+        )
+        for message in history
+        if (message.get("text") or "").strip()
+    ]
+
+    thread_ids = context.get("thread_ids") or []
+    contact_ids = context.get("contact_ids") or []
+    allowed_actions = ["mark_ai_resolution_attempt"]
+    if thread_ids:
+        allowed_actions.append("send_thread_reply")
+    if context.get("ticket_id"):
+        allowed_actions.extend(["update_ticket_stage", "assign_ticket_to_human_queue", "add_internal_note"])
+
+    missing_context: list[str] = []
+    if not context.get("ticket_id"):
+        missing_context.append("ticket_id")
+    if not thread_ids:
+        missing_context.append("thread_id")
+    if not messages:
+        missing_context.append("recent_messages")
+
+    return ConversationContext(
+        channel=cast("ConversationChannel", channel),
+        session_id=session_id,
+        ticket_id=context.get("ticket_id") or None,
+        thread_id=str(thread_ids[0]) if thread_ids else None,
+        contact_id=str(contact_ids[0]) if contact_ids else None,
+        pipeline_id=context.get("pipeline") or None,
+        pipeline_stage=context.get("pipeline_stage") or None,
+        owner_id=context.get("owner_id") or None,
+        is_off_hours=is_off_hours,
+        recent_messages=messages[-20:],
+        allowed_actions=allowed_actions,
+        missing_context=missing_context,
+    )
+
+
 def _recipient_from_sender(sender: dict[str, Any]) -> dict[str, Any]:
     recipient: dict[str, Any] = {}
     if sender.get("actorId"):
@@ -483,6 +541,7 @@ async def send_salomao_reply_to_hubspot_thread(
 
 
 __all__ = [
+    "build_conversation_context_from_hubspot_context",
     "build_salomao_prompt_from_hubspot_context",
     "hydrate_thread_context",
     "hydrate_ticket_context",

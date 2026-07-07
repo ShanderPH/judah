@@ -55,7 +55,7 @@ Os clients são singletons lazy-initialized e usam circuit breaker (`common/circ
 
 - **Client:** `SalomaoV1Client` em [`client.py`](../../apps/integrations/salomao_v1/client.py).
 - **Schemas:** `SalomaoV1ChatResult`, `SalomaoV1TokenUsage`.
-- **Uso:** bridge operacional para chamar o servico standalone Salomao v1 via HTTP enquanto o JUDAH atua como entrada canonica de HubSpot.
+- **Uso:** client HTTP do adapter `SalomaoChatAgent`, que chama o servico standalone Salomao v1 enquanto o JUDAH atua como entrada canonica de HubSpot.
 - **Metodos principais:**
   - `chat`
   - `send_chat_to_salomao_v1`
@@ -66,7 +66,7 @@ Os clients são singletons lazy-initialized e usam circuit breaker (`common/circ
 - HubSpotClient é singleton; recriação só ocorre se `_hubspot_client` for None.
 - Chamadas ao HubSpot usam circuit breaker com 5 falhas e 60s de recovery.
 - `count_active_tickets_by_owner` retorna `-1` em erro; chamadores devem tratar.
-- Quando `SALOMAO_V1_BASE_URL` esta configurado, endpoints e tasks de IA podem rotear para o servico externo Salomao v1.
+- Quando `SALOMAO_V1_BASE_URL` esta configurado, o Supervisor pode expor o servico externo Salomao v1 como membro interno `SalomaoChat`.
 - Erros sensiveis de provider retornados em texto pelo Salomao v1 sao mascarados antes de chegar ao HubSpot/usuario final.
 
 ## Arquivos relacionados

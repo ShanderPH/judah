@@ -288,6 +288,7 @@ PINECONE_HOST = config("PINECONE_HOST", default="")
 
 SALOMAO_V1_BASE_URL = config("SALOMAO_V1_BASE_URL", default="")
 SALOMAO_V1_TIMEOUT_SECONDS = config("SALOMAO_V1_TIMEOUT_SECONDS", default=45.0, cast=float)
+SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast=bool)
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
