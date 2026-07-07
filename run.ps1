@@ -3,12 +3,58 @@ param(
     [string]$Target = "help"
 )
 
+function Import-LocalEnv {
+    $envFiles = @(".env", ".env.local")
+
+    foreach ($envFile in $envFiles) {
+        if (-not (Test-Path -LiteralPath $envFile)) {
+            continue
+        }
+
+        Get-Content -LiteralPath $envFile | ForEach-Object {
+            $line = $_.Trim()
+
+            if (-not $line -or $line.StartsWith("#") -or -not $line.Contains("=")) {
+                return
+            }
+
+            $key, $value = $line.Split("=", 2)
+            $key = $key.Trim()
+            $value = $value.Trim()
+
+            if (
+                ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                ($value.StartsWith("'") -and $value.EndsWith("'"))
+            ) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+
+            if ($key) {
+                Set-Item -Path "Env:$key" -Value $value
+            }
+        }
+    }
+}
+
+function Invoke-WithLocalEnv {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock
+    )
+
+    Import-LocalEnv
+    & $ScriptBlock
+}
+
 switch ($Target) {
     "run" {
-        uvicorn core.asgi:application --host 0.0.0.0 --port 8000 --reload
+        Invoke-WithLocalEnv { uvicorn core.asgi:application --host 0.0.0.0 --port 8000 --reload }
+    }
+    "agentos" {
+        Invoke-WithLocalEnv { uvicorn apps.ai_agents.agent_os:app --host 0.0.0.0 --port 7777 --reload }
     }
     "test" {
-        pytest --cov=apps --cov=common --cov-report=html --cov-report=term-missing
+        Invoke-WithLocalEnv { pytest --cov=apps --cov=common --cov-report=html --cov-report=term-missing }
     }
     "lint" {
         ruff check . --fix
@@ -19,16 +65,16 @@ switch ($Target) {
         ruff format --check .
     }
     "migrate" {
-        python manage.py migrate
+        Invoke-WithLocalEnv { python manage.py migrate }
     }
     "migrations" {
-        python manage.py makemigrations
+        Invoke-WithLocalEnv { python manage.py makemigrations }
     }
     "shell" {
-        python manage.py shell_plus --ipython
+        Invoke-WithLocalEnv { python manage.py shell_plus --ipython }
     }
     "superuser" {
-        python manage.py createsuperuser
+        Invoke-WithLocalEnv { python manage.py createsuperuser }
     }
     "docker-up" {
         docker-compose up -d
@@ -43,16 +89,17 @@ switch ($Target) {
         docker-compose logs -f
     }
     "celery" {
-        celery -A core.celery worker --loglevel=info
+        Invoke-WithLocalEnv { celery -A core.celery worker --loglevel=info }
     }
     "celery-beat" {
-        celery -A core.celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+        Invoke-WithLocalEnv { celery -A core.celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler }
     }
     "help" {
         Write-Host ""
-        Write-Host "JUDAH — Available commands (.\run.ps1 <target>):"
+        Write-Host "JUDAH - Available commands (.\run.ps1 <target>):"
         Write-Host ""
         Write-Host "  run           Start Uvicorn dev server on :8000"
+        Write-Host "  agentos       Start Agno AgentOS on :7777"
         Write-Host "  test          Run pytest with coverage"
         Write-Host "  lint          Ruff check + format (with auto-fix)"
         Write-Host "  lint-check    Ruff check (no fix, for CI)"

@@ -17,6 +17,9 @@ django-celery-beat>=2.7.0
 
 # AI & Agents
 agno>=2.5.0
+fastapi>=0.115.0
+sqlalchemy>=2.0.0
+aiosqlite>=0.20.0
 openai>=1.60.0
 anthropic>=0.40.0
 pinecone==5.4.2

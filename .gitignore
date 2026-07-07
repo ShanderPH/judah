@@ -89,6 +89,7 @@ Thumbs.db
 /.agents
 /.windsurf
 /.playwright-mcp/
+/.agentos/
 /.vscode
 /.pytest_cache
 /.ruff_cache
