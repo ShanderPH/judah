@@ -1,4 +1,4 @@
-.PHONY: run test lint migrate migrations shell superuser docker-up docker-down celery celery-beat help
+.PHONY: run test lint lint-check migrate migrations shell superuser docker-up docker-down docker-build docker-logs celery celery-beat install help
 
 run:
 	uvicorn core.asgi:application --host 0.0.0.0 --port 8000 --reload

@@ -115,11 +115,13 @@ make celery-beat
 ```bash
 cd webapp
 npm install
-cp .env.local.example .env.local  # se existir; senão, crie com JUDAH_API_URL=http://127.0.0.1:8000/api/v1
+# Crie .env.local com JUDAH_API_URL=http://127.0.0.1:8000/api/v1
 npm run dev
 ```
 
 Acesse `http://localhost:3000`.
+
+> **Nota:** o frontend Next.js está em `webapp/` e não faz parte do setup Python/Django.
 
 ## 10. Stack completa com Docker Compose
 
@@ -140,6 +142,7 @@ make docker-down   # parar tudo
 
 - [`.env.example`](../../.env.example): template de variáveis.
 - [`Makefile`](../../Makefile): comandos de desenvolvimento.
+- [`run.ps1`](../../run.ps1): comandos equivalentes no Windows.
 - [`docker-compose.yml`](../../docker-compose.yml): stack local.
 - [`requirements/dev.txt`](../../requirements/dev.txt): dependências de desenvolvimento.
 - [`webapp/README.md`](../../webapp/README.md): setup do frontend.
@@ -149,6 +152,9 @@ make docker-down   # parar tudo
 - **Nunca use `DATABASE_URL` apontando para produção ao rodar testes.** O `conftest.py` deleta linhas das tabelas de suporte antes de cada teste.
 - O `DJANGO_DEBUG=True` habilita bypass de assinatura de webhook quando `HUBSPOT_APP_SECRET` está vazio. Não use em produção.
 - A API de IA (`/api/v1/ai/`) só é montada quando `AI_ROUTING_ENABLED=true`.
+- O target `agentos` de `run.ps1` (`apps.ai_agents.agent_os:app`) refere-se a um arquivo que **não existe** no repositório atual.
+- O pre-commit roda apenas `ruff`; `mypy` não é executado automaticamente apesar de listado no `AGENTS.md` como tooling obrigatório.
+- A cobertura mínima do CI é 50%, enquanto `pyproject.toml` define 80%.
 
 ## Recomendações
 

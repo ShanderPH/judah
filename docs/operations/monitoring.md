@@ -10,10 +10,10 @@ Monitoramento do JUDAH envolve Sentry para erros, health checks para disponibili
 
 | Endpoint | Descrição |
 |----------|-----------|
-| GET `/health/` | Retorna status geral do sistema |
-| GET `/health/db/` | Verifica conexão com PostgreSQL |
-| GET `/health/redis/` | Verifica conexão com Redis |
-| GET `/health/celery/` | Verifica broker Celery |
+| GET `/api/v1/health/` | Liveness probe — sempre 200 se o processo estiver vivo |
+| GET `/api/v1/health/ready` | Readiness probe — verifica PostgreSQL, Redis, schema de auth e capacidade de emitir JWT |
+
+> **Nota:** endpoints como `/health/db/`, `/health/redis/` e `/health/celery/` não existem no código atual. A verificação de dependências está concentrada em `/api/v1/health/ready`.
 
 ## Sentry
 

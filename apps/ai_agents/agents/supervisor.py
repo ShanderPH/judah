@@ -18,6 +18,7 @@ a hierarquia de tipos do Agno.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import structlog
@@ -36,9 +37,12 @@ from apps.ai_agents.agents.base import (
 from apps.ai_agents.agents.rag import KnowledgeRagAgent
 from apps.ai_agents.agents.salomao_chat import SalomaoChatAgent
 from apps.ai_agents.agents.triage import HeimdallTriageAgent
+from apps.ai_agents.contracts import ConversationContext, ConversationMessage, SalomaoChatDraft, TriageDecision
 from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
 logger = structlog.get_logger(__name__)
+
+FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, o seu assistente virtual da inChurch..."
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +119,11 @@ class SalomaoSupervisorAgent:
         user_metadata: dict[str, Any],
         mcp_tools: list | None = None,
         extra_mcp_configs: list[MCPServerConfig] | None = None,
+        db: Any | None = None,
     ) -> None:
         self.session_id = session_id
         self.user_metadata = user_metadata
+        self._db = db
         self._logger = structlog.get_logger(self.__class__.__name__).bind(
             session_id=session_id,
             user_id=user_metadata.get("user_id"),
@@ -129,21 +135,22 @@ class SalomaoSupervisorAgent:
         self._triage = HeimdallTriageAgent(
             session_id=session_id,
             user_metadata=user_metadata,
+            db=db,
         )
-        self._rag = KnowledgeRagAgent(
-            session_id=session_id,
-            user_metadata=user_metadata,
-        )
+        self._rag: KnowledgeRagAgent | None = None
+        self._build_rag_agent()
         self._action = HelpdeskActionAgent(
             session_id=session_id,
             user_metadata=user_metadata,
             mcp_tools=mcp_tools,
             extra_mcp_configs=extra_mcp_configs,
+            db=db,
         )
         self._salomao_chat = (
             SalomaoChatAgent(
                 session_id=session_id,
                 user_metadata=user_metadata,
+                db=db,
             )
             if self._should_enable_salomao_chat_agent()
             else None
@@ -193,7 +200,7 @@ class SalomaoSupervisorAgent:
             mode=TeamMode.coordinate,
             model=build_primary_model(),
             fallback_config=_build_fallback_config(),
-            db=_build_redis_db(session_id),
+            db=db or _build_redis_db(session_id),
             members=[member for member in [self._triage, self._rag, self._action, self._salomao_chat] if member],
             instructions=instructions,
             session_id=session_id,
@@ -206,6 +213,23 @@ class SalomaoSupervisorAgent:
         )
 
         self._logger.info("supervisor_initialized", team_mode=TeamMode.coordinate)
+
+    def _build_rag_agent(self) -> KnowledgeRagAgent | None:
+        """Build the RAG member only when a route actually needs it."""
+        if self._rag is not None:
+            return self._rag
+
+        try:
+            self._rag = KnowledgeRagAgent(
+                session_id=self.session_id,
+                user_metadata=self.user_metadata,
+                db=self._db,
+            )
+        except Exception as exc:
+            self._logger.warning("rag_agent_unavailable", error=str(exc))
+            return None
+
+        return self._rag
 
     def _should_enable_salomao_chat_agent(self) -> bool:
         """Return True when Salomao v1 should be exposed as a Team member."""
@@ -250,6 +274,7 @@ class SalomaoSupervisorAgent:
 
         start = time.perf_counter()
         self._logger.info("pipeline_start", message_preview=message[:80])
+        is_first_message = False
 
         # 1. Circuit Breaker e Verificação de Primeira Mensagem
         try:
@@ -257,6 +282,7 @@ class SalomaoSupervisorAgent:
             aggr = query.aggregate(total=Sum("prompt_tokens") + Sum("completion_tokens"))
             total_acumulado = aggr["total"] or 0
             message_count = query.count()
+            is_first_message = message_count == 0
 
             if total_acumulado > 15000:
                 self._logger.warning("circuit_breaker_triggered", session_id=self.session_id, tokens=total_acumulado)
@@ -275,8 +301,8 @@ class SalomaoSupervisorAgent:
                 )
 
             # Dinâmica da Primeira Mensagem (Greeting)
-            if message_count == 0:
-                greeting_rule = "🚨 REGRA CRÍTICA: Esta é a PRIMEIRA mensagem da sessão. Você DEVE iniciar sua resposta EXATAMENTE com: 'Olá! 👋 Eu sou o Salomão, o seu assistente virtual da inChurch...'. Esta apresentação é obrigatória."
+            if is_first_message:
+                greeting_rule = f"🚨 REGRA CRÍTICA: Esta é a PRIMEIRA mensagem da sessão. Você DEVE iniciar sua resposta EXATAMENTE com: '{FIRST_MESSAGE_GREETING}'. Esta apresentação é obrigatória."
             else:
                 greeting_rule = "🚨 REGRA CRÍTICA: Você JÁ se apresentou. NÃO diga 'Olá, sou o Salomão' ou faça apresentações longas de novo nesta resposta. Prossiga a conversa naturalmente."
 
@@ -294,6 +320,26 @@ class SalomaoSupervisorAgent:
             self._logger.error("circuit_breaker_failed", error=str(e))
 
         try:
+            deterministic_response = self._run_integrated_chain(message)
+            if deterministic_response is not None:
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                return self._finalize_response(
+                    SalomaoResponse(
+                        session_id=self.session_id,
+                        message=deterministic_response.message,
+                        sources=deterministic_response.sources,
+                        requires_human_handoff=deterministic_response.requires_human_handoff,
+                        handoff_reason=deterministic_response.handoff_reason,
+                        agent_trace=deterministic_response.agent_trace,
+                        tokens_used=deterministic_response.tokens_used,
+                        prompt_tokens=deterministic_response.prompt_tokens,
+                        completion_tokens=deterministic_response.completion_tokens,
+                        model_name=deterministic_response.model_name,
+                        latency_ms=latency_ms,
+                    ),
+                    is_first_message=is_first_message,
+                )
+
             team_response = self._team.run(message, stream=stream)
             latency_ms = int((time.perf_counter() - start) * 1000)
 
@@ -316,24 +362,191 @@ class SalomaoSupervisorAgent:
                 model_name=model_name,
             )
 
-            return SalomaoResponse(
-                session_id=self.session_id,
-                message=content,
-                sources=sources,
-                requires_human_handoff=requires_handoff,
-                handoff_reason=handoff_reason,
-                agent_trace=agent_trace,
-                tokens_used=tokens_used,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                model_name=model_name,
-                latency_ms=latency_ms,
+            return self._finalize_response(
+                SalomaoResponse(
+                    session_id=self.session_id,
+                    message=content,
+                    sources=sources,
+                    requires_human_handoff=requires_handoff,
+                    handoff_reason=handoff_reason,
+                    agent_trace=agent_trace,
+                    tokens_used=tokens_used,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_name=model_name,
+                    latency_ms=latency_ms,
+                ),
+                is_first_message=is_first_message,
             )
 
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
             self._logger.error("pipeline_error", error=str(exc), latency_ms=latency_ms)
             raise
+
+    def _finalize_response(self, response: SalomaoResponse, *, is_first_message: bool) -> SalomaoResponse:
+        """Enforce response invariants that must not depend on model compliance."""
+        if not is_first_message or response.message.startswith(FIRST_MESSAGE_GREETING):
+            return response
+
+        response.message = f"{FIRST_MESSAGE_GREETING}\n\n{response.message.lstrip()}"
+        return response
+
+    def _run_integrated_chain(self, message: str) -> SalomaoResponse | None:
+        """Run the required Heimdall -> SalomaoChat path deterministically.
+
+        The Agno Team remains available for AgentOS exploration and fallback,
+        but production routing must not depend on the LLM deciding to call a
+        member/tool. Heimdall and the Salomao v1 adapter are therefore called
+        explicitly when the adapter is enabled.
+        """
+        if self._salomao_chat is None:
+            return None
+
+        trace = []
+        try:
+            triage_response = self._triage.run(message)
+            triage = self._extract_triage_decision(triage_response)
+            trace.append("heimdall: OK")
+        except Exception as exc:
+            self._logger.error("heimdall_triage_failed", error=str(exc))
+            triage = None
+            trace.append("heimdall: failed")
+
+        if self._requires_mandatory_handoff(triage):
+            trace.append("supervisor: mandatory_human_handoff")
+            return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
+
+        context = self._build_conversation_context(message)
+        draft = self._salomao_chat.create_chat_draft(
+            message=message,
+            triage_decision=triage,
+            conversation_context=context,
+        )
+
+        trace.append("salomao_chat: OK")
+        if draft.recommended_actions:
+            trace.append("helpdesk_action: pending_supervisor_decision")
+        if triage and triage.rota in {"DUVIDAS_PLATAFORMA", "ATENDIMENTO_IA"}:
+            rag = self._build_rag_agent()
+            trace.append("knowledge_rag: available" if rag else "knowledge_rag: unavailable")
+
+        return self._response_from_salomao_draft(draft, trace)
+
+    def _requires_mandatory_handoff(self, triage: TriageDecision | None) -> bool:
+        """Return True when the triage contract forbids an automated answer."""
+        if triage is None:
+            return False
+        return triage.rota == "ESCALAR_IMEDIATAMENTE" or triage.prioridade == "CRITICA"
+
+    def _mandatory_handoff_response(
+        self,
+        *,
+        triage: TriageDecision | None,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Build the fixed response for triage decisions that require escalation."""
+        reason = "Heimdall classified the ticket as requiring immediate human handoff."
+        if triage and triage.prioridade == "CRITICA":
+            reason = "Heimdall classified the ticket as CRITICA."
+
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=(
+                "Identifiquei que este atendimento precisa de transbordo para atendimento humano. "
+                "Vou encaminhar sua solicitação para a equipe responsável acompanhar com prioridade."
+            ),
+            sources=[],
+            requires_human_handoff=True,
+            handoff_reason=reason,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            model_name="heimdall_triage",
+            latency_ms=0,
+        )
+
+    def _build_conversation_context(self, message: str) -> ConversationContext:
+        """Build provider-neutral context for agent handoffs."""
+        raw_context = self.user_metadata.get("conversation_context")
+        if isinstance(raw_context, ConversationContext):
+            return raw_context
+        if isinstance(raw_context, dict):
+            try:
+                return ConversationContext.model_validate(raw_context)
+            except Exception as exc:
+                self._logger.warning("conversation_context_invalid", error=str(exc))
+
+        channel = self.user_metadata.get("originating_channel", "api")
+        if channel not in {"hubspot", "webchat_central", "api"}:
+            channel = "api"
+        return ConversationContext(
+            channel=channel,
+            session_id=self.session_id,
+            ticket_id=self.user_metadata.get("hubspot_ticket_id"),
+            thread_id=self.user_metadata.get("hubspot_thread_id"),
+            contact_id=self.user_metadata.get("hubspot_contact_id"),
+            church_id=self.user_metadata.get("church_id"),
+            recent_messages=[
+                ConversationMessage(
+                    direction="INCOMING",
+                    text=message,
+                )
+            ],
+            allowed_actions=[
+                "send_thread_reply",
+                "assign_ticket_to_human_queue",
+                "add_internal_note",
+            ],
+        )
+
+    def _extract_triage_decision(self, response: Any) -> TriageDecision | None:
+        """Normalize Heimdall output into the shared triage contract."""
+        content = getattr(response, "content", response)
+        if isinstance(content, TriageDecision):
+            return content
+        if hasattr(content, "model_dump"):
+            try:
+                return TriageDecision.model_validate(content.model_dump(mode="json"))
+            except TypeError:
+                return TriageDecision.model_validate(content.model_dump())
+            except Exception as exc:
+                self._logger.warning("triage_decision_invalid", error=str(exc))
+                return None
+        if isinstance(content, dict):
+            try:
+                return TriageDecision.model_validate(content)
+            except Exception as exc:
+                self._logger.warning("triage_decision_invalid", error=str(exc))
+                return None
+        if isinstance(content, str):
+            try:
+                return TriageDecision.model_validate(json.loads(content))
+            except Exception as exc:
+                self._logger.warning("triage_decision_unparseable", error=str(exc))
+                return None
+        return None
+
+    def _response_from_salomao_draft(
+        self,
+        draft: SalomaoChatDraft,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Convert the SalomaoChatDraft contract into the public API response."""
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=draft.response_text,
+            sources=[],
+            requires_human_handoff=draft.requires_human_handoff,
+            handoff_reason=draft.handoff_reason,
+            agent_trace=agent_trace,
+            tokens_used=draft.total_tokens or draft.prompt_tokens + draft.completion_tokens,
+            prompt_tokens=draft.prompt_tokens,
+            completion_tokens=draft.completion_tokens,
+            model_name=draft.model_name or "salomao_v1",
+            latency_ms=0,
+        )
 
     async def run_pipeline_async(
         self,

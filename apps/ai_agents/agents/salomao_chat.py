@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import structlog
-from agno.tools import Toolkit
+from agno.tools import Function, Toolkit
 from asgiref.sync import async_to_sync
 
 from apps.ai_agents.agents.base import BaseInChurchAgent, build_mini_model
@@ -25,13 +25,31 @@ logger = structlog.get_logger(__name__)
 def _safe_context(value: ConversationContext | dict[str, Any] | None) -> ConversationContext | None:
     if value is None or isinstance(value, ConversationContext):
         return value
-    return ConversationContext.model_validate(value)
+    if not value:
+        return None
+    normalized = dict(value)
+    if normalized.get("channel") == "web":
+        normalized["channel"] = "webchat_central"
+    try:
+        return ConversationContext.model_validate(normalized)
+    except Exception as exc:
+        logger.warning("salomao_chat_context_ignored", error=str(exc))
+        return None
 
 
 def _safe_triage(value: TriageDecision | dict[str, Any] | None) -> TriageDecision | None:
     if value is None or isinstance(value, TriageDecision):
         return value
-    return TriageDecision.model_validate(value)
+    if not value:
+        return None
+    normalized = dict(value)
+    if isinstance(normalized.get("sentimento"), str):
+        normalized["sentimento"] = normalized["sentimento"].lower()
+    try:
+        return TriageDecision.model_validate(normalized)
+    except Exception as exc:
+        logger.warning("salomao_chat_triage_ignored", error=str(exc))
+        return None
 
 
 def build_salomao_chat_prompt(
@@ -103,6 +121,10 @@ def salomao_v1_result_to_draft(
         missing_data=[],
         recommended_actions=_recommended_actions(result, conversation_context),
         customer_visible_protocol=_protocol(conversation_context),
+        prompt_tokens=result.tokens.prompt,
+        completion_tokens=result.tokens.completion,
+        total_tokens=result.tokens.total or result.tokens.prompt + result.tokens.completion,
+        model_name=result.model_used or "salomao_v1",
     )
 
 
@@ -183,7 +205,10 @@ class SalomaoChatTool(Toolkit):
         super().__init__(name="salomao_chat")
         self.session_id = session_id
         self.client_factory = client_factory or SalomaoV1Client
-        self.register(self.create_chat_draft)
+        create_chat_draft = Function.from_callable(self.create_chat_draft)
+        create_chat_draft.show_result = True
+        create_chat_draft.stop_after_tool_call = True
+        self.register(create_chat_draft)
 
     def create_chat_draft(
         self,
@@ -224,10 +249,23 @@ class SalomaoChatTool(Toolkit):
         session_id = context.session_id if context else self.session_id
 
         try:
-            result = await self.client_factory().chat(message=prompt, session_id=session_id)
+            client = self.client_factory()
+            logger.info(
+                "salomao_chat_bridge_call_start",
+                session_id=session_id,
+                base_url=getattr(client, "base_url", ""),
+                triage_route=triage.rota if triage else None,
+            )
+            result = await client.chat(message=prompt, session_id=session_id)
         except Exception as exc:
             return error_to_salomao_chat_draft(exc, conversation_context=context)
 
+        logger.info(
+            "salomao_chat_bridge_call_complete",
+            session_id=session_id,
+            transfer_requested=result.transfer_requested,
+            response_length=len(result.response or ""),
+        )
         return salomao_v1_result_to_draft(result, conversation_context=context)
 
 
@@ -240,7 +278,13 @@ class SalomaoChatAgent(BaseInChurchAgent):
         user_metadata: dict[str, Any],
         *,
         client_factory: Callable[[], SalomaoV1Client] | None = None,
+        db: Any | None = None,
     ) -> None:
+        kwargs: dict[str, Any] = {}
+        if db is not None:
+            kwargs["db"] = db
+
+        self._chat_tool = SalomaoChatTool(session_id=session_id, client_factory=client_factory)
         super().__init__(
             session_id=session_id,
             user_metadata=user_metadata,
@@ -252,9 +296,39 @@ class SalomaoChatAgent(BaseInChurchAgent):
                 "Nunca exponha erros de provider, tokens, chaves ou stack traces ao usuario.",
                 "Retorne ao Supervisor somente o draft estruturado e uma breve explicacao operacional.",
             ],
-            tools=[SalomaoChatTool(session_id=session_id, client_factory=client_factory)],
+            tools=[self._chat_tool],
+            tool_choice={"type": "function", "function": {"name": "create_chat_draft"}},
             add_history_to_context=False,
             debug_mode=False,
+            **kwargs,
+        )
+
+    def create_chat_draft(
+        self,
+        *,
+        message: str,
+        triage_decision: TriageDecision | dict[str, Any] | None = None,
+        conversation_context: ConversationContext | dict[str, Any] | None = None,
+    ) -> SalomaoChatDraft:
+        """Create a draft through the same tool exposed to Agno."""
+        return async_to_sync(self.create_chat_draft_async)(
+            message=message,
+            triage_decision=triage_decision,
+            conversation_context=conversation_context,
+        )
+
+    async def create_chat_draft_async(
+        self,
+        *,
+        message: str,
+        triage_decision: TriageDecision | dict[str, Any] | None = None,
+        conversation_context: ConversationContext | dict[str, Any] | None = None,
+    ) -> SalomaoChatDraft:
+        """Create a draft through the same tool exposed to Agno."""
+        return await self._chat_tool.create_chat_draft_async(
+            message=message,
+            triage_decision=triage_decision,
+            conversation_context=conversation_context,
         )
 
 

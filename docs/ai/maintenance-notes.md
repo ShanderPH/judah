@@ -5,11 +5,11 @@
 ## Problemas conhecidos
 
 1. **Sintaxe Python 2 em `support/services.py`**
-   - `except Exception, e:` deve ser `except Exception as e:`.
-   - Impede execução no Python 3.14.
+   - `except Ticket.DoesNotExist, ValueError:` foi corrigido para `except (Ticket.DoesNotExist, ValueError):`.
+   - Verificar `auto_assign_service.py` e `hubspot_handler.py` por vestígios restantes.
 
 2. **Campo inexistente em `analytics/services.py`**
-   - `Ticket.sla_breached` é referenciado mas não existe no modelo.
+   - `compute_daily_report` referencia `Ticket.Status.RESOLVED`, `Ticket.resolved_at` e `Ticket.sla_breached`, mas esses campos não existem no modelo.
 
 3. **Circuit breaker não janela deslizante**
    - Implementação atual conta falhas desde o início do processo.
@@ -32,8 +32,8 @@
 ## Dicas para debugging
 
 - Use `structlog` com `request_id` para rastrear requisições.
-- Verifique filas do Celery com `celery -A celery_app inspect active`.
-- Health checks estão em `/health/`, `/health/db/`, `/health/redis/`, `/health/celery/`.
+- Verifique filas do Celery com `celery -A core.celery inspect active`.
+- Health checks estão em `/api/v1/health/` (liveness) e `/api/v1/health/ready` (readiness).
 - Para problemas de IA, verifique `AgentTrace` e `TokenTrackingLog`.
 
 ## Arquivos relacionados

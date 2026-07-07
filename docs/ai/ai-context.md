@@ -27,7 +27,7 @@ O JUDAH é o backend unificado da InChurch. Ele consolida múltiplos sistemas le
 
 1. **Nunca** apague dados de produção sem aprovação.
 2. **Sempre** use branches nomeadas como `<type>/<kebab-summary>`.
-3. **Sempre** rode lint, type check e testes antes de abrir PR.
+3. **Sempre** rode lint e testes antes de abrir PR. Type checking com `mypy` é tooling obrigatório segundo o `AGENTS.md`, mas **não está automatizado** no pre-commit, no `Makefile` nem no CI atualmente.
 4. **Nunca** hardcode secrets.
 5. **Sempre** marque incertezas como `TODO: confirmar`.
 

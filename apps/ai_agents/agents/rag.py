@@ -317,12 +317,16 @@ class KnowledgeRagAgent(BaseInChurchAgent):
         self,
         session_id: str,
         user_metadata: dict[str, Any],
+        db: Any | None = None,
     ) -> None:
         # Cria a base de conhecimento injetável
         knowledge_base = _create_knowledge_base()
 
         # Inicializa tool auxiliar (para buscas complementares)
         search_tool = KnowledgeSearchTool(knowledge_base)
+        kwargs: dict[str, Any] = {}
+        if db is not None:
+            kwargs["db"] = db
 
         super().__init__(
             session_id=session_id,
@@ -335,6 +339,7 @@ class KnowledgeRagAgent(BaseInChurchAgent):
             tools=[search_tool],
             add_history_to_context=True,
             num_history_runs=3,
+            **kwargs,
         )
 
         self._agent_logger.info(

@@ -28,7 +28,7 @@ Esta pasta (`/docs`) contém a documentação técnica completa do **JUDAH**, o 
 
 - **Versão documentada:** `1.0.0` (conforme `pyproject.toml`).
 - **Status do sistema:** Pré-produção (conforme `README.md` do repositório).
-- **Última atualização:** 2026-07-02.
+- **Última atualização:** 2026-07-07.
 
 ## Documentação legada preservada
 

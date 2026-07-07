@@ -18,7 +18,8 @@ class FakeSalomaoClient:
             response="Para criar um cupom, acesse Eventos e configure o desconto.",
             session_id=session_id,
             transfer_requested=False,
-            tokens=SalomaoV1TokenUsage(total=30),
+            model_used="gpt-4o-mini",
+            tokens=SalomaoV1TokenUsage(prompt=10, completion=20, total=30),
         )
 
 
@@ -56,6 +57,10 @@ async def test_salomao_chat_tool_returns_structured_draft() -> None:
     assert draft.requires_human_handoff is False
     assert draft.recommended_actions[0].name == "send_thread_reply"
     assert draft.customer_visible_protocol == "#456"
+    assert draft.prompt_tokens == 10
+    assert draft.completion_tokens == 20
+    assert draft.total_tokens == 30
+    assert draft.model_name == "gpt-4o-mini"
 
 
 @override_settings(SALOMAO_V1_BASE_URL="http://salomao.local")

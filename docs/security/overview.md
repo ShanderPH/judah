@@ -31,8 +31,8 @@
 
 ## Headers de segurança
 
-- `SECURE_SSL_REDIRECT` habilitado em produção.
-- `SECURE_PROXY_SSL_HEADER` configurado para Railway.
+- `SECURE_SSL_REDIRECT` está **deliberadamente desabilitado** em produção (`core/settings/production.py`), porque a Railway termina TLS na edge e o health check interno não envia `X-Forwarded-Proto`. O redirecionamento HTTPS é feito pela própria Railway.
+- `SECURE_PROXY_SSL_HEADER` configurado para confiar no header `X-Forwarded-Proto` da Railway.
 - CSRF habilitado para views Django normais.
 
 ## Arquivos relacionados

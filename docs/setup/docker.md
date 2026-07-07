@@ -87,8 +87,10 @@ docker-compose exec app python manage.py migrate
 
 O `Dockerfile` é multi-stage:
 
-- `builder`: instala dependências e copia o código.
-- A imagem final roda Uvicorn com `core.asgi:application`.
+- `builder`: instala dependências.
+- `runtime`: imagem final que roda Gunicorn com worker `UvicornWorker` apontado para `core.asgi:application`.
+
+No `docker-compose.yml`, o comando da API é sobrescrito para `uvicorn ... --reload` para desenvolvimento.
 
 Existem também Dockerfiles especializados:
 

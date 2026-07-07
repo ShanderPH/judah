@@ -106,15 +106,15 @@ Os fluxos conectam clientes finais, agentes de suporte, sistemas externos (HubSp
 
 ## 4. Fluxo de webhook HubSpot → Supervisor de IA
 
+> **Nota:** `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`. O fluxo real de IA passa pelo webhook canônico `/api/v1/webhooks/hubspot/` quando `AI_ROUTING_ENABLED=true`.
+
 ### Passo a passo
 
-1. HubSpot envia `ticket-change` para `/api/v1/ai/webhooks/hubspot/ticket-change`.
-2. Endpoint valida HMAC v1/v3.
-3. Verifica `AI_ROUTING_ENABLED`.
-4. Verifica horário comercial.
-5. Despacha `run_supervisor_pipeline_task.delay(ticket_id, is_off_hours)`.
-6. A task adquire lock Redis.
-7. `_run_supervisor_pipeline`:
+1. HubSpot envia `ticket-change` para `/api/v1/webhooks/hubspot/`.
+2. O handler canônico valida HMAC v1/v3 e persiste `WebhookEvent`.
+3. Quando `AI_ROUTING_ENABLED=true`, o handler dispara `run_supervisor_pipeline_task.delay(ticket_id, is_off_hours)`.
+4. A task adquire lock Redis.
+5. `_run_supervisor_pipeline`:
    - Hidrata contexto do ticket via HubSpot API.
    - Monta mensagem com assunto, canal e histórico.
    - Executa Supervisor.
@@ -123,11 +123,13 @@ Os fluxos conectam clientes finais, agentes de suporte, sistemas externos (HubSp
 ### Decisões
 
 - Fora do horário comercial: o pipeline ainda roda, mas a mensagem inclui `is_off_hours=True`; Action Agent deve usar stage off-hours.
-- Se assinatura inválida: retorna 401.
+- Se assinatura inválida: retorna 401 (canônico) ou 500 (comportamento depende do router). Nunca aceita em produção sem `HUBSPOT_APP_SECRET`.
 
 ### Arquivos relacionados
 
-- [`apps/ai_agents/api/webhooks.py`](../../apps/ai_agents/api/webhooks.py)
+- [`apps/webhooks/api.py`](../../apps/webhooks/api.py)
+- [`apps/webhooks/handlers/hubspot_handler.py`](../../apps/webhooks/handlers/hubspot_handler.py)
+- [`apps/ai_agents/api/webhooks.py`](../../apps/ai_agents/api/webhooks.py) *(router definido, mas não montado)*
 - [`apps/ai_agents/tasks.py`](../../apps/ai_agents/tasks.py)
 - [`apps/ai_agents/services/hubspot.py`](../../apps/ai_agents/services/hubspot.py)
 

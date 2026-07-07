@@ -25,12 +25,12 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-4o`). |
 | `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo compacto (padrão: `gpt-4o-mini`). |
 | `PINECONE_API_KEY` | `apps/integrations/pinecone_client/client.py` | Chave da API Pinecone. |
-| `PINECONE_INDEX_NAME` | `apps/ai_agents/agents/rag.py` | Nome do índice Pinecone (padrão: `inchurch-knowledge`). |
+| `PINECONE_INDEX_NAME` | `apps/integrations/pinecone_client/client.py` | Nome do índice Pinecone (padrão: `inchurch-knowledge`). |
 | `PINECONE_HOST` | `apps/ai_agents/agents/rag.py` | URL do data-plane do Pinecone (evita adivinhar cloud/region). |
 | `PINECONE_CLOUD` | `apps/ai_agents/agents/rag.py` | Cloud do Pinecone (padrão: `aws`). |
 | `PINECONE_REGION` | `apps/ai_agents/agents/rag.py` | Região do Pinecone (padrão: `us-east-1`). |
 | `PINECONE_DIMENSION` | `apps/ai_agents/agents/rag.py` | Dimensão do embedding (padrão: `1536`). |
-| `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding (padrão: `text-embedding-ada-002`). |
+| `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding lido pelo agente RAG (padrão: `text-embedding-ada-002`). **Nota:** o cliente Pinecone em `apps/integrations/pinecone_client/client.py` hard-codes `text-embedding-3-small`; `EMBEDDING_MODEL` não é usado por ele. |
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
 | `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py`, `apps/ai_agents/agents/salomao_chat.py` | URL base do servico standalone Salomao v1. Quando preenchida, o Supervisor pode expor o Salomao v1 como membro interno `SalomaoChat`. |
 | `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
@@ -73,7 +73,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `CORS_ALLOWED_ORIGINS` | `core/settings/base.py` | Origens permitidas para CORS. |
 | `JWT_ACCESS_TOKEN_LIFETIME_MINUTES` | `core/settings/base.py` | TTL do access token JWT (padrão: `60`). |
 | `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | `core/settings/base.py` | TTL do refresh token JWT (padrão: `7`). |
-| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `False`). |
+| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` define `true` por conveniência de dev, mas o fallback do código é `False`. |
 
 ## Variáveis de observabilidade
 
@@ -142,7 +142,8 @@ AI_ROUTING_ENABLED=false
 
 - `HUBSPOT_APP_SECRET` deve estar preenchido em produção; em `DEBUG` vazio, a assinatura é bypassada.
 - `DJANGO_SECRET_KEY` é usada tanto pelo Django quanto pelo JWT; rotação invalida todas as sessões.
-- `AI_ROUTING_ENABLED=false` desmonta o router `/api/v1/ai/` por completo.
+- `AI_ROUTING_ENABLED=false` desmonta o router `/api/v1/ai/` por completo. O código usa `False` como padrão; `.env.example` foi ajustado para refletir isso.
+- `.env.example` foi atualizado com as variáveis documentadas acima. Verifique se o template local possui `HUBSPOT_N1_TEAM_ID`, `HUBSPOT_PORTAL_ID`, `JIRA_WEBHOOK_SECRET`, `PINECONE_HOST`, `PINECONE_CLOUD`, `PINECONE_REGION`, `PINECONE_DIMENSION`, `EMBEDDING_MODEL`, `DEFAULT_MODEL`, `DEFAULT_MINI_MODEL`, `USE_MOCK_HUBSPOT`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILES_SAMPLE_RATE` e `GIT_SHA`.
 
 ## Recomendações
 

@@ -148,8 +148,9 @@ Base: `/api/v1/support/`
 
 - `Ticket.status` e `Ticket.priority` são textos livres (sem enum).
 - `NewConversation.queue_position` é calculado dinamicamente (pode ser lento com fila grande).
-- A função `services.get_ticket` usa sintaxe `except Ticket.DoesNotExist, ValueError:` (Python 2) que pode falhar em Python 3.14 — **risco real** documentado no README do repo.
-- A função `auto_assign_service._safe_parse_owner_id` também usa `except (ValueError, TypeError):` com vírgula no estilo antigo no comentário, mas o código parece correto.
+- A função `services.get_ticket` usava sintaxe `except Ticket.DoesNotExist, ValueError:` (Python 2). **Corrigida** para `except (Ticket.DoesNotExist, ValueError):`.
+- **Cuidado:** `ruff format` (v0.15.8) tenta reverter a sintaxe corrigida para a forma Python 2. Não execute `ruff format` neste arquivo até que o comportamento seja investigado.
+- Verificar se `auto_assign_service.py` e `hubspot_handler.py` ainda contêm alguma sintaxe de exceção no estilo Python 2.
 
 ## Recomendações
 

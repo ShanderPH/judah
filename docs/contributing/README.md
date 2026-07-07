@@ -24,7 +24,7 @@ O projeto segue o ciclo de desenvolvimento descrito no [AGENTS.md](../../AGENTS.
 1. Crie uma branch a partir de `main`.
 2. Implemente a mudança seguindo os padrões de código.
 3. Escreva/atualize testes.
-4. Rode lint, type check e testes localmente.
+4. Rode lint e testes localmente. Type checking com `mypy` é tooling obrigatório no `AGENTS.md`, mas ainda não está automatizado no pre-commit, `Makefile`, `run.ps1` ou CI.
 5. Abra PR para `main`.
 6. Aguarde revisão e CI verde.
 
@@ -33,4 +33,4 @@ O projeto segue o ciclo de desenvolvimento descrito no [AGENTS.md](../../AGENTS.
 - Nunca commite direto em `main` ou `production`.
 - Não deixe `TODO`, `FIXME` ou prints no código final.
 - Atualize a documentação se mudar arquitetura, setup ou comportamento.
-- Siga o [Definition of Done](../AGENTS.md#6-padrões-de-qualidade-definition-of-done-universal).
+- Siga o [Definition of Done](../../AGENTS.md#6-padrões-de-qualidade-definition-of-done-universal).
