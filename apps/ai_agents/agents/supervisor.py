@@ -167,6 +167,7 @@ class SalomaoSupervisorAgent:
         )
 
         self._team = Team(
+            id="salomao-supervisor",
             name="Salomão",
             mode=TeamMode.coordinate,
             model=build_primary_model(),
@@ -180,9 +181,15 @@ class SalomaoSupervisorAgent:
             add_team_history_to_members=True,
             num_team_history_runs=3,
             markdown=True,
+            telemetry=False,
         )
 
         self._logger.info("supervisor_initialized", team_mode=TeamMode.coordinate)
+
+    @property
+    def team(self) -> Team:
+        """Return the underlying Agno Team for AgentOS/local inspection."""
+        return self._team
 
     # ---------------------------------------------------------------------------
     # Interface pública
