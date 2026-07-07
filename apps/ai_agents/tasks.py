@@ -28,7 +28,7 @@ logger = structlog.get_logger(__name__)
 # HubSpot's retry window runs out.
 _IDEMPOTENCY_TTL_SECONDS = 600
 _LOCK_KEY_PREFIX = "salomao:supervisor:ticket"
-_THREAD_LOCK_KEY_PREFIX = "salomao:v1:thread"
+_THREAD_LOCK_KEY_PREFIX = "salomao:supervisor:thread"
 
 
 def _redis_client() -> redis.Redis:
@@ -87,11 +87,12 @@ def run_supervisor_pipeline_task(ticket_id: str, is_off_hours: bool = False) -> 
 
 @shared_task(name="ai_agents.run_salomao_v1_thread_pipeline_task")
 def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
-    """Run Salomao v1 for a HubSpot conversation thread.
+    """Run the Supervisor for a HubSpot conversation thread.
 
     This is used by ``conversation.newMessage`` webhooks. The task re-fetches
     the thread before responding and only answers if the latest usable message
-    is incoming from the visitor.
+    is incoming from the visitor. The task name is kept for deployed queue
+    compatibility; Salomao v1 is now an internal Supervisor member.
     """
     thread_id = str(thread_id)
     lock_key = f"{_THREAD_LOCK_KEY_PREFIX}:{thread_id}"
@@ -102,7 +103,7 @@ def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
         acquired = bool(client.set(lock_key, "1", nx=True, ex=_IDEMPOTENCY_TTL_SECONDS))
     except redis.RedisError as exc:
         logger.warning(
-            "salomao_v1_thread_lock_unavailable",
+            "supervisor_thread_lock_unavailable",
             thread_id=thread_id,
             error=str(exc),
         )
@@ -111,7 +112,7 @@ def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
 
     if not acquired:
         logger.info(
-            "salomao_v1_thread_duplicate_skipped",
+            "supervisor_thread_duplicate_skipped",
             thread_id=thread_id,
             lock_key=lock_key,
         )
@@ -127,7 +128,7 @@ def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
                 client.delete(lock_key)
             except redis.RedisError as exc:
                 logger.warning(
-                    "salomao_v1_thread_lock_release_failed",
+                    "supervisor_thread_lock_release_failed",
                     thread_id=thread_id,
                     error=str(exc),
                 )

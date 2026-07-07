@@ -121,7 +121,7 @@ _run_supervisor_pipeline
 TokenTrackingLog
 ```
 
-### 3.3 Webhook HubSpot Conversations → Salomao v1 bridge
+### 3.3 Webhook HubSpot Conversations -> Supervisor com SalomaoChat
 
 ```text
 HubSpot conversation.newMessage
@@ -138,7 +138,8 @@ apps/webhooks/handlers/hubspot_handler.py
 run_salomao_v1_thread_pipeline_task.delay
   │ 1. Redis lock por thread
   │ 2. hydrate_thread_context (HubSpot API)
-  │ 3. POST /chat no Salomao v1
+  │ 3. Supervisor Team.run
+  │ 4. SalomaoChat chama POST /chat no Salomao v1 quando acionado
   ▼
 send_salomao_reply_to_hubspot_thread
   │
@@ -146,12 +147,13 @@ send_salomao_reply_to_hubspot_thread
 HubSpot thread reply
 ```
 
-### Regras da bridge Salomao v1
+### Regras do adapter Salomao v1
 
 - O endpoint canonico do HubSpot continua sendo `/api/v1/webhooks/hubspot/`; nao e necessario ngrok quando Judah esta publicado no Railway.
-- A bridge so roda quando `AI_ROUTING_ENABLED=true` e `SALOMAO_V1_BASE_URL` esta configurado.
+- O pipeline de Conversations so e despachado quando `AI_ROUTING_ENABLED=true` e `SALOMAO_V1_BASE_URL` esta configurado.
+- O Salomao v1 e membro interno `SalomaoChat` do Supervisor quando `SALOMAO_V1_AS_TEAM_AGENT=true`.
 - O session id e estavel por ticket (`hubspot-ticket-{id}`) ou por thread (`hubspot-thread-{id}`).
-- Respostas de erro sensivel do provider de IA nao sao reenviadas para a thread do HubSpot.
+- Respostas de erro sensivel do provider de IA viram handoff seguro e nao sao reenviadas para a thread do HubSpot.
 
 ### Arquivos relacionados
 

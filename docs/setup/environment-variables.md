@@ -32,8 +32,9 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `PINECONE_DIMENSION` | `apps/ai_agents/agents/rag.py` | Dimensão do embedding (padrão: `1536`). |
 | `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding (padrão: `text-embedding-ada-002`). |
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
-| `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py` | URL base do servico standalone Salomao v1. Quando preenchida, Judah chama `POST /chat` neste servico. |
-| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP da bridge Salomao v1 (padrao: `45`). |
+| `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py`, `apps/ai_agents/agents/salomao_chat.py` | URL base do servico standalone Salomao v1. Quando preenchida, o Supervisor pode expor o Salomao v1 como membro interno `SalomaoChat`. |
+| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
+| `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
 
 ## Variáveis de HubSpot
 
@@ -111,6 +112,7 @@ PINECONE_API_KEY=your-pinecone-key
 PINECONE_INDEX_NAME=inchurch-knowledge
 SALOMAO_V1_BASE_URL=http://localhost:8001
 SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_AS_TEAM_AGENT=true
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
