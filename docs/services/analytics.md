@@ -70,8 +70,11 @@ Base: `/api/v1/analytics/`
 ## Regras de negócio
 
 - Relatórios são pré-computados (não calculados no request).
-- `compute_daily_report` usa `Ticket.created_at__date`, `resolved_at__date` e `sla_breached`.
-- **TODO: confirmar** se o campo `Ticket.sla_breached` existe; o modelo `Ticket` analisado não possui esse campo (possível inconsistência).
+- `compute_daily_report` foi ajustado para usar campos reais do modelo `Ticket`:
+  - `total_tickets_opened`: `Ticket.created_at__date`.
+  - `total_tickets_resolved`: `Ticket.closed_at__date` (proxy — o modelo não possui `resolved_at` nem `Status.RESOLVED`).
+  - `total_tickets_escalated`: `0` (placeholder — o modelo não possui `sla_breached` nem flag de escalation).
+- **TODO: confirmar** a semântica correta de "resolvido" e "escalado" quando o modelo for evoluído.
 
 ## Arquivos relacionados
 

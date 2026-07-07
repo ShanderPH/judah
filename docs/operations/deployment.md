@@ -8,18 +8,19 @@ O JUDAH é implantado na Railway. Existem três serviços: API Django, Celery Wo
 
 ## Ambientes
 
-| Ambiente | Branch | Banco | Uso |
-|----------|--------|-------|-----|
-| Produção | `production` | Supabase production | ambiente real |
+| Ambiente | Branch / Trigger | Banco | Uso |
+|----------|------------------|-------|-----|
+| Produção | `main` + tag `v*.*.*` ou configuração manual no Railway | Supabase production | ambiente real |
 | Staging | `main` | Supabase staging | validação pré-prod |
 | Local | — | PostgreSQL local / Supabase dev | desenvolvimento |
 
 ## Fluxo de deploy
 
-1. Merge na branch `main` dispara deploy em staging.
+1. Merge na branch `main` ou push de tag `v*.*.*` dispara a pipeline de CI/CD (`.github/workflows/cd.yml`).
 2. Validação de smoke tests e Sentry.
-3. Pull request de `main` para `production`.
-4. Merge em `production` dispara deploy em produção.
+3. Deploy em produção no Railway (o `cd.yml` atual imprime placeholders; a integração real com o provider deve ser configurada no dashboard ou via CLI).
+
+> **Nota:** o CI atual (`.github/workflows/cd.yml`) roda em push para `main` e tags `v*.*.*`, mas o step de deploy é um placeholder. Não há branch `production` protegida no workflow atual — o trigger é `main` ou tag.
 
 ## Serviços Railway
 
