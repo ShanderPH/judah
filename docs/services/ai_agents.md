@@ -59,6 +59,16 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 
 - Agente único para smoke tests.
 
+## Contratos tipados
+
+`apps/ai_agents/contracts.py` centraliza os schemas Pydantic usados para handoffs entre agentes:
+
+- `TriageDecision`: rota, prioridade, tags, dados faltantes, sentimento.
+- `ConversationContext` / `ConversationMessage`: contexto neutro de provedor (canal, ticket, thread, mensagens recentes).
+- `SalomaoChatDraft`: resposta normalizada produzida pelo adapter Salomao v1.
+- `SupervisorDecision`: decisão interna do Supervisor antes de converter para `SalomaoResponse`.
+- `ActionIntent` / `HubSpotAction`: ações recomendadas e escritas no HubSpot.
+
 ## Modelos
 
 ### `AgentSession`
@@ -86,7 +96,7 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 | POST | `/chat/` | JWT | Chat legado com agente |
 | POST | `/triage/` | JWT | Triagem com Heimdall |
 | POST | `/salomao/chat` | JWT | Chat com Supervisor multi-agente |
-| POST | `/webhooks/hubspot/ticket-change` | — | Webhook HubSpot → Supervisor |
+| POST | `/webhooks/hubspot/ticket-change` | — | Webhook HubSpot → Supervisor *(router existe em `apps/ai_agents/api/webhooks.py`, mas **não está montado** em `core/urls.py`)* |
 
 ## Services principais
 
@@ -124,6 +134,8 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - [`apps/ai_agents/agents/triage.py`](../../apps/ai_agents/agents/triage.py)
 - [`apps/ai_agents/agents/rag.py`](../../apps/ai_agents/agents/rag.py)
 - [`apps/ai_agents/agents/action.py`](../../apps/ai_agents/agents/action.py)
+- [`apps/ai_agents/agents/salomao_chat.py`](../../apps/ai_agents/agents/salomao_chat.py)
+- [`apps/ai_agents/contracts.py`](../../apps/ai_agents/contracts.py)
 - [`apps/ai_agents/api/routers.py`](../../apps/ai_agents/api/routers.py)
 - [`apps/ai_agents/api/webhooks.py`](../../apps/ai_agents/api/webhooks.py)
 - [`apps/ai_agents/tasks.py`](../../apps/ai_agents/tasks.py)

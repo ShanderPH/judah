@@ -12,7 +12,7 @@ A codebase é complexa (Django + Celery + Redis + Postgres + IA + webhooks). Est
 
 ### `ModuleNotFoundError` ou `SyntaxError` ao rodar o projeto
 
-**Causa provável:** Python diferente de 3.14.
+**Causa provável:** Python diferente de 3.14, ou `run.ps1 agentos` apontando para `apps.ai_agents.agent_os:app`, que não existe.
 
 **Solução:**
 
@@ -20,7 +20,7 @@ A codebase é complexa (Django + Celery + Redis + Postgres + IA + webhooks). Est
 python --version  # deve ser 3.14.x
 ```
 
-Use pyenv ou o instalador oficial para garantir a versão exata.
+Use pyenv ou o instalador oficial para garantir a versão exata. O target `agentos` do `run.ps1` está quebrado; não use até que `apps/ai_agents/agent_os.py` seja criado.
 
 ### `django.core.exceptions.ImproperlyConfigured: SECRET_KEY must not be empty`
 
@@ -124,6 +124,12 @@ celery -A core.celery inspect scheduled
 ```bash
 echo $env:DJANGO_SETTINGS_MODULE  # deve ser core.settings.test durante testes
 ```
+
+### `mypy` não roda no CI / pre-commit
+
+**Causa provável:** `mypy` é tooling obrigatório no `AGENTS.md`, mas não está configurado em `.pre-commit-config.yaml`, `Makefile`, `run.ps1` nem `.github/workflows/ci.yml`.
+
+**Solução:** execute `mypy .` manualmente localmente ou configure-o nos scripts de qualidade.
 
 ## Problemas de IA
 

@@ -84,7 +84,7 @@ X-Hub-Signature = sha256=<HMAC-SHA256(body)>
 
 ## Pontos de atenção
 
-- Existem dois pontos de entrada para webhooks HubSpot: `/api/v1/webhooks/hubspot/` (canônico) e `/api/v1/ai/webhooks/hubspot/ticket-change` (IA). Isso pode causar duplicidade quando `AI_ROUTING_ENABLED=true` (risco C4 no README).
+- O endpoint canônico é `/api/v1/webhooks/hubspot/`. O arquivo `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`, mesmo quando `AI_ROUTING_ENABLED=true`.
 - O handler Jira atual apenas loga eventos; não há integração funcional além de criação manual via service.
 
 ## Recomendações

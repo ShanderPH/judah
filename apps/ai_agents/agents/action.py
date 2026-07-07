@@ -304,6 +304,7 @@ class HelpdeskActionAgent(BaseInChurchAgent):
         user_metadata: dict[str, Any],
         mcp_tools: list[MCPTools] | None = None,
         extra_mcp_configs: list[MCPServerConfig] | None = None,
+        db: Any | None = None,
     ) -> None:
         # Constrói lista de ferramentas MCP — fallback para config padrão.
         if mcp_tools is None:
@@ -315,6 +316,9 @@ class HelpdeskActionAgent(BaseInChurchAgent):
         static_tools = _build_static_fallback_tools()
 
         all_tools = [*mcp_tools, *static_tools]
+        kwargs: dict[str, Any] = {}
+        if db is not None:
+            kwargs["db"] = db
 
         super().__init__(
             session_id=session_id,
@@ -323,6 +327,7 @@ class HelpdeskActionAgent(BaseInChurchAgent):
             instructions=_ACTION_INSTRUCTIONS,
             tools=all_tools,
             add_history_to_context=False,
+            **kwargs,
         )
 
         self._agent_logger.info(

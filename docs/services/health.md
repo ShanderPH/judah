@@ -8,6 +8,8 @@ Módulo simples com endpoints de health check para liveness e readiness, usados 
 
 O Railway usa `/api/v1/health/` como liveness probe. O readiness probe `/api/v1/health/ready` verifica banco, cache, schema de auth e capacidade de emitir JWT.
 
+> **Nota:** `apps.health` não está registrado em `INSTALLED_APPS` (`core/settings/base.py`). O router é montado diretamente em `core/urls.py`, então os endpoints respondem, mas o app não executa `AppConfig.ready()` nem sinais.
+
 ## Endpoints
 
 Base: `/api/v1/health/`

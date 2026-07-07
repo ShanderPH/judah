@@ -1,5 +1,9 @@
 # JUDAH — Documentação Técnica do Backend Unificado InChurch
 
+> **⚠️ Documento legado / preservado para referência histórica.**
+>
+> A documentação ativa e mantida do projeto foi reorganizada em [`/docs`](./README.md). Este arquivo (`technical-documentation.md`) contém informações de alto nível criadas em 2026-05-18 e **não reflete necessariamente o estado atual do código** após a auditoria de 2026-07-07. Sempre consulte `/docs` e o código-fonte para a realidade atual.
+
 > **Versão:** 1.0.0
 > **Status:** Pre-production
 > **Última atualização:** 2026-05-18

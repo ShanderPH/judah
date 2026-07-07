@@ -10,30 +10,36 @@
 | `church` | Igrejas, planos, gateways | `api.py`, `services.py`, `models.py` |
 | `knowledge` | Artigos, chunks, sync, busca semântica | `api.py`, `services.py`, `tasks.py`, `models.py` |
 | `support` | Agentes, tickets, fila, atribuição, métricas | `api.py`, `services.py`, `tasks.py`, `models.py` |
-| `ai_agents` | Salomão, Heimdall, sessões, memórias, traces | `api.py`, `agents/`, `models.py` |
+| `ai_agents` | Salomão, Heimdall, sessões, memórias, traces | `api.py`, `agents/`, `contracts.py`, `models.py` |
 | `webhooks` | Recepção e processamento de webhooks | `api.py`, `services.py`, `tasks.py`, `models.py` |
 | `analytics` | Métricas, relatórios diários, performance | `api.py`, `services.py`, `tasks.py`, `models.py` |
 | `integrations` | Clientes externos (HubSpot, Jira, etc.) | `clients/`, `services.py` |
-| `health` | Health checks | `api.py`, `services.py` |
-| `webapp` | Views Django legadas | `views.py`, `admin.py` |
+| `health` | Health checks (router-only, não registrado em `INSTALLED_APPS`) | `api.py` |
+| `webapp` | Frontend Next.js 16 (fora de `apps/`) | `webapp/` |
 
 ## Módulos comuns
 
 | Módulo | Responsabilidade |
 |--------|------------------|
 | `common.permissions` | Decorators de RBAC |
-| `common.errors` | Exceções padronizadas |
+| `common.exceptions` | Exceções padronizadas (`JudahError` + handlers Ninja) |
 | `common.pagination` | Paginação |
 | `common.cache` | Helpers de cache Redis |
+| `common.logging` | Configuração do structlog |
+| `common.middleware` | RequestLoggingMiddleware |
+| `common.rate_limit` | Rate limiter sliding-window |
+| `common.circuit_breaker` | Circuit breaker process-local |
+| `common.utils` | Utilitários diversos |
 
 ## Integrações externas
 
 | Serviço | Cliente | Uso |
 |---------|---------|-----|
-| HubSpot | `integrations/hubspot/client.py` | Tickets, contatos, owners |
-| Jira | `integrations/jira/client.py` | Issues, comentários |
-| OpenAI | `ai_agents/llm.py` | Geração de respostas |
-| Pinecone | `knowledge/vector_store.py` | Busca vetorial |
+| HubSpot | `apps/integrations/hubspot/client.py` | Tickets, contatos, owners |
+| Jira | `apps/integrations/jira/client.py` | Issues, comentários |
+| Supabase | `apps/integrations/supabase_client/client.py` | Cliente Supabase (uso limitado) |
+| Pinecone | `apps/integrations/pinecone_client/client.py` | Busca vetorial |
+| OpenAI | `apps/ai_agents/agents/base.py` (via Agno) | Geração de respostas |
 
 ## Arquivos relacionados
 

@@ -10,7 +10,7 @@ O JUDAH usa `pytest` com `pytest-django`. Testes unitários cobrem lógica de ne
 
 ```bash
 # Instalar dependências de dev
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 
 # Rodar todos os testes
 pytest
@@ -22,7 +22,7 @@ pytest --cov=apps --cov-report=html
 pytest apps/support/tests
 
 # Rodar teste específico
-pytest apps/support/tests/test_services.py::test_assign_agent -xvs
+pytest apps/support/tests/test_queue_service.py::test_select_next_agent_prefers_online -xvs
 ```
 
 ## Isolamento do banco
@@ -61,13 +61,13 @@ def test_queue_status_requires_auth(client):
 
 ## CI
 
-A pipeline roda lint, type check e testes em cada PR.
+A pipeline roda lint e testes em cada PR. Type checking com `mypy` é listado como tooling obrigatório no `AGENTS.md`, mas **não está configurado** no CI, no pre-commit nem nos scripts de execução local atuais.
 
 ```bash
 ruff check .
 ruff format --check .
-mypy .
 pytest
+# mypy .  # não roda automaticamente hoje
 ```
 
 ## Arquivos relacionados

@@ -154,7 +154,7 @@ Todos os endpoints estão sob `/api/v1/`. Endpoints marcados com `JWT` exigem he
 | POST | `/chat/` | JWT | Chat legado |
 | POST | `/triage/` | JWT | Triagem com Heimdall |
 | POST | `/salomao/chat` | JWT | Chat com Supervisor |
-| POST | `/webhooks/hubspot/ticket-change` | — | Webhook HubSpot → Supervisor |
+| POST | `/webhooks/hubspot/ticket-change` | — | Webhook HubSpot → Supervisor *(router existe mas não está montado)* |
 
 ---
 

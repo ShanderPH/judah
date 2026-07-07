@@ -180,7 +180,12 @@ class HeimdallTriageAgent(BaseInChurchAgent):
         self,
         session_id: str,
         user_metadata: dict[str, Any],
+        db: Any | None = None,
     ) -> None:
+        kwargs: dict[str, Any] = {}
+        if db is not None:
+            kwargs["db"] = db
+
         super().__init__(
             session_id=session_id,
             user_metadata=user_metadata,
@@ -192,4 +197,5 @@ class HeimdallTriageAgent(BaseInChurchAgent):
             # Triagem é atômica — sem histórico.
             add_history_to_context=False,
             debug_mode=False,
+            **kwargs,
         )

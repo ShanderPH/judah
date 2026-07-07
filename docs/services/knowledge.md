@@ -70,7 +70,7 @@ Base: `/api/v1/knowledge/`
 ## Regras de negócio
 
 - Apenas artigos `state=PUBLISHED` são listados publicamente.
-- Busca semântica usa `text-embedding-3-small`.
+- Busca semântica usa `text-embedding-3-small` (hard-coded em `apps/integrations/pinecone_client/client.py`); a variável `EMBEDDING_MODEL` não é consultada por esse client.
 - Se Pinecone falhar, retorna lista vazia (não quebra a requisição).
 
 ## Arquivos relacionados
@@ -82,7 +82,7 @@ Base: `/api/v1/knowledge/`
 
 ## Pontos de atenção
 
-- Não há endpoint de sincronização com HubSpot exposto; a sincronização é feita por rotina externa ou comando de gerenciamento (TODO: confirmar).
+- Não há endpoint, task ou comando de gerenciamento de sincronização com HubSpot exposto no app `knowledge` atualmente.
 - O schema `ArticleResponse` espera campos como `status` e `helpful_count`, mas o modelo usa `state` e não tem `helpful_count`. Isso pode causar inconsistência na serialização.
 
 ## Recomendações

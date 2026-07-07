@@ -127,6 +127,8 @@ Extende `AbstractUser`.
 | `closed_at` | DateTimeField | nullable |
 | `Indexes` | — | `(status, priority)`, `(ticket_church, status)` |
 
+> **Nota:** `apps/analytics/services.py` referencia `Ticket.Status.RESOLVED`, `Ticket.resolved_at` e `Ticket.sla_breached`, mas esses campos **não existem** no modelo atual. O service `compute_daily_report` está quebrado até que o modelo ou o service seja ajustado.
+
 ### `NewConversation` → `new_conversations`
 
 | Campo | Tipo | Notas |

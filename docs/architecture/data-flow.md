@@ -101,14 +101,18 @@ SalomaoResponse + TokenTrackingLog
 
 ### 3.2 Webhook HubSpot → Supervisor
 
+> **Nota:** `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`. O fluxo real de tickets passa pelo webhook canônico `/api/v1/webhooks/hubspot/` e, quando `AI_ROUTING_ENABLED=true`, dispara `run_supervisor_pipeline_task.delay`.
+
 ```text
 HubSpot ticket-change
   │
   ▼
-/api/v1/ai/webhooks/hubspot/ticket-change  [apps/ai_agents/api/webhooks.py]
+/api/v1/webhooks/hubspot/  [apps/webhooks/api.py]
   │ 1. HMAC v1/v3
-  │ 2. Extrai ticket_id
-  │ 3. Verifica horário comercial
+  │ 2. Persiste WebhookEvent
+  ▼
+apps/webhooks/handlers/hubspot_handler.py
+  │ Quando AI_ROUTING_ENABLED=true
   ▼
 run_supervisor_pipeline_task.delay  [apps/ai_agents/tasks.py]
   │ 1. Redis lock por ticket

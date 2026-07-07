@@ -5,12 +5,12 @@
 ## Python
 
 - **Versão:** Python 3.14 (target do ruff).
-- **Formatador/Linter:** ruff.
-- **Type checker:** mypy em modo strict.
+- **Formatador/Linter:** ruff (`line-length = 120`, `target-version = py314`).
+- **Type checker:** mypy é listado como tooling obrigatório no `AGENTS.md`, mas **não está configurado** no pre-commit nem no `Makefile`/`run.ps1` atualmente.
 - **Type hints:** obrigatórias em funções públicas. Evite `Any`; se necessário, justifique em comentário.
 - **Docstrings:** Google-style para módulos, classes e funções públicas.
 - **Importações:** ordem padrão do ruff (`isort`).
-- **Comprimento de linha:** 88 caracteres (padrão Black/ruff).
+- **Comprimento de linha:** 120 caracteres (`pyproject.toml`).
 
 ### Exemplo
 
