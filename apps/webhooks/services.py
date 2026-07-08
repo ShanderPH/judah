@@ -9,24 +9,6 @@ logger = structlog.get_logger(__name__)
 MAX_RETRIES = 3
 
 
-def _should_record_conversation_lifecycle(event_type: str, payload: dict | None) -> bool:
-    """Return whether a HubSpot webhook belongs in the conversation lifecycle."""
-    if event_type.startswith(("ticket.", "conversation.")):
-        return True
-    if not event_type.startswith("contact."):
-        return False
-
-    payload = payload or {}
-    return bool(
-        payload.get("ticketId")
-        or payload.get("ticket_id")
-        or payload.get("threadId")
-        or payload.get("thread_id")
-        or payload.get("conversationThreadId")
-        or payload.get("conversationsThreadId")
-    )
-
-
 def record_webhook_event(source: str, event_type: str, payload: dict) -> WebhookEvent:
     """Persist an incoming webhook event.
 
@@ -76,11 +58,10 @@ def process_webhook_event(event_id) -> bool:
 
         # HubSpot CRM + Conversations events
         if et.startswith(("ticket.", "contact.", "deal.", "company.", "conversation.")):
+            from apps.ai_agents.services.lifecycle import record_lifecycle_for_webhook_event
             from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
-            if _should_record_conversation_lifecycle(et, event.payload):
-                from apps.ai_agents.services.lifecycle import record_lifecycle_for_webhook_event
-
+            try:
                 lifecycle = record_lifecycle_for_webhook_event(event)
                 logger.info(
                     "webhook_event_lifecycle_recorded",
@@ -89,6 +70,14 @@ def process_webhook_event(event_id) -> bool:
                     conversation_state=lifecycle.instance.state,
                     route=lifecycle.decision.route,
                     event_created=lifecycle.event_created,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "webhook_event_lifecycle_record_failed",
+                    event_id=event.pk,
+                    event_type=event.event_type,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
                 )
             handle_hubspot_event(event)
 
