@@ -66,7 +66,7 @@ def test_lifecycle_records_and_deduplicates_conversation_events() -> None:
 
 
 @pytest.mark.django_db
-def test_lifecycle_deduplicates_events_without_provider_event_id() -> None:
+def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> None:
     first_event = _conversation_event(eventId="")
     second_event = _conversation_event(eventId="")
     second_event.id = "db-2"
@@ -75,9 +75,9 @@ def test_lifecycle_deduplicates_events_without_provider_event_id() -> None:
     second = record_lifecycle_for_webhook_event(second_event)
 
     assert first.event_created is True
-    assert second.event_created is False
+    assert second.event_created is True
     assert ConversationInstance.objects.count() == 1
-    assert ConversationEvent.objects.count() == 1
+    assert ConversationEvent.objects.count() == 2
 
 
 @pytest.mark.django_db

@@ -117,6 +117,32 @@ class TestProcessWebhookEvent:
         assert event.retry_count == 3
         assert DeadLetterQueue.objects.filter(event=event).exists()
 
+    def test_lifecycle_error_does_not_block_ticket_auto_assignment(self) -> None:
+        ConversationInstance.objects.create(
+            idempotency_key="conversation:ticket:ticket-blocked",
+            hubspot_ticket_id="ticket-blocked",
+            state=ConversationInstance.State.HUMAN_ASSIGNED,
+        )
+        event = WebhookEvent.objects.create(
+            event_type="ticket.propertyChange",
+            object_id="ticket-blocked",
+            payload={
+                "eventId": "evt-ticket-blocked",
+                "objectId": "ticket-blocked",
+                "propertyName": "hs_v2_date_entered_939275049",
+                "propertyValue": "1783022765000",
+            },
+        )
+
+        with patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign:
+            ok = process_webhook_event(event.pk)
+
+        assert ok is True
+        mock_assign.assert_called_once_with("ticket-blocked", "1783022765000")
+        event.refresh_from_db()
+        assert event.processed is True
+        assert event.retry_count == 0
+
 
 @pytest.mark.django_db
 class TestModelStringReprs:
@@ -137,15 +163,17 @@ class TestModelStringReprs:
             process_webhook_event(event.pk)
         event.refresh_from_db()
         assert event.processed is True
-        assert ConversationInstance.objects.count() == 0
+        assert ConversationInstance.objects.count() == 1
+        assert ConversationInstance.objects.get().state == ConversationInstance.State.IGNORED
 
-    def test_process_contact_event_without_conversation_context_skips_lifecycle(self) -> None:
+    def test_process_contact_event_without_conversation_context_records_ignored_lifecycle(self) -> None:
         event = WebhookEvent.objects.create(event_type="contact.creation", payload={"objectId": "contact-1"})
         with patch("apps.webhooks.handlers.hubspot_handler.handle_hubspot_event"):
             process_webhook_event(event.pk)
         event.refresh_from_db()
         assert event.processed is True
-        assert ConversationInstance.objects.count() == 0
+        assert ConversationInstance.objects.count() == 1
+        assert ConversationInstance.objects.get().state == ConversationInstance.State.IGNORED
 
     def test_dead_letter_str(self) -> None:
         event = WebhookEvent.objects.create(event_type="unknown", object_id="9", payload={})

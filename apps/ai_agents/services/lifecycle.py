@@ -224,10 +224,8 @@ def _idempotency_key(
     occurred_at: str,
     source_event_id: str,
     message_id: str,
-    property_name: str,
-    property_value: str,
 ) -> str:
-    natural_id = source_event_id or f"{object_id}:{property_name}:{property_value}:{occurred_at}:{message_id}"
+    natural_id = source_event_id or f"{object_id}:{occurred_at}:{message_id}"
     return f"{source}:{event_type}:{natural_id}"
 
 
@@ -240,8 +238,7 @@ class EventNormalizer:
         object_id = _as_text(payload.get("objectId") or payload.get("object_id") or getattr(event, "object_id", ""))
         property_name = _as_text(payload.get("propertyName") or payload.get("property_name"))
         property_value = _as_text(payload.get("propertyValue") or payload.get("property_value"))
-        payload_event_id = _event_id_from_payload(payload)
-        source_event_id = payload_event_id or _as_text(getattr(event, "id", ""))
+        source_event_id = _event_id_from_payload(payload) or _as_text(getattr(event, "id", ""))
         message_id = _message_id_from_payload(payload)
         occurred_at_raw = _as_text(payload.get("occurredAt") or payload.get("occurred_at"))
         occurred_at = _parse_hubspot_timestamp(occurred_at_raw)
@@ -288,10 +285,8 @@ class EventNormalizer:
             event_type=raw_event_type,
             object_id=object_id,
             occurred_at=occurred_at_raw,
-            source_event_id=payload_event_id,
+            source_event_id=source_event_id,
             message_id=message_id,
-            property_name=property_name,
-            property_value=property_value,
         )
 
         return NormalizedEvent(
