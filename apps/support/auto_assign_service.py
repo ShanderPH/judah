@@ -42,6 +42,28 @@ from common.exceptions import ExternalServiceError
 logger = structlog.get_logger(__name__)
 
 
+def _transition_lifecycle_best_effort(hubspot_ticket_id: str, states: list[str], *, reason: str) -> None:
+    """Advance AI/helpdesk lifecycle when a support event affects a ticket."""
+    try:
+        from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+
+        engine = LifecycleEngine()
+        for state in states:
+            try:
+                if not engine.transition_by_ticket(hubspot_ticket_id, state, reason=reason):
+                    return
+            except InvalidStateTransitionError as exc:
+                logger.info(
+                    "support_lifecycle_transition_skipped",
+                    ticket_id=hubspot_ticket_id,
+                    target_state=state,
+                    reason=str(exc),
+                )
+                return
+    except Exception as exc:
+        logger.warning("support_lifecycle_transition_failed", ticket_id=hubspot_ticket_id, error=str(exc))
+
+
 def _safe_parse_owner_id(value: str | int | None) -> int | None:
     """Safely extract a numeric HubSpot owner ID from various formats.
 
@@ -127,6 +149,11 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
     )
     if not created:
         logger.info("auto_assign_ticket_already_queued", ticket_id=hubspot_ticket_id)
+    _transition_lifecycle_best_effort(
+        hubspot_ticket_id,
+        ["QUEUE_PENDING"],
+        reason="Ticket enqueued for automatic assignment.",
+    )
 
     return attempt_auto_assign(new_conv, ticket_data)
 
@@ -285,6 +312,12 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
         # Update agent chat counter
         increment_agent_chat_count(agent)
 
+    _transition_lifecycle_best_effort(
+        new_conv.hubspot_ticket_id,
+        ["HUMAN_ASSIGNED"],
+        reason="Matchmaker assigned the ticket to a human agent.",
+    )
+
     logger.info(
         "auto_assign_success",
         ticket_id=new_conv.hubspot_ticket_id,
@@ -427,7 +460,18 @@ def _do_handle_ticket_closed(
                 "closed_by_agent_name": closing_agent_name,
             },
         )
+        _transition_lifecycle_best_effort(
+            hubspot_ticket_id,
+            ["RESOLVED_BY_HUMAN", "CLOSED"],
+            reason="HubSpot ticket closed without assigned conversation record.",
+        )
         return
+
+    _transition_lifecycle_best_effort(
+        hubspot_ticket_id,
+        ["RESOLVED_BY_HUMAN", "CLOSED"],
+        reason="HubSpot ticket closed by support lifecycle.",
+    )
 
     logger.info(
         "auto_assign_ticket_closed",

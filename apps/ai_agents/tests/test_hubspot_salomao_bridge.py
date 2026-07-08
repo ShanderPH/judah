@@ -71,3 +71,23 @@ def test_build_conversation_context_from_hubspot_context() -> None:
     assert conversation_context.recent_messages[-1].direction == "INCOMING"
     assert "send_thread_reply" in conversation_context.allowed_actions
     assert conversation_context.missing_context == []
+
+
+def test_build_conversation_context_blocks_reply_action_for_whatsapp(settings) -> None:
+    settings.HUBSPOT_AI_REPLY_DISABLED_CHANNELS = "whatsapp"
+    context = {
+        "ticket_id": "123",
+        "originating_channel": "whatsapp",
+        "thread_ids": ["thread-1"],
+        "conversation_history": [
+            {"direction": "INCOMING", "text": "Oi", "sender": "visitor-1", "id": "m1"},
+        ],
+    }
+
+    conversation_context = build_conversation_context_from_hubspot_context(
+        context,
+        session_id="hubspot-ticket-123",
+    )
+
+    assert conversation_context.can_send_reply is False
+    assert "send_thread_reply" not in conversation_context.allowed_actions

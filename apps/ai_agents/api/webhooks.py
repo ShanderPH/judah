@@ -26,7 +26,7 @@ from django.conf import settings
 from ninja import Router, Schema
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
-from apps.ai_agents.models import TokenTrackingLog
+from apps.ai_agents.models import ConversationInstance, TokenTrackingLog
 from apps.ai_agents.services.hubspot import (
     USE_MOCK_HUBSPOT,
     build_conversation_context_from_hubspot_context,
@@ -35,6 +35,7 @@ from apps.ai_agents.services.hubspot import (
     hydrate_ticket_context,
     send_salomao_reply_to_hubspot_thread,
 )
+from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
     is_business_hours,
@@ -204,6 +205,41 @@ async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse
         )
 
 
+@sync_to_async
+def _advance_lifecycle_for_hubspot_context(
+    context: dict[str, Any],
+    ticket_id: str | None,
+    states: list[str],
+    *,
+    reason: str,
+) -> None:
+    """Best-effort lifecycle transition for async HubSpot worker paths."""
+    thread_ids = context.get("thread_ids") or []
+    instance = None
+    if thread_ids:
+        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
+    if instance is None and ticket_id:
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    if instance is None and context.get("ticket_id"):
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(context["ticket_id"])).first()
+    if instance is None:
+        return
+
+    engine = LifecycleEngine()
+    for state in states:
+        try:
+            engine.transition(instance, state, reason=reason)
+        except InvalidStateTransitionError as exc:
+            logger.info(
+                "lifecycle_transition_skipped",
+                conversation_instance_id=str(instance.pk),
+                current_state=instance.state,
+                target_state=state,
+                reason=str(exc),
+            )
+            break
+
+
 def _build_hubspot_supervisor_message(context: dict[str, Any], ticket_id: str | None) -> str | None:
     prompt = build_salomao_prompt_from_hubspot_context(context)
     if prompt:
@@ -244,6 +280,28 @@ async def _run_supervisor_for_hubspot_context(
         session_id=session_id,
         is_off_hours=is_off_hours,
     )
+    if not conversation_context.can_send_reply:
+        await _advance_lifecycle_for_hubspot_context(
+            context,
+            ticket_id,
+            [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+            reason="Channel cannot send automated replies.",
+        )
+        logger.info("supervisor_hubspot_channel_requires_handoff", ticket_id=ticket_id, session_id=session_id)
+        return
+
+    await _advance_lifecycle_for_hubspot_context(
+        context,
+        ticket_id,
+        [
+            ConversationInstance.State.CONTEXT_READY,
+            ConversationInstance.State.TRIAGE_PENDING,
+            ConversationInstance.State.TRIAGE_RUNNING,
+            ConversationInstance.State.AI_SERVICE_PENDING,
+            ConversationInstance.State.AI_SERVICE_RUNNING,
+        ],
+        reason="Supervisor worker processing HubSpot context.",
+    )
 
     supervisor = SalomaoSupervisorAgent(
         session_id=session_id,
@@ -261,6 +319,21 @@ async def _run_supervisor_for_hubspot_context(
     result = await supervisor.run_pipeline_async(message)
     reply_result = await send_salomao_reply_to_hubspot_thread(context, result.message)
     await _record_usage(ticket_id or context.get("ticket_id", ""), session_id, result)
+
+    if result.requires_human_handoff or not reply_result.get("sent"):
+        await _advance_lifecycle_for_hubspot_context(
+            context,
+            ticket_id,
+            [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+            reason=result.handoff_reason or reply_result.get("reason") or "Supervisor requested handoff.",
+        )
+    else:
+        await _advance_lifecycle_for_hubspot_context(
+            context,
+            ticket_id,
+            [ConversationInstance.State.RESOLVED_BY_AI, ConversationInstance.State.CLOSED],
+            reason="Supervisor sent an automated answer successfully.",
+        )
 
     logger.info(
         "supervisor_hubspot_completed",

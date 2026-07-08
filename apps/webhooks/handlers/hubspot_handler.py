@@ -203,6 +203,19 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         logger.debug("hubspot_conversation_outgoing_skipped", object_id=object_id, direction=direction)
         return
 
+    from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
+
+    channel = normalize_channel(
+        payload.get("channel")
+        or payload.get("channelType")
+        or payload.get("messageType")
+        or payload.get("source")
+        or payload.get("sourceType")
+    )
+    if not can_send_automated_reply(channel):
+        logger.info("hubspot_conversation_auto_reply_unsupported", object_id=object_id, channel=channel)
+        return
+
     from django.conf import settings
 
     if not getattr(settings, "AI_ROUTING_ENABLED", False) or not getattr(settings, "SALOMAO_V1_BASE_URL", ""):

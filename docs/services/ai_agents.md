@@ -18,6 +18,8 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
 - Expor o Salomao v1 externo como membro interno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado.
 
+Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes, agent runs e auditoria de tools. O backend controla estado e idempotencia; agentes retornam saidas estruturadas, mas nao alteram lifecycle diretamente.
+
 ## Agentes
 
 ### `HeimdallTriageAgent`
@@ -86,6 +88,20 @@ Trace de execução por turno.
 ### `TokenTrackingLog`
 
 Custo e consumo de tokens por execução.
+
+## Lifecycle deterministico
+
+- `ConversationInstance`: instancia persistida da state machine de atendimento.
+- `ConversationEvent`: ledger append-only de eventos normalizados a partir de webhooks HubSpot.
+- `ConversationStateTransition`: trilha auditavel de toda mudanca de estado.
+- `AgentRun`: snapshot de execucao de agente/modelo com entrada, saida, tokens, latencia, custo e status.
+- `ToolCallAuditLog`: auditoria de tools externas ou com efeito colateral.
+- `EventNormalizer`: converte `WebhookEvent` bruto em evento interno canonico.
+- `RoutingPolicyEngine`: roteia deterministicamente para `IGNORE`, `AUTO_ASSIGNMENT`, `AI_TRIAGE`, `HUMAN_HANDOFF`, `CLOSE` ou `WAIT_FOR_CONTACT_DATA`.
+- `channel_capabilities`: bloqueia resposta automatica em canais sem suporte tecnico, como WhatsApp por padrao.
+- `tool_permissions`: aplica allowlist de tools por estado do lifecycle.
+- `build_handoff_package`: monta contexto minimo para transferencia humana.
+- `run_lifecycle_watchdog`: detecta instancias presas e transiciona para `FAILED_RETRYABLE` ou `FAILED_TERMINAL`.
 
 ## Endpoints
 

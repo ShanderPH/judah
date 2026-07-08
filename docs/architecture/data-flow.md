@@ -20,6 +20,7 @@ HubSpot
   ▼
 apps/webhooks/handlers/hubspot_handler.py
   │ Identifica evento de ticket.propertyChange NOVO
+  │ Registra lifecycle: ConversationInstance + ConversationEvent + QUEUE_PENDING
   ▼
 task_matchmaker_assign_single  [apps/support/tasks.py]
   │ 1. Deduplica via Redis lock
@@ -137,7 +138,8 @@ HubSpot conversation.newMessage
   ▼
 apps/webhooks/handlers/hubspot_handler.py
   │ 1. Ignora mensagens OUTGOING para evitar loop
-  │ 2. Verifica AI_ROUTING_ENABLED + SALOMAO_V1_BASE_URL
+  │ 2. Registra lifecycle e valida capacidade de canal
+  │ 3. Verifica AI_ROUTING_ENABLED + SALOMAO_V1_BASE_URL
   ▼
 run_salomao_v1_thread_pipeline_task.delay
   │ 1. Redis lock por thread

@@ -56,6 +56,7 @@ class ConversationContext(BaseModel):
     pipeline_stage: str | None = None
     owner_id: str | None = None
     is_off_hours: bool = False
+    can_send_reply: bool = True
     recent_messages: list[ConversationMessage] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
