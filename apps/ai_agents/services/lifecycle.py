@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import structlog
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from apps.ai_agents.models import (
@@ -37,10 +37,31 @@ _PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
 _STAGE_FECHADO_ID = "939275052"
+_REQUIRED_LIFECYCLE_TABLES = {
+    "conversation_instances",
+    "conversation_events",
+    "conversation_state_transitions",
+    "agent_runs",
+    "tool_call_audit_logs",
+}
 
 
 class InvalidStateTransitionError(ValueError):
     """Raised when a lifecycle transition is not allowed."""
+
+
+def is_lifecycle_schema_ready() -> bool:
+    """Return whether lifecycle tables exist in the current database."""
+    try:
+        existing_tables = set(connection.introspection.table_names())
+    except Exception as exc:
+        logger.warning(
+            "lifecycle_schema_check_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return False
+    return _REQUIRED_LIFECYCLE_TABLES.issubset(existing_tables)
 
 
 @dataclass(frozen=True)
@@ -638,5 +659,6 @@ __all__ = [
     "NormalizedEvent",
     "RouteDecision",
     "RoutingPolicyEngine",
+    "is_lifecycle_schema_ready",
     "record_lifecycle_for_webhook_event",
 ]
