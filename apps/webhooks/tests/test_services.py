@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from apps.ai_agents.models import ConversationInstance
 from apps.webhooks.models import DeadLetterQueue, WebhookEvent
 from apps.webhooks.services import process_webhook_event, record_webhook_event
 
@@ -136,6 +137,15 @@ class TestModelStringReprs:
             process_webhook_event(event.pk)
         event.refresh_from_db()
         assert event.processed is True
+        assert ConversationInstance.objects.count() == 0
+
+    def test_process_contact_event_without_conversation_context_skips_lifecycle(self) -> None:
+        event = WebhookEvent.objects.create(event_type="contact.creation", payload={"objectId": "contact-1"})
+        with patch("apps.webhooks.handlers.hubspot_handler.handle_hubspot_event"):
+            process_webhook_event(event.pk)
+        event.refresh_from_db()
+        assert event.processed is True
+        assert ConversationInstance.objects.count() == 0
 
     def test_dead_letter_str(self) -> None:
         event = WebhookEvent.objects.create(event_type="unknown", object_id="9", payload={})

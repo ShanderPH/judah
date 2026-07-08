@@ -22,6 +22,7 @@ import httpx
 import structlog
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
+from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
 
 logger = structlog.get_logger(__name__)
 
@@ -415,8 +416,10 @@ def build_conversation_context_from_hubspot_context(
 
     thread_ids = context.get("thread_ids") or []
     contact_ids = context.get("contact_ids") or []
+    raw_channel = context.get("originating_channel") or context.get("channel") or channel
+    can_send_reply = can_send_automated_reply(str(raw_channel))
     allowed_actions = ["mark_ai_resolution_attempt"]
-    if thread_ids:
+    if thread_ids and can_send_reply:
         allowed_actions.append("send_thread_reply")
     if context.get("ticket_id"):
         allowed_actions.extend(["update_ticket_stage", "assign_ticket_to_human_queue", "add_internal_note"])
@@ -439,6 +442,7 @@ def build_conversation_context_from_hubspot_context(
         pipeline_stage=context.get("pipeline_stage") or None,
         owner_id=context.get("owner_id") or None,
         is_off_hours=is_off_hours,
+        can_send_reply=can_send_reply,
         recent_messages=messages[-20:],
         allowed_actions=allowed_actions,
         missing_context=missing_context,
