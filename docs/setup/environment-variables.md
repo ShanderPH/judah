@@ -48,6 +48,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
 | `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Stage opcional que roteia tickets para `AI_TRIAGE` no lifecycle determinístico. |
 | `HUBSPOT_AI_REPLY_DISABLED_CHANNELS` | `apps/ai_agents/services/channel_capabilities.py` | Lista separada por vírgulas de canais sem resposta automática por IA (padrão: `whatsapp`). |
+| `HUBSPOT_TICKET_CHURCH_PROPERTY` | `apps/ai_agents/services/protocol_lookup.py` | Propriedade do ticket que armazena o ID da igreja local (padrão: `codigo_de_igreja_local___ticket`). |
 
 ## Variáveis de Jira
 
@@ -122,6 +123,7 @@ HUBSPOT_PORTAL_ID=your-portal-id
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
 HUBSPOT_AI_TRIAGE_STAGE_ID=
 HUBSPOT_AI_REPLY_DISABLED_CHANNELS=whatsapp
+HUBSPOT_TICKET_CHURCH_PROPERTY=codigo_de_igreja_local___ticket
 
 JIRA_SERVER_URL=https://inchurch.atlassian.net
 JIRA_API_TOKEN=your-jira-token

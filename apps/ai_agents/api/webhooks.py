@@ -36,6 +36,7 @@ from apps.ai_agents.services.hubspot import (
     send_salomao_reply_to_hubspot_thread,
 )
 from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+from apps.ai_agents.services.protocol_lookup import handle_protocol_lookup_from_hubspot_context
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
     is_business_hours,
@@ -302,6 +303,32 @@ async def _run_supervisor_for_hubspot_context(
         ],
         reason="Supervisor worker processing HubSpot context.",
     )
+
+    protocol_reply = await handle_protocol_lookup_from_hubspot_context(context) if require_incoming else None
+    if protocol_reply is not None:
+        reply_result = await send_salomao_reply_to_hubspot_thread(context, protocol_reply)
+        if reply_result.get("sent"):
+            await _advance_lifecycle_for_hubspot_context(
+                context,
+                ticket_id,
+                [ConversationInstance.State.RESOLVED_BY_AI, ConversationInstance.State.CLOSED],
+                reason="Judah answered a HubSpot protocol lookup.",
+            )
+        else:
+            await _advance_lifecycle_for_hubspot_context(
+                context,
+                ticket_id,
+                [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+                reason=reply_result.get("reason") or "Judah could not send the protocol lookup reply.",
+            )
+        logger.info(
+            "hubspot_protocol_lookup_completed",
+            ticket_id=ticket_id,
+            session_id=session_id,
+            reply_sent=reply_result.get("sent"),
+            reply_reason=reply_result.get("reason"),
+        )
+        return
 
     supervisor = SalomaoSupervisorAgent(
         session_id=session_id,

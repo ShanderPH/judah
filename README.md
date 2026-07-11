@@ -172,6 +172,7 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
 | `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | HubSpot chat AI   | HubSpot actor ID used by Salomao to answer conversation threads |
+| `HUBSPOT_TICKET_CHURCH_PROPERTY` | HubSpot protocol lookup | Ticket property containing the local church ID; defaults to `codigo_de_igreja_local___ticket` |
 | `HUBSPOT_PORTAL_ID`             | Optional           | Used to build ticket URLs                               |
 | `SENTRY_DSN`                    | Recommended        | Auto-initialized if set                                 |
 | `DEFAULT_MODEL`                 | Optional           | Override `gpt-4o`                                       |
