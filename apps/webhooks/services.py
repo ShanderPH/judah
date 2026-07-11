@@ -58,26 +58,33 @@ def process_webhook_event(event_id) -> bool:
 
         # HubSpot CRM + Conversations events
         if et.startswith(("ticket.", "contact.", "deal.", "company.", "conversation.")):
-            from apps.ai_agents.services.lifecycle import record_lifecycle_for_webhook_event
+            from apps.ai_agents.services.lifecycle import is_lifecycle_schema_ready, record_lifecycle_for_webhook_event
             from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
-            try:
-                lifecycle = record_lifecycle_for_webhook_event(event)
+            if is_lifecycle_schema_ready():
+                try:
+                    lifecycle = record_lifecycle_for_webhook_event(event)
+                    logger.info(
+                        "webhook_event_lifecycle_recorded",
+                        event_id=event.pk,
+                        conversation_instance_id=str(lifecycle.instance.pk),
+                        conversation_state=lifecycle.instance.state,
+                        route=lifecycle.decision.route,
+                        event_created=lifecycle.event_created,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "webhook_event_lifecycle_record_failed",
+                        event_id=event.pk,
+                        event_type=event.event_type,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+            else:
                 logger.info(
-                    "webhook_event_lifecycle_recorded",
-                    event_id=event.pk,
-                    conversation_instance_id=str(lifecycle.instance.pk),
-                    conversation_state=lifecycle.instance.state,
-                    route=lifecycle.decision.route,
-                    event_created=lifecycle.event_created,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "webhook_event_lifecycle_record_failed",
+                    "webhook_event_lifecycle_schema_missing",
                     event_id=event.pk,
                     event_type=event.event_type,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
                 )
             handle_hubspot_event(event)
 

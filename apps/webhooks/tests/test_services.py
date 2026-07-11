@@ -82,6 +82,28 @@ class TestProcessWebhookEvent:
             process_webhook_event(event.pk)
         mock_handler.assert_called_once()
 
+    def test_missing_lifecycle_schema_does_not_block_hubspot_handler(self) -> None:
+        event = WebhookEvent.objects.create(
+            event_type="ticket.propertyChange",
+            payload={
+                "objectId": "ticket-no-schema",
+                "propertyName": "hs_v2_date_entered_939275049",
+                "propertyValue": "1783022765000",
+            },
+        )
+        with (
+            patch("apps.ai_agents.services.lifecycle.is_lifecycle_schema_ready", return_value=False),
+            patch("apps.webhooks.handlers.hubspot_handler.handle_hubspot_event") as mock_handler,
+            patch("apps.ai_agents.services.lifecycle.record_lifecycle_for_webhook_event") as mock_lifecycle,
+        ):
+            ok = process_webhook_event(event.pk)
+
+        assert ok is True
+        mock_lifecycle.assert_not_called()
+        mock_handler.assert_called_once()
+        event.refresh_from_db()
+        assert event.processed is True
+
     def test_unknown_event_type_still_marked_processed(self) -> None:
         event = WebhookEvent.objects.create(event_type="unknown", payload={"x": 1})
         ok = process_webhook_event(event.pk)
