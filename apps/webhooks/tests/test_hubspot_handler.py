@@ -10,6 +10,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.test import override_settings
+
 from apps.webhooks.handlers.hubspot_handler import (
     _handle_ticket_entered_closed,
     handle_hubspot_event,
@@ -56,6 +58,22 @@ class TestHandleHubspotEvent:
     def test_conversation_event_routed(self) -> None:
         event = _event("conversation.newMessage", {"objectId": "77"})
         handle_hubspot_event(event)
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
+        HUBSPOT_AI_REPLY_DISABLED_CHANNELS="",
+    )
+    def test_whatsapp_conversation_dispatches_ai_pipeline(self) -> None:
+        event = _event(
+            "conversation.newMessage",
+            {"objectId": "77", "threadId": "thread-77", "channel": "whatsapp", "direction": "INCOMING"},
+        )
+
+        with patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.delay") as mock_delay:
+            handle_hubspot_event(event)
+
+        mock_delay.assert_called_once_with("thread-77")
 
     def test_unknown_event_logs_only(self) -> None:
         event = _event("something.weird", {"objectId": "1"})

@@ -336,3 +336,58 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
     lookup.assert_not_awaited()
     supervisor_factory.assert_called_once()
     send_reply.assert_awaited_once_with(context, "Resposta normal do Salomao")
+
+
+@pytest.mark.django_db
+@pytest.mark.asyncio
+async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> None:
+    from apps.ai_agents.agents.supervisor import SalomaoResponse
+    from apps.ai_agents.api import webhooks
+
+    result = SalomaoResponse(
+        session_id="hubspot-thread-thread-1",
+        message="A imagem mostra a tela de eventos.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=[],
+        tokens_used=0,
+        latency_ms=1,
+    )
+    supervisor_instance = Mock()
+    supervisor_instance.run_pipeline_async = AsyncMock(return_value=result)
+    supervisor_factory = Mock(return_value=supervisor_instance)
+    monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", AsyncMock(return_value={"sent": True}))
+    monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", AsyncMock())
+    monkeypatch.setattr(webhooks, "_record_usage", AsyncMock())
+    monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor_factory)
+
+    context = {
+        "ticket_id": "current-ticket",
+        "originating_channel": "whatsapp",
+        "thread_ids": ["thread-1"],
+        "contact_ids": ["contact-1"],
+        "conversation_history": [
+            {
+                "direction": "INCOMING",
+                "text": "",
+                "sender": "visitor-1",
+                "attachments": [{"type": "FILE", "fileUsageType": "IMAGE", "fileId": "42"}],
+            },
+        ],
+        "image_base64": "aW1hZ2U=",
+        "image_mime_type": "image/png",
+    }
+
+    await webhooks._run_supervisor_for_hubspot_context(
+        context,
+        session_id="hubspot-thread-thread-1",
+        ticket_id="current-ticket",
+        require_incoming=True,
+    )
+
+    metadata = supervisor_factory.call_args.kwargs["user_metadata"]
+    assert metadata["image_base64"] == "aW1hZ2U="
+    assert metadata["image_mime_type"] == "image/png"
+    assert "aW1hZ2U=" not in supervisor_instance.run_pipeline_async.await_args.args[0]

@@ -71,6 +71,7 @@ class SalomaoV1Client:
         image_mime_type: str | None = None,
         audio_base64: str | None = None,
         audio_format: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> SalomaoV1ChatResult:
         """Send a chat turn to Salomao v1 and normalize the response."""
         payload: dict[str, Any] = {
@@ -87,7 +88,7 @@ class SalomaoV1Client:
         async def _post_chat() -> httpx.Response:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds or self.timeout_seconds,
                 transport=self.transport,
             ) as client:
                 response = await client.post("/chat", json=payload)

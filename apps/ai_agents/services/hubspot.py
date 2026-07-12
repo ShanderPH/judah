@@ -15,8 +15,10 @@ Decisões:
 
 from __future__ import annotations
 
+import base64
 import os
 from typing import Any, Literal, cast
+from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -28,6 +30,8 @@ logger = structlog.get_logger(__name__)
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
 ConversationChannel = Literal["hubspot", "webchat_central", "api"]
+SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
+DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 # QA/dev switch: quando True, `hydrate_ticket_context` devolve um payload
 # sintético sem tocar na API do HubSpot. Usado pelo simulador local de
@@ -157,10 +161,137 @@ async def _fetch_conversation_history(
                 "channel_account_id": raw.get("channelAccountId"),
                 "senders": senders,
                 "recipients": recipients,
+                "attachments": raw.get("attachments") or [],
                 "raw": raw,
             }
         )
     return messages
+
+
+def _image_mime_type(content: bytes) -> str | None:
+    """Detect the image formats accepted by Salomao v1 from file signatures."""
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _looks_like_image_attachment(attachment: dict[str, Any]) -> bool:
+    mime_type = str(attachment.get("mimeType") or attachment.get("contentType") or "").lower()
+    usage_type = str(attachment.get("fileUsageType") or "").upper()
+    name = str(attachment.get("name") or attachment.get("url") or "").lower().split("?", 1)[0]
+    return (
+        mime_type in SUPPORTED_IMAGE_MIME_TYPES
+        or usage_type in {"IMAGE", "STICKER"}
+        or name.endswith((".gif", ".jpeg", ".jpg", ".png", ".webp"))
+    )
+
+
+def _latest_incoming_image_attachment(context: dict[str, Any]) -> dict[str, Any] | None:
+    latest = _latest_incoming_message(context)
+    if not latest:
+        return None
+    return _latest_image_attachment_in_message(latest)
+
+
+def _latest_image_attachment_in_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    return next(
+        (
+            attachment
+            for attachment in message.get("attachments") or []
+            if isinstance(attachment, dict)
+            and str(attachment.get("type") or "FILE").upper() == "FILE"
+            and _looks_like_image_attachment(attachment)
+        ),
+        None,
+    )
+
+
+async def _resolve_attachment_url(client: httpx.AsyncClient, attachment: dict[str, Any]) -> str | None:
+    if attachment.get("url"):
+        return str(attachment["url"])
+
+    file_id = attachment.get("fileId")
+    if not file_id:
+        return None
+    response = await client.get(f"{HUBSPOT_API_BASE}/files/v3/files/{file_id}/signed-url")
+    response.raise_for_status()
+    return response.json().get("url")
+
+
+def _is_allowed_attachment_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not hostname:
+        return False
+    if hostname in {"hubapi.com", "hubspot.com"} or hostname.endswith((".hubapi.com", ".hubspot.com")):
+        return True
+    return any(label.startswith("hubspotusercontent") for label in hostname.split("."))
+
+
+async def _download_image_attachment(
+    client: httpx.AsyncClient,
+    attachment: dict[str, Any],
+    *,
+    max_bytes: int = DEFAULT_IMAGE_MAX_BYTES,
+) -> tuple[str, str]:
+    url = await _resolve_attachment_url(client, attachment)
+    if not url or not _is_allowed_attachment_url(url):
+        raise ValueError("HubSpot attachment URL is missing or is not trusted.")
+
+    content = bytearray()
+    async with client.stream("GET", url, headers={"Authorization": ""}) as response:
+        response.raise_for_status()
+        content_length = response.headers.get("content-length")
+        if content_length and int(content_length) > max_bytes:
+            raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+        async for chunk in response.aiter_bytes():
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+
+    mime_type = _image_mime_type(bytes(content))
+    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ValueError("HubSpot attachment is not a supported image.")
+    return base64.b64encode(content).decode("ascii"), mime_type
+
+
+async def _hydrate_latest_incoming_image(client: httpx.AsyncClient, context: dict[str, Any]) -> None:
+    attachment = _latest_incoming_image_attachment(context)
+    if not attachment:
+        return
+
+    try:
+        max_bytes = int(os.getenv("HUBSPOT_IMAGE_MAX_BYTES", str(DEFAULT_IMAGE_MAX_BYTES)))
+        image_base64, image_mime_type = await _download_image_attachment(
+            client,
+            attachment,
+            max_bytes=max_bytes,
+        )
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        logger.warning(
+            "hubspot_image_attachment_ignored",
+            message_id=(_latest_incoming_message(context) or {}).get("id"),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        context.setdefault("errors", []).append(f"image_attachment:{type(exc).__name__}")
+        return
+
+    context["image_base64"] = image_base64
+    context["image_mime_type"] = image_mime_type
+    context["image_name"] = attachment.get("name") or None
+    logger.info(
+        "hubspot_image_attachment_hydrated",
+        message_id=(_latest_incoming_message(context) or {}).get("id"),
+        mime_type=image_mime_type,
+        size_bytes=len(base64.b64decode(image_base64)),
+    )
 
 
 async def _fetch_thread(client: httpx.AsyncClient, thread_id: str) -> dict[str, Any]:
@@ -233,7 +364,7 @@ async def hydrate_ticket_context(
     headers = _auth_headers()
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
         try:
             ticket = await _fetch_ticket(client, ticket_id)
         except httpx.HTTPStatusError as exc:
@@ -282,6 +413,7 @@ async def hydrate_ticket_context(
             history,
             key=lambda m: m.get("created_at") or "",
         )
+        await _hydrate_latest_incoming_image(client, context)
 
     logger.info(
         "hubspot_context_hydrated",
@@ -327,7 +459,7 @@ async def hydrate_thread_context(
         "errors": errors,
     }
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
         try:
             thread = await _fetch_thread(client, thread_id)
             context["threads"].append(thread)
@@ -336,6 +468,7 @@ async def hydrate_thread_context(
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
             context["conversation_history"] = await _fetch_conversation_history(client, thread_id, limit=limit)
+            await _hydrate_latest_incoming_image(client, context)
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "hubspot_thread_context_fetch_failed",
@@ -362,7 +495,11 @@ def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
     incoming = [
         message
         for message in history
-        if (message.get("direction") or "").upper() == "INCOMING" and (message.get("text") or "").strip()
+        if (message.get("direction") or "").upper() == "INCOMING"
+        and (
+            (message.get("text") or "").strip()
+            or any(_looks_like_image_attachment(a) for a in message.get("attachments") or [] if isinstance(a, dict))
+        )
     ]
     return incoming[-1] if incoming else None
 
@@ -387,7 +524,7 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
         f"Ticket: {ticket_id}\n"
         f"Assunto: {subject}\n\n"
         f"Historico recente:\n{history_block}\n\n"
-        f"Mensagem atual do cliente:\n{latest['text']}"
+        f"Mensagem atual do cliente:\n{latest.get('text') or '[Imagem enviada pelo cliente]'}"
     )
 
 
@@ -405,13 +542,14 @@ def build_conversation_context_from_hubspot_context(
             direction=(message.get("direction") or "UNKNOWN").upper()
             if (message.get("direction") or "").upper() in {"INCOMING", "OUTGOING", "UNKNOWN"}
             else "UNKNOWN",
-            text=(message.get("text") or "").strip(),
+            text=(message.get("text") or "").strip()
+            or ("[Imagem enviada pelo cliente]" if _latest_image_attachment_in_message(message) else ""),
             created_at=message.get("created_at"),
             actor_id=message.get("sender"),
             message_id=str(message.get("id")) if message.get("id") else None,
         )
         for message in history
-        if (message.get("text") or "").strip()
+        if (message.get("text") or "").strip() or _latest_image_attachment_in_message(message)
     ]
 
     thread_ids = context.get("thread_ids") or []

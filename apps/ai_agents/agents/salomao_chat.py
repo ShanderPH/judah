@@ -8,6 +8,7 @@ from typing import Any
 import structlog
 from agno.tools import Function, Toolkit
 from asgiref.sync import async_to_sync
+from django.conf import settings
 
 from apps.ai_agents.agents.base import BaseInChurchAgent, build_mini_model
 from apps.ai_agents.contracts import (
@@ -201,10 +202,14 @@ class SalomaoChatTool(Toolkit):
         *,
         session_id: str,
         client_factory: Callable[[], SalomaoV1Client] | None = None,
+        image_base64: str | None = None,
+        image_mime_type: str | None = None,
     ) -> None:
         super().__init__(name="salomao_chat")
         self.session_id = session_id
         self.client_factory = client_factory or SalomaoV1Client
+        self.image_base64 = image_base64
+        self.image_mime_type = image_mime_type
         create_chat_draft = Function.from_callable(self.create_chat_draft)
         create_chat_draft.show_result = True
         create_chat_draft.stop_after_tool_call = True
@@ -256,7 +261,15 @@ class SalomaoChatTool(Toolkit):
                 base_url=getattr(client, "base_url", ""),
                 triage_route=triage.rota if triage else None,
             )
-            result = await client.chat(message=prompt, session_id=session_id)
+            result = await client.chat(
+                message=prompt,
+                session_id=session_id,
+                image_base64=self.image_base64,
+                image_mime_type=self.image_mime_type,
+                timeout_seconds=(
+                    getattr(settings, "SALOMAO_V1_IMAGE_TIMEOUT_SECONDS", 180.0) if self.image_base64 else None
+                ),
+            )
         except Exception as exc:
             return error_to_salomao_chat_draft(exc, conversation_context=context)
 
@@ -284,7 +297,12 @@ class SalomaoChatAgent(BaseInChurchAgent):
         if db is not None:
             kwargs["db"] = db
 
-        self._chat_tool = SalomaoChatTool(session_id=session_id, client_factory=client_factory)
+        self._chat_tool = SalomaoChatTool(
+            session_id=session_id,
+            client_factory=client_factory,
+            image_base64=user_metadata.get("image_base64"),
+            image_mime_type=user_metadata.get("image_mime_type"),
+        )
         super().__init__(
             session_id=session_id,
             user_metadata=user_metadata,

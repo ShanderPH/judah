@@ -437,7 +437,11 @@ class SalomaoSupervisorAgent:
         """Return True when the triage contract forbids an automated answer."""
         if triage is None:
             return False
-        return triage.rota == "ESCALAR_IMEDIATAMENTE" or triage.prioridade == "CRITICA"
+        return (
+            triage.rota == "ESCALAR_IMEDIATAMENTE"
+            or triage.prioridade in {"ALTA", "CRITICA"}
+            or triage.sentimento == "negativo"
+        )
 
     def _mandatory_handoff_response(
         self,
@@ -447,15 +451,25 @@ class SalomaoSupervisorAgent:
     ) -> SalomaoResponse:
         """Build the fixed response for triage decisions that require escalation."""
         reason = "Heimdall classified the ticket as requiring immediate human handoff."
-        if triage and triage.prioridade == "CRITICA":
-            reason = "Heimdall classified the ticket as CRITICA."
+        if triage and triage.prioridade in {"ALTA", "CRITICA"}:
+            reason = f"Heimdall classified the ticket as {triage.prioridade}."
+        elif triage and triage.sentimento == "negativo":
+            reason = "Heimdall detected customer frustration."
+
+        frustrated = bool(triage and triage.sentimento == "negativo")
+        message = (
+            "Entendo como essa situação é frustrante e sinto muito pelo transtorno. "
+            "Para que você receba a atenção necessária, vou encaminhar seu atendimento "
+            "para uma pessoa do nosso time, que continuará por aqui com o contexto que você já enviou."
+            if frustrated
+            else "Sinto muito pelo transtorno. Como este caso precisa de uma atenção mais cuidadosa, "
+            "vou encaminhar seu atendimento para uma pessoa do nosso time, que continuará por aqui "
+            "com o contexto que você já enviou."
+        )
 
         return SalomaoResponse(
             session_id=self.session_id,
-            message=(
-                "Identifiquei que este atendimento precisa de transbordo para atendimento humano. "
-                "Vou encaminhar sua solicitação para a equipe responsável acompanhar com prioridade."
-            ),
+            message=message,
             sources=[],
             requires_human_handoff=True,
             handoff_reason=reason,

@@ -255,6 +255,56 @@ def test_integrated_chain_forces_handoff_for_critical_triage() -> None:
     assert response.requires_human_handoff is True
     assert response.handoff_reason == "Heimdall classified the ticket as CRITICA."
     assert "supervisor: mandatory_human_handoff" in response.agent_trace
+    assert "sinto muito pelo transtorno" in response.message
+    assert "pessoa do nosso time" in response.message
+
+
+def test_integrated_chain_forces_handoff_for_high_priority() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="EVENTOS",
+            prioridade="ALTA",
+            tags=[],
+            dados_faltantes=[],
+            sentimento="neutro",
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Meu evento está indisponível")
+
+    assert response is not None
+    assert response.requires_human_handoff is True
+    assert response.handoff_reason == "Heimdall classified the ticket as ALTA."
+    assert response.message.startswith("Sinto muito pelo transtorno.")
+
+
+def test_integrated_chain_forces_handoff_for_customer_frustration() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="DUVIDAS_PLATAFORMA",
+            prioridade="MEDIA",
+            tags=[],
+            dados_faltantes=[],
+            sentimento="negativo",
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Já tentei várias vezes e não funciona")
+
+    assert response is not None
+    assert response.requires_human_handoff is True
+    assert response.handoff_reason == "Heimdall detected customer frustration."
+    assert response.message.startswith("Entendo como essa situação é frustrante")
 
 
 def test_salomao_draft_tokens_are_propagated_to_response() -> None:

@@ -340,6 +340,8 @@ async def _run_supervisor_for_hubspot_context(
             "originating_channel": "hubspot",
             "is_off_hours": is_off_hours,
             "conversation_context": conversation_context.model_dump(mode="json"),
+            "image_base64": context.get("image_base64"),
+            "image_mime_type": context.get("image_mime_type"),
         },
     )
 
