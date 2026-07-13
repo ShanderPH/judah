@@ -260,8 +260,8 @@ _ACTION_INSTRUCTIONS = [
     "resposta do contato.",
     "ATENÇÃO AOS PIPELINES E ESTÁGIOS:",
     f"- Se a flag `is_off_hours` for True E houver transbordo, OBRIGATORIAMENTE atualize o ticket para "
-    f"`pipeline_stage='{settings.HUBSPOT_OFF_HOURS_STAGE_ID}'` "
-    f"(dentro do `pipeline='{settings.HUBSPOT_OFF_HOURS_PIPELINE_ID}'`).",
+    f"`pipeline_stage='{settings.HUBSPOT_HUMAN_ESCALATION_STAGE_ID}'` "
+    f"(dentro do `pipeline='{settings.HUBSPOT_AI_TRIAGE_PIPELINE_ID}'`).",
     "- Sempre informe ao usuário o seu Protocolo de Atendimento. O Protocolo é o próprio `hubspot_ticket_id` formatado (Ex: 'Seu protocolo é #12345').",
     "- Sempre responda ao usuário (reply_note) antes de finalizar, alertando que o retorno será no próximo dia útil se for off-hours.",
     "Se a ferramenta `hubspot_update_ticket` retornar `errors` não-vazio, "

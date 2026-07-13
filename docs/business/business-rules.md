@@ -151,7 +151,7 @@ Um agente só é elegível para receber ticket se:
 
 - Sempre que possível, fechar o loop atualizando o ticket no HubSpot via `hubspot_update_ticket`.
 - Informar o protocolo (ticket_id) ao usuário.
-- Em off-hours, mover para stage `1122729533` do pipeline `636594474` (inferência baseada no código).
+- Em off-hours, mover para `HUBSPOT_HUMAN_ESCALATION_STAGE_ID` dentro de `HUBSPOT_AI_TRIAGE_PIPELINE_ID`.
 
 ### Arquivos relacionados
 

@@ -359,16 +359,36 @@ class RoutingPolicyEngine:
                 can_send_reply=can_reply,
             )
 
+        triage_pipeline_id = getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "")
+        triage_new_stage_id = getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "")
         triage_stage_id = getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", "")
+        triage_closed_stage_id = getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", "")
+        belongs_to_triage_pipeline = (
+            not triage_pipeline_id or not event.pipeline_id or event.pipeline_id == triage_pipeline_id
+        )
         if (
             event.event_type == "ticket_stage_changed"
-            and triage_stage_id
-            and event.pipeline_stage_id == triage_stage_id
+            and belongs_to_triage_pipeline
+            and triage_closed_stage_id
+            and event.pipeline_stage_id == triage_closed_stage_id
+        ):
+            return RouteDecision(
+                route="CLOSE",
+                target_state=ConversationInstance.State.CLOSED,
+                reason="Ticket entered the configured AI triage closed stage.",
+                can_send_reply=can_reply,
+            )
+
+        if (
+            event.event_type == "ticket_stage_changed"
+            and belongs_to_triage_pipeline
+            and event.pipeline_stage_id in {triage_new_stage_id, triage_stage_id}
+            and event.pipeline_stage_id
         ):
             return RouteDecision(
                 route="AI_TRIAGE",
                 target_state=ConversationInstance.State.CONTEXT_HYDRATING,
-                reason="Ticket entered the configured AI triage stage.",
+                reason="Ticket entered a configured AI triage stage.",
                 can_send_reply=can_reply,
             )
 

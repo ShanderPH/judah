@@ -47,14 +47,17 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
-| `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Stage opcional que roteia tickets para `AI_TRIAGE` no lifecycle determinístico. |
+| `HUBSPOT_AI_TRIAGE_PIPELINE_ID` | `apps/ai_agents/services/lifecycle.py` | Pipeline dedicada à Triagem IA. |
+| `HUBSPOT_N1_NEW_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Novo Atendimento da Triagem IA. |
+| `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Exibindo Menu/Em atendimento da Triagem IA. |
+| `HUBSPOT_AI_WAITING_STAGE_ID` | Configuração de lifecycle | Estágio Aguardando Resposta da Triagem IA. |
+| `HUBSPOT_HUMAN_ESCALATION_STAGE_ID` | Action Agent | Estágio Escalado para Humano da Triagem IA. |
+| `HUBSPOT_CLOSED_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Atendimento Encerrado da Triagem IA. |
 | `HUBSPOT_AI_REPLY_DISABLED_CHANNELS` | `apps/ai_agents/services/channel_capabilities.py` | Lista separada por vírgulas de canais sem resposta automática por IA (padrão: vazio; chat e WhatsApp habilitados). |
 | `HUBSPOT_IMAGE_MAX_BYTES` | `apps/ai_agents/services/hubspot.py` | Tamanho máximo do anexo de imagem encaminhado ao Salomão (padrão: `8388608`, ou 8 MB). |
 | `HUBSPOT_SUPPORT_PIPELINE_ID` | Autoatribuição e HubSpot client | Pipeline principal do suporte N1. |
 | `HUBSPOT_SUPPORT_NEW_STAGE_ID` | Autoatribuição e lifecycle | Estágio de entrada/NOVO do suporte N1. |
 | `HUBSPOT_SUPPORT_CLOSED_STAGE_ID` | Fechamento e lifecycle | Estágio FECHADO do suporte N1. |
-| `HUBSPOT_OFF_HOURS_PIPELINE_ID` | Action Agent | Pipeline usado para transbordo fora do horário. |
-| `HUBSPOT_OFF_HOURS_STAGE_ID` | Action Agent | Estágio usado para transbordo fora do horário. |
 | `HUBSPOT_DEFAULT_TICKET_*` | HubSpot client e MCP | Pipeline e estágios genéricos para criação/atualização de tickets. |
 | `HUBSPOT_N2_PIPELINE_ID` | Consulta de protocolos | Pipeline técnico N2 consultável pelo cliente. |
 | `HUBSPOT_N2_*_STAGE_ID` | Consulta de protocolos | Estágios de entrada, prioridade e resolução do N2. |
@@ -132,14 +135,17 @@ HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
 HUBSPOT_PORTAL_ID=your-portal-id
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
-HUBSPOT_AI_TRIAGE_STAGE_ID=
+HUBSPOT_AI_TRIAGE_PIPELINE_ID=636594474
+HUBSPOT_N1_NEW_STAGE_ID=939271304
+HUBSPOT_AI_TRIAGE_STAGE_ID=1115636653
+HUBSPOT_AI_WAITING_STAGE_ID=1113543321
+HUBSPOT_HUMAN_ESCALATION_STAGE_ID=1113543321
+HUBSPOT_CLOSED_STAGE_ID=939271307
 HUBSPOT_AI_REPLY_DISABLED_CHANNELS=
 HUBSPOT_IMAGE_MAX_BYTES=8388608
 HUBSPOT_SUPPORT_PIPELINE_ID=636459134
 HUBSPOT_SUPPORT_NEW_STAGE_ID=939275049
 HUBSPOT_SUPPORT_CLOSED_STAGE_ID=939275052
-HUBSPOT_OFF_HOURS_PIPELINE_ID=636594474
-HUBSPOT_OFF_HOURS_STAGE_ID=1122729533
 HUBSPOT_DEFAULT_TICKET_PIPELINE_ID=0
 HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID=1
 HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID=2
