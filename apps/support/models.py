@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import uuid
 
+from django.conf import settings
 from django.db import models
+
+
+def default_support_pipeline_id() -> str:
+    """Return the configured support pipeline for newly persisted queue rows."""
+    return str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
 
 
 class Queue(models.Model):
@@ -196,7 +202,7 @@ class NewConversation(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     hubspot_ticket_id = models.TextField(unique=True, db_index=True)
-    pipeline_id = models.TextField(default="636459134")
+    pipeline_id = models.TextField(default=default_support_pipeline_id)
     contact_name = models.TextField(blank=True, null=True)
     contact_email = models.TextField(blank=True, null=True)
     priority = models.TextField(blank=True, null=True)
@@ -246,7 +252,7 @@ class AssignedConversation(models.Model):
     )
     hubspot_owner_id = models.BigIntegerField(db_index=True)
     agent_name = models.TextField()
-    pipeline_id = models.TextField(default="636459134")
+    pipeline_id = models.TextField(default=default_support_pipeline_id)
     entered_queue_at = models.DateTimeField(null=True, blank=True)
     assigned_at = models.DateTimeField(db_index=True)
     queue_wait_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -296,7 +302,7 @@ class ClosedConversation(models.Model):
     )
     hubspot_owner_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     agent_name = models.TextField(null=True, blank=True)
-    pipeline_id = models.TextField(default="636459134")
+    pipeline_id = models.TextField(default=default_support_pipeline_id)
     entered_queue_at = models.DateTimeField(null=True, blank=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(db_index=True)

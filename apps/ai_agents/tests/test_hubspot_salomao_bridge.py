@@ -202,7 +202,7 @@ def test_build_conversation_context_keeps_image_only_message() -> None:
     assert "recent_messages" not in conversation_context.missing_context
 
 
-def test_build_conversation_context_blocks_reply_action_for_whatsapp(settings) -> None:
+def test_build_conversation_context_always_allows_reply_action_for_whatsapp(settings) -> None:
     settings.HUBSPOT_AI_REPLY_DISABLED_CHANNELS = "whatsapp"
     context = {
         "ticket_id": "123",
@@ -218,5 +218,5 @@ def test_build_conversation_context_blocks_reply_action_for_whatsapp(settings) -
         session_id="hubspot-ticket-123",
     )
 
-    assert conversation_context.can_send_reply is False
-    assert "send_thread_reply" not in conversation_context.allowed_actions
+    assert conversation_context.can_send_reply is True
+    assert "send_thread_reply" in conversation_context.allowed_actions

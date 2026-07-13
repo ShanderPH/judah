@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 import structlog
 from agno.tools.mcp import MCPTools
+from django.conf import settings
 
 from apps.ai_agents.agents.base import BaseInChurchAgent
 
@@ -254,10 +255,13 @@ _ACTION_INSTRUCTIONS = [
     "saia da fila de triagem e o contato receba o retorno.",
     "Padrão de chamada: `hubspot_update_ticket(ticket_id=<id>, "
     "pipeline_stage='<novo_stage>', reply_note='<texto_da_resposta>')`. "
-    "Use pipeline_stage='4' (closed) quando resolveu o problema, ou '3' "
-    "(waiting) se ficou aguardando resposta do contato.",
+    f"Use pipeline_stage='{settings.HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID}' (closed) quando resolveu o "
+    f"problema, ou '{settings.HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID}' (waiting) se ficou aguardando "
+    "resposta do contato.",
     "ATENÇÃO AOS PIPELINES E ESTÁGIOS:",
-    "- Se a flag `is_off_hours` for True E houver transbordo, OBRIGATORIAMENTE atualize o ticket para `pipeline_stage='1122729533'` (dentro do `pipeline='636594474'`).",
+    f"- Se a flag `is_off_hours` for True E houver transbordo, OBRIGATORIAMENTE atualize o ticket para "
+    f"`pipeline_stage='{settings.HUBSPOT_OFF_HOURS_STAGE_ID}'` "
+    f"(dentro do `pipeline='{settings.HUBSPOT_OFF_HOURS_PIPELINE_ID}'`).",
     "- Sempre informe ao usuário o seu Protocolo de Atendimento. O Protocolo é o próprio `hubspot_ticket_id` formatado (Ex: 'Seu protocolo é #12345').",
     "- Sempre responda ao usuário (reply_note) antes de finalizar, alertando que o retorno será no próximo dia útil se for off-hours.",
     "Se a ferramenta `hubspot_update_ticket` retornar `errors` não-vazio, "

@@ -98,7 +98,7 @@ Custo e consumo de tokens por execução.
 - `ToolCallAuditLog`: auditoria de tools externas ou com efeito colateral.
 - `EventNormalizer`: converte `WebhookEvent` bruto em evento interno canonico.
 - `RoutingPolicyEngine`: roteia deterministicamente para `IGNORE`, `AUTO_ASSIGNMENT`, `AI_TRIAGE`, `HUMAN_HANDOFF`, `CLOSE` ou `WAIT_FOR_CONTACT_DATA`.
-- `channel_capabilities`: bloqueia resposta automatica em canais sem suporte tecnico, como WhatsApp por padrao.
+- `channel_capabilities`: aplica bloqueios configuráveis por canal; WhatsApp é sempre permitido para evitar que configurações legadas interrompam o atendimento.
 - `tool_permissions`: aplica allowlist de tools por estado do lifecycle.
 - `build_handoff_package`: monta contexto minimo para transferencia humana.
 - `run_lifecycle_watchdog`: detecta instancias presas e transiciona para `FAILED_RETRYABLE` ou `FAILED_TERMINAL`.

@@ -29,7 +29,7 @@ def _disabled_auto_reply_channels() -> set[str]:
 def can_send_automated_reply(channel: str | None) -> bool:
     """Return whether Judah is allowed to send automated replies on a channel."""
     normalized = normalize_channel(channel)
-    if normalized == "unknown":
+    if normalized in {"unknown", "whatsapp"}:
         return True
     return normalized not in _disabled_auto_reply_channels()
 

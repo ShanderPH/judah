@@ -32,11 +32,12 @@ RouteName = Literal[
     "WAIT_FOR_CONTACT_DATA",
 ]
 
-_PROP_STAGE_NOVO = "hs_v2_date_entered_939275049"
-_PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"
+_STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
+_STAGE_FECHADO_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
+_PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
+_PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
-_STAGE_FECHADO_ID = "939275052"
 _REQUIRED_LIFECYCLE_TABLES = {
     "conversation_instances",
     "conversation_events",
@@ -284,7 +285,7 @@ class EventNormalizer:
             hubspot_ticket_id = object_id or None
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
-                pipeline_stage_id = "939275049"
+                pipeline_stage_id = _STAGE_NOVO_ID
             elif property_name == _PROP_STAGE_CLOSED:
                 normalized_type = "ticket_closed"
                 pipeline_stage_id = _STAGE_FECHADO_ID

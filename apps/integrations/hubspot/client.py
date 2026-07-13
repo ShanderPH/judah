@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from django.conf import settings
 from hubspot import HubSpot
 from hubspot.crm.tickets import SimplePublicObjectInput as TicketUpdateInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
@@ -16,10 +17,10 @@ logger = structlog.get_logger(__name__)
 
 _circuit_breaker = CircuitBreaker(name="hubspot", failure_threshold=5, recovery_timeout=60)
 
-# Pipeline constants
-SUPPORT_PIPELINE_ID = "636459134"
-STAGE_NOVO_ID = "939275049"
-STAGE_CLOSED_ID = "939275052"
+# Pipeline configuration is sourced from the environment through Django settings.
+SUPPORT_PIPELINE_ID = settings.HUBSPOT_SUPPORT_PIPELINE_ID
+STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
+STAGE_CLOSED_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
 STAGE_FECHADO_ID = STAGE_CLOSED_ID  # Alias for Portuguese naming consistency
 
 # HubSpot team IDs for N1 support
@@ -128,13 +129,13 @@ class HubSpotClient:
             logger.error("hubspot_search_contact_failed", email=email, error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
 
-    def create_ticket(self, subject: str, priority: str = "MEDIUM", pipeline: str = "0") -> dict[str, Any]:
+    def create_ticket(self, subject: str, priority: str = "MEDIUM", pipeline: str | None = None) -> dict[str, Any]:
         """Create a new HubSpot support ticket.
 
         Args:
             subject: Ticket subject/title.
             priority: Ticket priority (LOW, MEDIUM, HIGH, URGENT).
-            pipeline: Pipeline ID (default "0" for default pipeline).
+            pipeline: Pipeline ID. Uses ``HUBSPOT_DEFAULT_TICKET_PIPELINE_ID`` when omitted.
 
         Returns:
             Dict with created ticket id.
@@ -144,8 +145,8 @@ class HubSpotClient:
                 properties={
                     "subject": subject,
                     "hs_ticket_priority": priority.upper(),
-                    "hs_pipeline": pipeline,
-                    "hs_pipeline_stage": "1",
+                    "hs_pipeline": pipeline or settings.HUBSPOT_DEFAULT_TICKET_PIPELINE_ID,
+                    "hs_pipeline_stage": settings.HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID,
                 }
             )
             ticket = _circuit_breaker.call(
@@ -177,8 +178,8 @@ class HubSpotClient:
             "hs_pipeline",
             "hs_pipeline_stage",
             "hubspot_owner_id",
-            "hs_v2_date_entered_939275049",
-            "hs_v2_date_entered_939275052",
+            f"hs_v2_date_entered_{STAGE_NOVO_ID}",
+            f"hs_v2_date_entered_{STAGE_CLOSED_ID}",
             "hs_lastcontacted",
             "firstname",
             "email",
@@ -304,7 +305,7 @@ class HubSpotClient:
         """Fetch all tickets in the NOVO stage of the support pipeline.
 
         Uses the HubSpot Tickets Search API with full pagination to return
-        every ticket in pipeline ``636459134`` / stage ``939275049`` regardless
+        every ticket in the configured support pipeline / NOVO stage regardless
         of whether they have an owner.
 
         Returns:

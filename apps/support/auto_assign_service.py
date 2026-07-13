@@ -1,16 +1,16 @@
 """Auto-assignment service — orchestrates ticket validation and assignment.
 
 Flow:
-  1. Webhook fires when ``hs_v2_date_entered_939275049`` changes (ticket → NOVO stage).
+  1. Webhook fires when the configured NOVO-stage timestamp changes.
   2. ``process_new_ticket_event`` validates the ticket and enqueues it in
      ``new_conversations``.
   3. ``attempt_auto_assign`` selects the next eligible agent via ``queue_service``
      and updates HubSpot + local DB atomically.
-  4. When a ticket is closed (``hs_v2_date_entered_939275052``),
+  4. When a ticket enters the configured closed stage,
      ``handle_ticket_closed`` calculates handle time and updates metrics.
 
 Validation rules before assignment:
-  - Ticket must belong to pipeline ``636459134``.
+  - Ticket must belong to ``HUBSPOT_SUPPORT_PIPELINE_ID``.
   - Ticket must have no current owner (``hubspot_owner_id`` is null/empty).
 """
 
@@ -112,7 +112,7 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
 
     Args:
         hubspot_ticket_id: The HubSpot ticket ID (string).
-        entered_at_ms: The value of ``hs_v2_date_entered_939275049``
+        entered_at_ms: The configured NOVO-stage entry timestamp
             (millisecond timestamp from HubSpot). Used as the
             ``entered_queue_at`` timestamp for wait-time metering.
 
@@ -162,7 +162,7 @@ def _is_ticket_eligible(ticket_data: dict) -> bool:
     """Validate that a ticket meets all prerequisites for auto-assignment.
 
     Rules:
-      1. Must belong to pipeline ``636459134``.
+      1. Must belong to ``HUBSPOT_SUPPORT_PIPELINE_ID``.
       2. Must have no current owner.
 
     Args:
@@ -348,14 +348,14 @@ def handle_ticket_closed(
 
     Args:
         hubspot_ticket_id: The HubSpot ticket ID.
-        closed_at_ms: Value of ``hs_v2_date_entered_939275052`` (ms epoch).
+        closed_at_ms: Value of the configured closed-stage timestamp (ms epoch).
         owner_id: The ``hubspot_owner_id`` at the time of closure (used only
             for ``closed_by_*`` metadata fields, not for count management).
     """
     from django.core.cache import cache
 
     # Redis dedup lock — prevent concurrent/duplicate calls (e.g., when both
-    # hs_v2_date_entered_939275052 and hs_pipeline_stage webhooks fire for the
+    # Closed-stage timestamp and hs_pipeline_stage webhooks fire for the
     # same closure event).
     lock_key = f"ticket_close:{hubspot_ticket_id}"
     if not cache.add(lock_key, "1", timeout=60):
@@ -544,7 +544,7 @@ def assign_pending_tickets() -> dict:
 def sync_novo_stage_tickets() -> dict:
     """Sync tickets currently in the NOVO stage from HubSpot into new_conversations.
 
-    Fetches every ticket in pipeline ``636459134`` / stage ``939275049`` and
+    Fetches every ticket in the configured support pipeline / NOVO stage and
     creates a ``NewConversation`` record for those not yet present in the local
     queue.  Records that already exist (assigned or pending) are skipped so
     this operation is fully idempotent.

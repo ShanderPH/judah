@@ -50,6 +50,14 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Stage opcional que roteia tickets para `AI_TRIAGE` no lifecycle determinístico. |
 | `HUBSPOT_AI_REPLY_DISABLED_CHANNELS` | `apps/ai_agents/services/channel_capabilities.py` | Lista separada por vírgulas de canais sem resposta automática por IA (padrão: vazio; chat e WhatsApp habilitados). |
 | `HUBSPOT_IMAGE_MAX_BYTES` | `apps/ai_agents/services/hubspot.py` | Tamanho máximo do anexo de imagem encaminhado ao Salomão (padrão: `8388608`, ou 8 MB). |
+| `HUBSPOT_SUPPORT_PIPELINE_ID` | Autoatribuição e HubSpot client | Pipeline principal do suporte N1. |
+| `HUBSPOT_SUPPORT_NEW_STAGE_ID` | Autoatribuição e lifecycle | Estágio de entrada/NOVO do suporte N1. |
+| `HUBSPOT_SUPPORT_CLOSED_STAGE_ID` | Fechamento e lifecycle | Estágio FECHADO do suporte N1. |
+| `HUBSPOT_OFF_HOURS_PIPELINE_ID` | Action Agent | Pipeline usado para transbordo fora do horário. |
+| `HUBSPOT_OFF_HOURS_STAGE_ID` | Action Agent | Estágio usado para transbordo fora do horário. |
+| `HUBSPOT_DEFAULT_TICKET_*` | HubSpot client e MCP | Pipeline e estágios genéricos para criação/atualização de tickets. |
+| `HUBSPOT_N2_PIPELINE_ID` | Consulta de protocolos | Pipeline técnico N2 consultável pelo cliente. |
+| `HUBSPOT_N2_*_STAGE_ID` | Consulta de protocolos | Estágios de entrada, prioridade e resolução do N2. |
 | `HUBSPOT_TICKET_CHURCH_PROPERTY` | `apps/ai_agents/services/protocol_lookup.py` | Propriedade do ticket que armazena o ID da igreja local (padrão: `codigo_de_igreja_local___ticket`). |
 
 ## Variáveis de Jira
@@ -127,6 +135,24 @@ HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
 HUBSPOT_AI_TRIAGE_STAGE_ID=
 HUBSPOT_AI_REPLY_DISABLED_CHANNELS=
 HUBSPOT_IMAGE_MAX_BYTES=8388608
+HUBSPOT_SUPPORT_PIPELINE_ID=636459134
+HUBSPOT_SUPPORT_NEW_STAGE_ID=939275049
+HUBSPOT_SUPPORT_CLOSED_STAGE_ID=939275052
+HUBSPOT_OFF_HOURS_PIPELINE_ID=636594474
+HUBSPOT_OFF_HOURS_STAGE_ID=1122729533
+HUBSPOT_DEFAULT_TICKET_PIPELINE_ID=0
+HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID=1
+HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID=2
+HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID=3
+HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID=4
+HUBSPOT_N2_PIPELINE_ID=634240100
+HUBSPOT_N2_ENTRY_STAGE_ID=936942376
+HUBSPOT_N2_CRITICAL_STAGE_ID=1060950860
+HUBSPOT_N2_HIGH_STAGE_ID=1060950861
+HUBSPOT_N2_MEDIUM_STAGE_ID=1060950862
+HUBSPOT_N2_LOW_STAGE_ID=1060950863
+HUBSPOT_N2_TRIVIAL_STAGE_ID=1060950864
+HUBSPOT_N2_RESOLVED_STAGE_ID=936942379
 HUBSPOT_TICKET_CHURCH_PROPERTY=codigo_de_igreja_local___ticket
 
 JIRA_SERVER_URL=https://inchurch.atlassian.net

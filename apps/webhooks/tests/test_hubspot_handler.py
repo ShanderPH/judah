@@ -62,7 +62,7 @@ class TestHandleHubspotEvent:
     @override_settings(
         AI_ROUTING_ENABLED=True,
         SALOMAO_V1_BASE_URL="https://salomao.local",
-        HUBSPOT_AI_REPLY_DISABLED_CHANNELS="",
+        HUBSPOT_AI_REPLY_DISABLED_CHANNELS="whatsapp",
     )
     def test_whatsapp_conversation_dispatches_ai_pipeline(self) -> None:
         event = _event(

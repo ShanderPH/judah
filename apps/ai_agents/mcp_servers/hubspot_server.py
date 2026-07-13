@@ -39,6 +39,14 @@ mcp = FastMCP("hubspot")
 HUBSPOT_API_BASE = "https://api.hubapi.com"
 
 
+def _pipeline_id(name: str) -> str:
+    """Read a required HubSpot pipeline or stage ID from the environment."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} não configurado no ambiente do servidor MCP.")
+    return value
+
+
 def _get_hubspot_token() -> str:
     """Recupera o token de acesso do HubSpot via variável de ambiente.
 
@@ -222,8 +230,8 @@ async def create_helpdesk_ticket(
             "subject": subject,
             "content": issue_description,
             "hs_ticket_priority": priority,
-            "hs_pipeline": "0",
-            "hs_pipeline_stage": "1",
+            "hs_pipeline": _pipeline_id("HUBSPOT_DEFAULT_TICKET_PIPELINE_ID"),
+            "hs_pipeline_stage": _pipeline_id("HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID"),
             "hs_ticket_category": "OTHER",
             "source_type": "INTERNAL",
         }
@@ -511,12 +519,12 @@ def _map_stage_to_status(stage: str) -> str:
         Status legível (new, open, waiting, closed).
     """
     stage_map = {
-        "1": "new",
-        "939275049": "new",
-        "2": "open",
-        "3": "waiting",
-        "4": "closed",
-        "939275052": "closed",
+        _pipeline_id("HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID"): "new",
+        _pipeline_id("HUBSPOT_SUPPORT_NEW_STAGE_ID"): "new",
+        _pipeline_id("HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID"): "open",
+        _pipeline_id("HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID"): "waiting",
+        _pipeline_id("HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID"): "closed",
+        _pipeline_id("HUBSPOT_SUPPORT_CLOSED_STAGE_ID"): "closed",
     }
     return stage_map.get(stage, "unknown")
 

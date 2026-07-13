@@ -81,14 +81,24 @@ def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> No
 
 
 @pytest.mark.django_db
-@override_settings(HUBSPOT_AI_REPLY_DISABLED_CHANNELS="whatsapp")
+@override_settings(HUBSPOT_AI_REPLY_DISABLED_CHANNELS="email")
 def test_routing_sends_unsupported_channel_to_handoff() -> None:
-    normalized = EventNormalizer().normalize_webhook_event(_conversation_event(channel="whatsapp"))
+    normalized = EventNormalizer().normalize_webhook_event(_conversation_event(channel="email"))
     decision = RoutingPolicyEngine().route(normalized)
 
     assert decision.route == "HUMAN_HANDOFF"
     assert decision.target_state == ConversationInstance.State.HUMAN_HANDOFF_REQUESTED
     assert decision.can_send_reply is False
+
+
+@pytest.mark.django_db
+@override_settings(HUBSPOT_AI_REPLY_DISABLED_CHANNELS="whatsapp")
+def test_routing_never_blocks_whatsapp_from_legacy_environment_value() -> None:
+    normalized = EventNormalizer().normalize_webhook_event(_conversation_event(channel="whatsapp"))
+    decision = RoutingPolicyEngine().route(normalized)
+
+    assert decision.route != "HUMAN_HANDOFF"
+    assert decision.can_send_reply is True
 
 
 @pytest.mark.django_db

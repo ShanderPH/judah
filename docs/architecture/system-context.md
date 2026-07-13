@@ -35,7 +35,7 @@ O JUDAH atua como hub central entre canais de atendimento (HubSpot, Jira), infra
 ## Fronteiras
 
 - **JUDAH não processa pagamentos:** informações de planos e gateways são mantidas em `apps/church`, mas a cobrança provavelmente ocorre em sistema externo (TODO: confirmar).
-- **JUDAH não envia WhatsApp diretamente:** o canal WhatsApp é do HubSpot; o JUDAH reage a tickets e pode criar/atualizar tickets via API.
+- **WhatsApp passa pelo HubSpot:** o JUDAH reage às mensagens e publica a resposta na thread do HubSpot; não se conecta diretamente à API da Meta.
 - **JUDAH não armazena embeddings no Postgres:** embeddings e busca vetorial ficam no Pinecone; Postgres guarda metadados dos artigos.
 
 ## Diagrama de contexto
