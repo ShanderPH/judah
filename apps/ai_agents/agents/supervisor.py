@@ -19,6 +19,8 @@ a hierarquia de tipos do Agno.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any, Literal
 
 import structlog
@@ -50,6 +52,29 @@ from apps.integrations.salomao_v1 import is_salomao_v1_configured
 logger = structlog.get_logger(__name__)
 
 FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, o seu assistente virtual da inChurch..."
+
+_GREETING_ONLY_MESSAGES = {
+    "bom dia",
+    "boa noite",
+    "boa tarde",
+    "e ai",
+    "ola",
+    "ola salomao",
+    "ola tudo bem",
+    "oi",
+    "oi salomao",
+    "oi tudo bem",
+    "opa",
+    "tudo bem",
+}
+
+
+def _is_greeting_only(message: str) -> bool:
+    """Return whether the customer greeted without describing a request."""
+    normalized = unicodedata.normalize("NFKD", message).encode("ascii", "ignore").decode("ascii").lower()
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    normalized = " ".join(normalized.split())
+    return normalized in _GREETING_ONLY_MESSAGES
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +497,10 @@ class SalomaoSupervisorAgent:
             triage = None
             trace.append("heimdall: failed")
 
+        if _is_greeting_only(message):
+            trace.append("supervisor: greeting_clarification")
+            return self._greeting_clarification_response(triage=triage, agent_trace=trace)
+
         if self._requires_mandatory_handoff(triage):
             trace.append("supervisor: mandatory_human_handoff")
             return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
@@ -563,6 +592,31 @@ class SalomaoSupervisorAgent:
             missing_data=triage.dados_faltantes if triage else [],
             confidence=triage.confidence if triage else 0.0,
             risk_flags=[reason],
+        )
+
+    def _greeting_clarification_response(
+        self,
+        *,
+        triage: TriageDecision | None,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Keep a greeting in AI service and ask for the actual request."""
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message="Como posso ajudar? Conte, por favor, o que você precisa ou qual dificuldade encontrou.",
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            model_name="heimdall_triage",
+            latency_ms=0,
+            outcome="waiting_customer",
+            triage_decision=triage,
+            missing_data=["descricao_da_solicitacao"],
+            confidence=1.0,
         )
 
     def _missing_data_response(
