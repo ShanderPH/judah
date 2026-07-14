@@ -76,6 +76,42 @@ class TestHubSpotWebhookAPI:
 
     @override_settings(
         HUBSPOT_APP_SECRET=production_secret,
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
+        HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
+        DEBUG=False,
+    )
+    def test_production_triage_stage_dispatches_salomao_supervisor(self) -> None:
+        payload = [
+            {
+                "eventId": "event-triage",
+                "objectId": "ticket-triage",
+                "subscriptionType": "ticket.propertyChange",
+                "propertyName": "hs_pipeline_stage",
+                "propertyValue": "ai-triage",
+            }
+        ]
+        body = json.dumps(payload).encode("utf-8")
+
+        with (
+            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
+            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
+            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as supervisor_task,
+        ):
+            response = self.client.post(
+                self.production_url,
+                data=body,
+                content_type="application/json",
+                headers={"X-HubSpot-Signature": self._v1_signature(self.production_secret, body)},
+            )
+
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+        supervisor_task.assert_called_once_with("ticket-triage", False)
+
+    @override_settings(
+        HUBSPOT_APP_SECRET=production_secret,
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )
