@@ -6,7 +6,12 @@ from typing import Any, ClassVar
 
 from django.test import override_settings
 
-from apps.ai_agents.agents.supervisor import FIRST_MESSAGE_GREETING, SalomaoResponse, SalomaoSupervisorAgent
+from apps.ai_agents.agents.supervisor import (
+    FIRST_MESSAGE_GREETING,
+    SalomaoResponse,
+    SalomaoSupervisorAgent,
+    _is_greeting_only,
+)
 from apps.ai_agents.contracts import SalomaoChatDraft, TriageDecision
 from apps.ai_agents.models import TokenTrackingLog
 
@@ -349,6 +354,67 @@ def test_integrated_chain_asks_for_missing_data_before_calling_salomao() -> None
     assert response.requires_human_handoff is False
     assert response.missing_data == ["id_da_igreja"]
     assert "ID da igreja" in response.message
+
+
+def test_greeting_only_messages_are_detected_without_swallowing_requests() -> None:
+    assert _is_greeting_only("Oi!") is True
+    assert _is_greeting_only("Olá, tudo bem?") is True
+    assert _is_greeting_only("Boa tarde") is True
+    assert _is_greeting_only("Oi, não consigo emitir um boleto") is False
+
+
+def test_integrated_chain_asks_customer_need_for_greeting_instead_of_handoff() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="ATENDIMENTO_IA",
+            prioridade="MEDIA",
+            tags=[],
+            dados_faltantes=[],
+            sentimento="neutro",
+            confidence=0.2,
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Oi!")
+
+    assert response is not None
+    assert response.outcome == "waiting_customer"
+    assert response.requires_human_handoff is False
+    assert response.missing_data == ["descricao_da_solicitacao"]
+    assert "Como posso ajudar?" in response.message
+    assert "supervisor: greeting_clarification" in response.agent_trace
+
+
+def test_first_greeting_runs_full_pipeline_with_intro_and_clarification(monkeypatch: Any) -> None:
+    _set_message_count(monkeypatch, 0)
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._team = FakeTeam("unused")
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="ATENDIMENTO_IA",
+            prioridade="MEDIA",
+            tags=[],
+            dados_faltantes=[],
+            sentimento="neutro",
+            confidence=0.2,
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor.run_pipeline("Oi!")
+
+    assert response.message.startswith(FIRST_MESSAGE_GREETING)
+    assert "Como posso ajudar?" in response.message
+    assert response.outcome == "waiting_customer"
+    assert response.requires_human_handoff is False
 
 
 def test_integrated_chain_hands_off_when_heimdall_fails() -> None:
