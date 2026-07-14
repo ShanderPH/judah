@@ -23,6 +23,10 @@ Crie um `.env.local` dentro de `webapp/` com:
 
 ```bash
 JUDAH_API_URL=http://127.0.0.1:8000/api/v1
+NEXT_PUBLIC_HUBSPOT_PORTAL_ID=51734496
+# Server-only OAuth token from the sandbox test install. Requires
+# conversations.visitor_identification.tokens.create.
+HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN=...
 ```
 
 Se o backend estiver em outra origem, ajuste o valor.
@@ -50,6 +54,8 @@ Os dois comandos passaram nesta implementacao.
 - `app/(public)/login/page.tsx`: tela publica de login
 - `app/(app)/*`: area autenticada
 - `app/api/auth/*`: login, sessao e logout com cookies `HttpOnly`
+- `sandbox-chat`: rota isolada e autenticada para validar o widget da sandbox HubSpot
+- `app/api/hubspot/visitor-token`: cria o Visitor Identification token no servidor
 - `app/api/backend/[...path]/route.ts`: proxy autenticado para o Judah
 - `src/features/*`: telas e logica de apresentacao
 - `src/lib/api/*`: client tipado e agregadores de dados
