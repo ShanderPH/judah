@@ -39,7 +39,7 @@ docker-logs:
 	docker-compose logs -f
 
 celery:
-	celery -A core.celery worker --loglevel=info
+	celery -A core.celery worker --loglevel=info --queues=celery,ai_tasks
 
 celery-beat:
 	celery -A core.celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
