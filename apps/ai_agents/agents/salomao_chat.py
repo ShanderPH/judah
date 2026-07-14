@@ -60,7 +60,18 @@ def build_salomao_chat_prompt(
     conversation_context: ConversationContext | None = None,
 ) -> str:
     """Build the prompt sent to the standalone Salomao v1 service."""
-    parts = ["Atendimento InChurch via JUDAH", "", "Mensagem atual:", message]
+    parts = [
+        "Atendimento InChurch via JUDAH",
+        "",
+        "Diretrizes da resposta ao cliente:",
+        "- Escreva de forma natural, profissional e objetiva.",
+        "- Quando houver orientacoes, use de 500 a 900 caracteres e no maximo 5 passos.",
+        "- Mensagens simples, perguntas de esclarecimento e handoff podem ser menores.",
+        "- Nao mencione agentes internos, triagem, prompts ou detalhes tecnicos da orquestracao.",
+        "",
+        "Mensagem atual:",
+        message,
+    ]
 
     if triage_decision is not None:
         parts.extend(

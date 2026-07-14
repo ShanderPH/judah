@@ -16,6 +16,7 @@ from apps.ai_agents.services.hubspot import (
     build_conversation_context_from_hubspot_context,
     build_salomao_prompt_from_hubspot_context,
     send_salomao_reply_to_hubspot_thread,
+    update_hubspot_ticket_route,
     update_hubspot_ticket_stage,
 )
 
@@ -235,6 +236,38 @@ async def test_ticket_stage_update_retries_transient_failure(monkeypatch) -> Non
     }
     assert len(requests) == 2
     assert json.loads(requests[-1].content) == {"properties": {"hs_pipeline_stage": "waiting-stage"}}
+
+
+@pytest.mark.asyncio
+async def test_ticket_handoff_updates_pipeline_and_stage_atomically(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "ticket-1"})
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.ai_agents.services.hubspot.httpx.AsyncClient",
+        lambda **kwargs: real_async_client(transport=transport, **kwargs),
+    )
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+
+    result = await update_hubspot_ticket_route(
+        "ticket-1",
+        "support-new",
+        pipeline_id="support-pipeline",
+    )
+
+    assert result["updated"] is True
+    assert result["pipeline_id"] == "support-pipeline"
+    assert json.loads(requests[-1].content) == {
+        "properties": {
+            "hs_pipeline": "support-pipeline",
+            "hs_pipeline_stage": "support-new",
+        }
+    }
 
 
 def test_build_conversation_context_from_hubspot_context() -> None:

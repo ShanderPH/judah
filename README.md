@@ -190,10 +190,15 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | Target         | Command                    |
 |----------------|----------------------------|
 | API (dev)      | `make run`                 |
-| API (prod)     | `gunicorn core.asgi:application -k uvicorn.workers.UvicornWorker` |
+| API (prod)     | `python scripts/start_service.py` |
 | Celery worker  | `make celery`              |
 | Celery beat    | `make celery-beat`         |
 | Full stack     | `make docker-up`           |
+
+The production launcher applies pending migrations before accepting traffic.
+Render automatically provides `RENDER=true`, so a Free Web Service also starts
+one low-memory Celery worker with embedded beat in the same container. Set
+`RUN_CELERY_IN_WEB=false` only when a dedicated worker and beat are deployed.
 
 OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
