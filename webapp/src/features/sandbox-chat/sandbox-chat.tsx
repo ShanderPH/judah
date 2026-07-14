@@ -15,7 +15,6 @@ interface SandboxChatProps {
 }
 
 interface VisitorTokenPayload {
-  expiresAt: string;
   token: string;
 }
 
