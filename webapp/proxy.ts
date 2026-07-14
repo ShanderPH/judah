@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { AUTH_COOKIE_NAMES } from "@/src/lib/auth/constants";
 
-const protectedPrefixes = ["/dashboard", "/queue", "/auto-assignment", "/metrics"];
+const protectedPrefixes = ["/dashboard", "/queue", "/auto-assignment", "/metrics", "/sandbox-chat"];
 
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
