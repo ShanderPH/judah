@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.core.cache import cache
 from ninja import Router, Schema
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
@@ -35,6 +37,7 @@ from apps.ai_agents.services.hubspot import (
     hydrate_thread_context,
     hydrate_ticket_context,
     send_salomao_reply_to_hubspot_thread,
+    update_hubspot_ticket_route,
     update_hubspot_ticket_stage,
 )
 from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine, is_lifecycle_schema_ready
@@ -53,6 +56,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 router = Router()
+
+_TURN_PROCESSING_TTL_SECONDS = 10 * 60
+_TURN_COMPLETED_TTL_SECONDS = 24 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +249,7 @@ def _record_hubspot_turn_audit(
         (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
         {},
     )
-    turn_source = str(latest_incoming.get("id") or latest_incoming.get("created_at") or session_id)
+    turn_source = _hubspot_turn_source(context, session_id=session_id)
     turn_key = hashlib.sha256(turn_source.encode("utf-8")).hexdigest()[:20]
     engine = LifecycleEngine()
     agent_run = engine.record_agent_run(
@@ -371,6 +377,79 @@ def _advance_lifecycle_for_hubspot_context(
             break
 
 
+def _hubspot_turn_source(context: dict[str, Any], *, session_id: str) -> str:
+    """Build a stable source ID even when HubSpot omits a message ID."""
+    history = context.get("conversation_history") or []
+    latest_incoming = next(
+        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
+        None,
+    )
+    if not latest_incoming:
+        return session_id
+    if latest_incoming.get("id"):
+        return str(latest_incoming["id"])
+    fingerprint = {
+        "created_at": latest_incoming.get("created_at"),
+        "sender": latest_incoming.get("sender"),
+        "text": latest_incoming.get("text"),
+        "attachments": latest_incoming.get("attachments") or [],
+    }
+    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+@sync_to_async
+def _claim_hubspot_turn(
+    context: dict[str, Any],
+    *,
+    ticket_id: str | None,
+    session_id: str,
+) -> tuple[bool, str | None]:
+    """Atomically claim one incoming message across ticket and thread events."""
+    history = context.get("conversation_history") or []
+    has_incoming = any(str(item.get("direction") or "").upper() == "INCOMING" for item in history)
+    if not has_incoming:
+        return True, None
+
+    source = _hubspot_turn_source(context, session_id=session_id)
+    turn_key = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
+    thread_ids = context.get("thread_ids") or []
+    instance = None
+    schema_ready = is_lifecycle_schema_ready()
+    if schema_ready and thread_ids:
+        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
+    if instance is None and schema_ready and ticket_id:
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    if instance is not None:
+        audit_key = f"{instance.pk}:{turn_key}:send_thread_reply"
+        already_sent = ToolCallAuditLog.objects.filter(
+            idempotency_key=audit_key,
+            status=ToolCallAuditLog.Status.SUCCEEDED,
+        ).exists()
+        if already_sent:
+            return False, None
+
+    scope = str(ticket_id or (thread_ids[0] if thread_ids else session_id))
+    cache_key = f"salomao:hubspot-turn:{scope}:{turn_key}"
+    try:
+        return bool(cache.add(cache_key, "processing", timeout=_TURN_PROCESSING_TTL_SECONDS)), cache_key
+    except Exception as exc:
+        logger.warning("hubspot_turn_idempotency_cache_unavailable", error=str(exc), error_type=type(exc).__name__)
+        return True, None
+
+
+@sync_to_async
+def _finish_hubspot_turn(cache_key: str | None, *, completed: bool) -> None:
+    if not cache_key:
+        return
+    try:
+        if completed:
+            cache.set(cache_key, "completed", timeout=_TURN_COMPLETED_TTL_SECONDS)
+        else:
+            cache.delete(cache_key)
+    except Exception as exc:
+        logger.warning("hubspot_turn_idempotency_cache_finalize_failed", error=str(exc), error_type=type(exc).__name__)
+
+
 def _build_hubspot_supervisor_message(context: dict[str, Any], ticket_id: str | None) -> str | None:
     prompt = build_salomao_prompt_from_hubspot_context(context)
     if prompt:
@@ -396,21 +475,44 @@ async def _move_hubspot_ticket(
     stage_id: str,
     *,
     reason: str,
+    pipeline_id: str | None = None,
 ) -> dict[str, Any]:
     """Best-effort deterministic ticket transition around an AI turn."""
     if not ticket_id or not stage_id:
         return {"updated": False, "reason": "missing_ticket_or_stage"}
 
-    result = await update_hubspot_ticket_stage(str(ticket_id), str(stage_id))
+    if pipeline_id:
+        result = await update_hubspot_ticket_route(
+            str(ticket_id),
+            str(stage_id),
+            pipeline_id=str(pipeline_id),
+        )
+    else:
+        result = await update_hubspot_ticket_stage(str(ticket_id), str(stage_id))
     if not result.get("updated"):
         logger.error(
             "supervisor_hubspot_stage_transition_failed",
             ticket_id=ticket_id,
+            pipeline_id=pipeline_id,
             stage_id=stage_id,
             transition_reason=reason,
             provider_reason=result.get("reason"),
         )
     return result
+
+
+async def _handoff_hubspot_ticket(ticket_id: str | None, *, reason: str) -> dict[str, Any]:
+    """Move a human handoff into the N1 queue that drives auto-assignment."""
+    support_pipeline = str(getattr(settings, "HUBSPOT_SUPPORT_PIPELINE_ID", ""))
+    support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
+    fallback_stage = str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", ""))
+    stage_id = support_new_stage or fallback_stage
+    return await _move_hubspot_ticket(
+        ticket_id,
+        stage_id,
+        pipeline_id=support_pipeline or None,
+        reason=reason,
+    )
 
 
 async def _run_supervisor_for_hubspot_context(
@@ -442,15 +544,14 @@ async def _run_supervisor_for_hubspot_context(
         is_off_hours=is_off_hours,
     )
     if not conversation_context.can_send_reply:
-        await _move_hubspot_ticket(
-            effective_ticket_id,
-            str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", "")),
-            reason="channel_cannot_reply",
-        )
+        handoff_result = await _handoff_hubspot_ticket(effective_ticket_id, reason="channel_cannot_reply")
+        handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
+        if handoff_result.get("updated"):
+            handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
         await _advance_lifecycle_for_hubspot_context(
             context,
             ticket_id,
-            [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+            handoff_states,
             reason="Channel cannot send automated replies.",
         )
         logger.info("supervisor_hubspot_channel_requires_handoff", ticket_id=ticket_id, session_id=session_id)
@@ -485,15 +586,17 @@ async def _run_supervisor_for_hubspot_context(
                 reason="Judah answered a HubSpot protocol lookup.",
             )
         else:
-            final_stage_result = await _move_hubspot_ticket(
+            final_stage_result = await _handoff_hubspot_ticket(
                 effective_ticket_id,
-                str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", "")),
                 reason="protocol_reply_failed",
             )
+            handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
+            if final_stage_result.get("updated"):
+                handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
             await _advance_lifecycle_for_hubspot_context(
                 context,
                 ticket_id,
-                [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+                handoff_states,
                 reason=reply_result.get("reason") or "Judah could not send the protocol lookup reply.",
             )
         await _record_hubspot_turn_audit(
@@ -540,15 +643,17 @@ async def _run_supervisor_for_hubspot_context(
 
     requires_handoff = result.requires_human_handoff or result.outcome in {"escalate_human", "failed"}
     if requires_handoff or not reply_result.get("sent"):
-        final_stage_result = await _move_hubspot_ticket(
+        final_stage_result = await _handoff_hubspot_ticket(
             effective_ticket_id,
-            str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", "")),
             reason="human_handoff_or_reply_failed",
         )
+        handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
+        if final_stage_result.get("updated"):
+            handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
         await _advance_lifecycle_for_hubspot_context(
             context,
             ticket_id,
-            [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
+            handoff_states,
             reason=result.handoff_reason or reply_result.get("reason") or "Supervisor requested handoff.",
         )
     else:
@@ -598,6 +703,35 @@ async def _run_supervisor_for_hubspot_context(
     )
 
 
+async def _run_claimed_hubspot_turn(
+    context: dict[str, Any],
+    *,
+    session_id: str,
+    ticket_id: str | None,
+    is_off_hours: bool = False,
+) -> None:
+    claimed, cache_key = await _claim_hubspot_turn(
+        context,
+        ticket_id=ticket_id,
+        session_id=session_id,
+    )
+    if not claimed:
+        logger.info("supervisor_hubspot_turn_deduplicated", ticket_id=ticket_id, session_id=session_id)
+        return
+    try:
+        await _run_supervisor_for_hubspot_context(
+            context,
+            session_id=session_id,
+            ticket_id=ticket_id,
+            is_off_hours=is_off_hours,
+            require_incoming=True,
+        )
+    except Exception:
+        await _finish_hubspot_turn(cache_key, completed=False)
+        raise
+    await _finish_hubspot_turn(cache_key, completed=True)
+
+
 async def _run_supervisor_pipeline(
     ticket_id: str,
     is_off_hours: bool = False,
@@ -626,7 +760,7 @@ async def _run_supervisor_pipeline(
 
         session_id = f"hubspot-ticket-{ticket_id}"
 
-        await _run_supervisor_for_hubspot_context(
+        await _run_claimed_hubspot_turn(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
@@ -674,11 +808,10 @@ async def _run_salomao_v1_thread_pipeline(thread_id: str) -> None:
                 return
         session_id = f"hubspot-ticket-{ticket_id}" if ticket_id else f"hubspot-thread-{thread_id}"
 
-        await _run_supervisor_for_hubspot_context(
+        await _run_claimed_hubspot_turn(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
-            require_incoming=True,
         )
     except Exception as exc:
         logger.error(

@@ -57,16 +57,8 @@ USER appuser
 
 EXPOSE 8000
 
-# Use shell form so ${PORT} is expanded at runtime by the shell.
-# Railway injects PORT; falls back to 8000 for local Docker runs.
-# collectstatic and migrate run as Railway releaseCommand (see railway.toml).
-CMD gunicorn core.asgi:application \
-    -k uvicorn.workers.UvicornWorker \
-    --bind "0.0.0.0:${PORT}" \
-    --workers 2 \
-    --worker-connections 1000 \
-    --timeout 120 \
-    --keep-alive 5 \
-    --log-level info \
-    --access-logfile - \
-    --error-logfile -
+# The launcher runs migrations before accepting traffic. On Render it also
+# embeds one low-memory Celery worker and beat because Free instances do not
+# support a separate background-worker service. Other platforms keep their
+# dedicated worker/beat containers and only launch Gunicorn here.
+CMD ["python", "scripts/start_service.py"]

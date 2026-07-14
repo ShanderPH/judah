@@ -357,6 +357,8 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
 @override_settings(
     HUBSPOT_AI_TRIAGE_STAGE_ID="ai-active",
     HUBSPOT_HUMAN_ESCALATION_STAGE_ID="human-escalation",
+    HUBSPOT_SUPPORT_PIPELINE_ID="support-pipeline",
+    HUBSPOT_SUPPORT_NEW_STAGE_ID="support-new",
 )
 async def test_human_handoff_replies_and_moves_ticket_to_human_stage(monkeypatch) -> None:
     from apps.ai_agents.agents.supervisor import SalomaoResponse
@@ -400,10 +402,18 @@ async def test_human_handoff_replies_and_moves_ticket_to_human_stage(monkeypatch
     move_ticket.assert_has_awaits(
         [
             call("current-ticket", "ai-active", reason="ai_turn_started"),
-            call("current-ticket", "human-escalation", reason="human_handoff_or_reply_failed"),
+            call(
+                "current-ticket",
+                "support-new",
+                pipeline_id="support-pipeline",
+                reason="human_handoff_or_reply_failed",
+            ),
         ]
     )
-    assert advance.await_args.args[2] == [webhooks.ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
+    assert advance.await_args.args[2] == [
+        webhooks.ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        webhooks.ConversationInstance.State.QUEUE_PENDING,
+    ]
 
 
 @pytest.mark.django_db
@@ -483,3 +493,45 @@ async def test_ticket_pipeline_enforcement_skips_non_ai_ticket(monkeypatch) -> N
 
     hydrate.assert_awaited_once_with("ticket-1")
     run_context.assert_not_awaited()
+
+
+@pytest.mark.django_db
+@pytest.mark.asyncio
+async def test_same_hubspot_message_is_processed_only_once(monkeypatch) -> None:
+    from django.core.cache import cache
+
+    from apps.ai_agents.api import webhooks
+
+    cache.clear()
+    run_context = AsyncMock()
+    monkeypatch.setattr(webhooks, "_run_supervisor_for_hubspot_context", run_context)
+    context = {
+        "ticket_id": "ticket-1",
+        "thread_ids": ["thread-1"],
+        "conversation_history": [
+            {
+                "id": "incoming-message-1",
+                "direction": "INCOMING",
+                "text": "Preciso de ajuda",
+            }
+        ],
+    }
+
+    await webhooks._run_claimed_hubspot_turn(
+        context,
+        session_id="hubspot-ticket-ticket-1",
+        ticket_id="ticket-1",
+    )
+    await webhooks._run_claimed_hubspot_turn(
+        context,
+        session_id="hubspot-ticket-ticket-1",
+        ticket_id="ticket-1",
+    )
+
+    run_context.assert_awaited_once_with(
+        context,
+        session_id="hubspot-ticket-ticket-1",
+        ticket_id="ticket-1",
+        is_off_hours=False,
+        require_incoming=True,
+    )

@@ -21,6 +21,8 @@ class FakeSalomaoClient:
         timeout_seconds: float | None = None,
     ) -> SalomaoV1ChatResult:
         assert "Mensagem atual:\nComo fazer um cupom?" in message
+        assert "500 a 900 caracteres" in message
+        assert "no maximo 5 passos" in message
         assert session_id == "hubspot-thread-123"
         return SalomaoV1ChatResult(
             response="Para criar um cupom, acesse Eventos e configure o desconto.",

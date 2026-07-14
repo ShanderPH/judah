@@ -341,16 +341,42 @@ async def update_hubspot_ticket_stage(
     max_attempts: int = 3,
 ) -> dict[str, Any]:
     """Move a HubSpot ticket to a stage, retrying transient provider failures."""
-    if USE_MOCK_HUBSPOT:
-        return {"updated": True, "ticket_id": str(ticket_id), "stage_id": str(stage_id), "attempts": 1}
+    return await update_hubspot_ticket_route(
+        ticket_id,
+        stage_id,
+        timeout_seconds=timeout_seconds,
+        max_attempts=max_attempts,
+    )
 
+
+async def update_hubspot_ticket_route(
+    ticket_id: str,
+    stage_id: str,
+    *,
+    pipeline_id: str | None = None,
+    timeout_seconds: float = 20.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Move a ticket to a stage and, when provided, to another pipeline."""
+    if USE_MOCK_HUBSPOT:
+        return {
+            "updated": True,
+            "ticket_id": str(ticket_id),
+            **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+            "stage_id": str(stage_id),
+            "attempts": 1,
+        }
+
+    properties = {"hs_pipeline_stage": str(stage_id)}
+    if pipeline_id:
+        properties["hs_pipeline"] = str(pipeline_id)
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
         for attempt in range(1, max_attempts + 1):
             try:
                 response = await client.patch(
                     f"{HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
-                    json={"properties": {"hs_pipeline_stage": str(stage_id)}},
+                    json={"properties": properties},
                 )
                 if (response.status_code == 429 or response.status_code >= 500) and attempt < max_attempts:
                     await asyncio.sleep(0.25 * attempt)
@@ -359,12 +385,14 @@ async def update_hubspot_ticket_stage(
                 logger.info(
                     "hubspot_ticket_stage_updated",
                     ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
                     stage_id=stage_id,
                     attempts=attempt,
                 )
                 return {
                     "updated": True,
                     "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
                     "stage_id": str(stage_id),
                     "attempts": attempt,
                 }
@@ -372,6 +400,7 @@ async def update_hubspot_ticket_stage(
                 logger.error(
                     "hubspot_ticket_stage_update_http_error",
                     ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
                     stage_id=stage_id,
                     status=exc.response.status_code,
                     attempts=attempt,
@@ -379,6 +408,7 @@ async def update_hubspot_ticket_stage(
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
                     "stage_id": str(stage_id),
                     "attempts": attempt,
                     "reason": f"http:{exc.response.status_code}",
@@ -390,6 +420,7 @@ async def update_hubspot_ticket_stage(
                 logger.error(
                     "hubspot_ticket_stage_update_error",
                     ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
                     stage_id=stage_id,
                     error_type=type(exc).__name__,
                     attempts=attempt,
@@ -397,6 +428,7 @@ async def update_hubspot_ticket_stage(
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
                     "stage_id": str(stage_id),
                     "attempts": attempt,
                     "reason": type(exc).__name__,
@@ -405,6 +437,7 @@ async def update_hubspot_ticket_stage(
     return {
         "updated": False,
         "ticket_id": str(ticket_id),
+        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
         "stage_id": str(stage_id),
         "attempts": max_attempts,
         "reason": "unknown",
@@ -799,5 +832,6 @@ __all__ = [
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "send_salomao_reply_to_hubspot_thread",
+    "update_hubspot_ticket_route",
     "update_hubspot_ticket_stage",
 ]
