@@ -43,6 +43,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 |----------|--------------|-----------|
 | `HUBSPOT_ACCESS_TOKEN` | `apps/integrations/hubspot/client.py` | Token OAuth de private app. |
 | `HUBSPOT_APP_SECRET` | `apps/webhooks/api.py`, `apps/ai_agents/api/webhooks.py` | Secret para validar assinatura HMAC v1/v3 dos webhooks. |
+| `HUBSPOT_SANDBOX_APP_SECRET` | `apps/webhooks/api.py` | Secret isolado do app `inchurch-sandbox-App` para validar `/api/v1/webhooks/hubspot/sandbox/`. |
 | `HUBSPOT_PORTAL_ID` | `apps/ai_agents/mcp_servers/hubspot_server.py` | Portal ID para construir URLs de ticket. |
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
@@ -133,6 +134,7 @@ SALOMAO_V1_AS_TEAM_AGENT=true
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
+HUBSPOT_SANDBOX_APP_SECRET=your-sandbox-app-secret
 HUBSPOT_PORTAL_ID=your-portal-id
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
 HUBSPOT_AI_TRIAGE_PIPELINE_ID=636594474
