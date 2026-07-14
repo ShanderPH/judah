@@ -66,8 +66,14 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
         if property_name == _PROP_STAGE_NOVO:
             _handle_ticket_entered_novo(object_id, property_value)
 
+        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_N1_NEW_STAGE_ID', '')}":
+            _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage_entered")
+
         elif property_name == _PROP_STAGE_CLOSED:
             _handle_ticket_entered_closed(object_id, property_value, payload)
+
+        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_CLOSED_STAGE_ID', '')}":
+            logger.info("hubspot_ai_ticket_entered_closed", ticket_id=object_id)
 
         elif property_name == _PROP_PIPELINE_STAGE:
             _handle_pipeline_stage_change(object_id, property_value, payload)
@@ -189,11 +195,20 @@ def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -
         logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
+    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
+
+    if not is_ai_rollout_enabled(hubspot_ticket_id):
+        logger.info("hubspot_ticket_ai_rollout_skipped", ticket_id=hubspot_ticket_id, trigger=trigger)
+        return
+
     from apps.ai_agents.tasks import run_supervisor_pipeline_task
     from apps.ai_agents.utils.business_rules import is_business_hours, is_quinta_fire, off_hours_reason
 
     is_off_hours = bool(off_hours_reason() or is_quinta_fire() or not is_business_hours())
-    run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
+    if trigger == "customer_message":
+        run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True, True)
+    else:
+        run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
     logger.info(
         "hubspot_ticket_supervisor_dispatched",
         ticket_id=hubspot_ticket_id,
@@ -270,6 +285,12 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
 
     if not getattr(settings, "AI_ROUTING_ENABLED", False) or not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
         logger.debug("hubspot_conversation_ai_routing_disabled", object_id=object_id)
+        return
+
+    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
+
+    if not is_ai_rollout_enabled(str(object_id)):
+        logger.info("hubspot_conversation_ai_rollout_skipped", object_id=object_id)
         return
 
     from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task

@@ -129,6 +129,31 @@ class TestHandleHubspotEvent:
     @override_settings(
         AI_ROUTING_ENABLED=True,
         SALOMAO_V1_BASE_URL="https://salomao.local",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
+    )
+    def test_ai_calculated_new_stage_dispatches_salomao_supervisor(self) -> None:
+        event = _event(
+            "ticket.propertyChange",
+            {
+                "objectId": "ticket-ai",
+                "propertyName": "hs_v2_date_entered_ai-new",
+                "propertyValue": "1783022765000",
+            },
+        )
+
+        with (
+            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
+            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
+            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+        ):
+            handle_hubspot_event(event)
+
+        mock_delay.assert_called_once_with("ticket-ai", False, True)
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
     )
     def test_customer_message_dispatches_salomao_supervisor(self) -> None:
         event = _event(
@@ -148,7 +173,7 @@ class TestHandleHubspotEvent:
         ):
             handle_hubspot_event(event)
 
-        mock_delay.assert_called_once_with("ticket-ai", False, True)
+        mock_delay.assert_called_once_with("ticket-ai", False, True, True)
 
     @override_settings(HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage")
     def test_active_ai_stage_does_not_dispatch_duplicate_turn(self) -> None:
@@ -165,6 +190,18 @@ class TestHandleHubspotEvent:
     def test_ai_new_stage_respects_routing_flag(self) -> None:
         with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
             _handle_pipeline_stage_change("ticket-ai-disabled", "ai-new")
+
+        mock_delay.assert_not_called()
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        AI_ROUTING_ROLLOUT_PERCENTAGE=0,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
+    )
+    def test_ai_new_stage_respects_rollout_cohort(self) -> None:
+        with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
+            _handle_pipeline_stage_change("ticket-outside-rollout", "ai-new")
 
         mock_delay.assert_not_called()
 

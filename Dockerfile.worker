@@ -42,4 +42,4 @@ RUN chown -R appuser:appgroup /app
 
 USER appuser
 
-CMD ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2"]
+CMD ["celery", "-A", "core", "worker", "--loglevel=info", "--concurrency=2", "--queues=celery,ai_tasks"]

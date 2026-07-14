@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -95,22 +96,42 @@ class SalomaoV1Client:
                 response.raise_for_status()
                 return response
 
-        try:
-            response = await _circuit_breaker.async_call(_post_chat)
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("Salomao v1 request timed out.") from exc
-        except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "salomao_v1_http_status_error",
-                status=exc.response.status_code,
-                body=exc.response.text[:300],
-            )
-            raise ExternalServiceError(
-                "salomao_v1",
-                f"Salomao v1 returned HTTP {exc.response.status_code}.",
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ExternalServiceError("salomao_v1", "Could not reach Salomao v1.") from exc
+        max_attempts = max(1, int(getattr(settings, "SALOMAO_V1_MAX_ATTEMPTS", 3)))
+        response: httpx.Response | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await _circuit_breaker.async_call(_post_chat)
+                break
+            except httpx.TimeoutException as exc:
+                if attempt < max_attempts:
+                    logger.warning("salomao_v1_retry", attempt=attempt, reason="timeout")
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                raise TimeoutError("Salomao v1 request timed out.") from exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if (status == 429 or status >= 500) and attempt < max_attempts:
+                    logger.warning("salomao_v1_retry", attempt=attempt, reason=f"http:{status}")
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                logger.warning(
+                    "salomao_v1_http_status_error",
+                    status=status,
+                    body=exc.response.text[:300],
+                )
+                raise ExternalServiceError(
+                    "salomao_v1",
+                    f"Salomao v1 returned HTTP {status}.",
+                ) from exc
+            except httpx.HTTPError as exc:
+                if attempt < max_attempts:
+                    logger.warning("salomao_v1_retry", attempt=attempt, reason=type(exc).__name__)
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                raise ExternalServiceError("salomao_v1", "Could not reach Salomao v1.") from exc
+
+        if response is None:  # pragma: no cover - defensive guard
+            raise ExternalServiceError("salomao_v1", "Salomao v1 did not return a response.")
 
         try:
             result = SalomaoV1ChatResult.model_validate(response.json())

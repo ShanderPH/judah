@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 
@@ -62,3 +64,37 @@ async def test_chat_maps_failed_response_to_external_service_error() -> None:
 
     with pytest.raises(ExternalServiceError, match="falha no agente"):
         await client.chat(message="oi", session_id="user-7")
+
+
+@pytest.mark.asyncio
+async def test_chat_retries_transient_provider_failure(settings, monkeypatch) -> None:
+    settings.SALOMAO_V1_MAX_ATTEMPTS = 3
+    sleep = AsyncMock()
+    monkeypatch.setattr("apps.integrations.salomao_v1.client.asyncio.sleep", sleep)
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503, text="temporarily unavailable")
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "response": "Consegui responder após a recuperação do serviço.",
+                "session_id": "user-7",
+            },
+        )
+
+    client = SalomaoV1Client(
+        base_url="http://salomao.local",
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.chat(message="oi", session_id="user-7")
+
+    assert attempts == 2
+    sleep.assert_awaited_once_with(0.25)
+    assert result.response.startswith("Consegui responder")

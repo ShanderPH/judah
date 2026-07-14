@@ -27,6 +27,9 @@ class TriageDecision(BaseModel):
     tags: list[str] = Field(default_factory=list)
     dados_faltantes: list[str] = Field(default_factory=list)
     sentimento: Literal["positivo", "neutro", "negativo"]
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)
+    policy_version: str = "heimdall-v1"
 
 
 class ConversationMessage(BaseModel):
@@ -113,17 +116,40 @@ class SupervisorDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    outcome: Literal["resolved", "waiting_customer", "escalate_human", "failed"]
+    outcome: Literal["candidate_resolved", "waiting_customer", "escalate_human", "failed"]
     final_response: str
     hubspot_action: HubSpotAction | None = None
     trace_summary: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
 
 
+class HandoffPackage(BaseModel):
+    """Structured context transferred from the AI workflow to a human queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_instance_id: str
+    state: str
+    hubspot_thread_id: str | None = None
+    hubspot_ticket_id: str | None = None
+    hubspot_contact_id: str | None = None
+    channel: str = ""
+    assigned_agent_id: str | None = None
+    reason: str
+    priority: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    triage: dict[str, Any] | None = None
+    ai_summary: str = ""
+    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_queue: str = "support_n1"
+
+
 __all__ = [
     "ActionIntent",
     "ConversationContext",
     "ConversationMessage",
+    "HandoffPackage",
     "HubSpotAction",
     "SalomaoChatDraft",
     "SupervisorDecision",

@@ -104,6 +104,11 @@ class RaisingSalomaoChat:
         raise AssertionError("Salomao v1 must not be called for mandatory handoff")
 
 
+class FailingTriageRunner:
+    def run(self, _message: str) -> TriageDecision:
+        raise RuntimeError("triage unavailable")
+
+
 def _supervisor(
     *,
     team_content: str = "Como posso ajudar?",
@@ -212,6 +217,19 @@ def test_first_message_does_not_duplicate_existing_greeting(monkeypatch: Any) ->
     assert response.message.count(FIRST_MESSAGE_GREETING) == 1
 
 
+def test_final_response_is_guarded_and_has_structured_supervisor_decision(monkeypatch: Any) -> None:
+    _set_message_count(monkeypatch, 1)
+    supervisor = _supervisor(deterministic_response=_response("O CPF informado foi 123.456.789-00."))
+
+    response = supervisor.run_pipeline("Pode confirmar meus dados?")
+
+    assert "123.456.789-00" not in response.message
+    assert "cpf_redacted" in response.risk_flags
+    assert response.supervisor_decision is not None
+    assert response.supervisor_decision.outcome == "waiting_customer"
+    assert response.supervisor_decision.final_response == response.message
+
+
 @override_settings(SALOMAO_V1_BASE_URL="http://salomao.local", SALOMAO_V1_AS_TEAM_AGENT=True)
 def test_salomao_v1_team_agent_is_enabled_when_base_url_is_configured() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
@@ -305,6 +323,71 @@ def test_integrated_chain_forces_handoff_for_customer_frustration() -> None:
     assert response.requires_human_handoff is True
     assert response.handoff_reason == "Heimdall detected customer frustration."
     assert response.message.startswith("Entendo como essa situação é frustrante")
+
+
+def test_integrated_chain_asks_for_missing_data_before_calling_salomao() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="SUPORTE_TECNICO_N1",
+            prioridade="MEDIA",
+            tags=["erro_evento"],
+            dados_faltantes=["id_da_igreja"],
+            sentimento="neutro",
+            confidence=0.91,
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Não aparece o campo telefone")
+
+    assert response is not None
+    assert response.outcome == "waiting_customer"
+    assert response.requires_human_handoff is False
+    assert response.missing_data == ["id_da_igreja"]
+    assert "ID da igreja" in response.message
+
+
+def test_integrated_chain_hands_off_when_heimdall_fails() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FailingTriageRunner()
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Preciso de ajuda")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.confidence == 0.0
+    assert response.requires_human_handoff is True
+
+
+@override_settings(HEIMDALL_MIN_CONFIDENCE=0.65)
+def test_integrated_chain_hands_off_low_confidence_triage() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="ATENDIMENTO_IA",
+            prioridade="MEDIA",
+            sentimento="neutro",
+            confidence=0.4,
+        )
+    )
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("Não sei explicar o que aconteceu")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.handoff_reason == "Heimdall confidence 0.40 is below policy threshold."
 
 
 def test_salomao_draft_tokens_are_propagated_to_response() -> None:

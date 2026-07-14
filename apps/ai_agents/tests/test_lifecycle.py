@@ -212,6 +212,33 @@ def test_lifecycle_rejects_invalid_transition() -> None:
 
 
 @pytest.mark.django_db
+def test_unrelated_ticket_change_does_not_ignore_active_conversation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:active-1",
+        hubspot_ticket_id="active-1",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+    event = SimpleNamespace(
+        id="event-unrelated",
+        event_type="ticket.propertyChange",
+        object_id="active-1",
+        payload={
+            "eventId": "event-unrelated",
+            "subscriptionType": "ticket.propertyChange",
+            "objectId": "active-1",
+            "propertyName": "subject",
+            "propertyValue": "Novo assunto",
+        },
+    )
+
+    result = LifecycleEngine().record_normalized_event(EventNormalizer().normalize_webhook_event(event))
+
+    instance.refresh_from_db()
+    assert result.decision.route == "IGNORE"
+    assert instance.state == ConversationInstance.State.AI_SERVICE_RUNNING
+
+
+@pytest.mark.django_db
 def test_waiting_customer_conversation_can_resume_ai_triage() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:waiting-customer",

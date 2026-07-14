@@ -168,6 +168,8 @@ CELERY_TASK_TIME_LIMIT = 600
 # dispatches when ``AI_ROUTING_ENABLED`` is true.
 CELERY_TASK_ROUTES = {
     "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
+    "ai_agents.run_salomao_v1_thread_pipeline_task": {"queue": "ai_tasks"},
+    "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }
 
 # --- Feature flags ---
@@ -176,10 +178,15 @@ CELERY_TASK_ROUTES = {
 # not mounted and the supervisor pipeline task is not dispatched from webhooks.
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
+AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
 
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    "ai-lifecycle-watchdog": {
+        "task": "ai_agents.run_lifecycle_watchdog_task",
+        "schedule": 60,
+    },
     # Sync HubSpot N1 team members daily at 06:00 AM (São Paulo)
     "sync-hubspot-team-members-daily": {
         "task": "support.task_sync_hubspot_team_members",
@@ -291,6 +298,9 @@ SALOMAO_V1_BASE_URL = config("SALOMAO_V1_BASE_URL", default="")
 SALOMAO_V1_TIMEOUT_SECONDS = config("SALOMAO_V1_TIMEOUT_SECONDS", default=45.0, cast=float)
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS = config("SALOMAO_V1_IMAGE_TIMEOUT_SECONDS", default=180.0, cast=float)
 SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast=bool)
+SALOMAO_V1_MAX_ATTEMPTS = config("SALOMAO_V1_MAX_ATTEMPTS", default=3, cast=int)
+SALOMAO_MIN_CONFIDENCE = config("SALOMAO_MIN_CONFIDENCE", default=0.65, cast=float)
+HEIMDALL_MIN_CONFIDENCE = config("HEIMDALL_MIN_CONFIDENCE", default=0.65, cast=float)
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")

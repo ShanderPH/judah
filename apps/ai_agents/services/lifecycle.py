@@ -36,6 +36,10 @@ _STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
 _STAGE_FECHADO_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
 _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
+_AI_STAGE_NEW_ID = settings.HUBSPOT_N1_NEW_STAGE_ID
+_AI_STAGE_CLOSED_ID = settings.HUBSPOT_CLOSED_STAGE_ID
+_PROP_AI_STAGE_NEW = f"hs_v2_date_entered_{_AI_STAGE_NEW_ID}"
+_PROP_AI_STAGE_CLOSED = f"hs_v2_date_entered_{_AI_STAGE_CLOSED_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
 _PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
@@ -294,9 +298,15 @@ class EventNormalizer:
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
                 pipeline_stage_id = _STAGE_NOVO_ID
+            elif property_name == _PROP_AI_STAGE_NEW:
+                normalized_type = "ticket_stage_changed"
+                pipeline_stage_id = _AI_STAGE_NEW_ID
             elif property_name == _PROP_STAGE_CLOSED:
                 normalized_type = "ticket_closed"
                 pipeline_stage_id = _STAGE_FECHADO_ID
+            elif property_name == _PROP_AI_STAGE_CLOSED:
+                normalized_type = "ticket_closed"
+                pipeline_stage_id = _AI_STAGE_CLOSED_ID
             elif property_name == _PROP_OWNER_ID:
                 normalized_type = "owner_changed"
             elif property_name == _PROP_LAST_VISITOR_MESSAGE:
@@ -437,7 +447,7 @@ class LifecycleEngine:
     ) -> LifecycleRecordResult:
         decision = decision or RoutingPolicyEngine().route(event)
         with transaction.atomic():
-            instance, _instance_created = self._get_or_create_instance(event)
+            instance, instance_created = self._get_or_create_instance(event)
             self._refresh_instance_snapshot(instance, event)
             lifecycle_event, event_created = self._append_event(instance, event)
             if event_created:
@@ -448,12 +458,32 @@ class LifecycleEngine:
                         reason="External event normalized.",
                         source_event_id=event.source_event_id,
                     )
-                self.transition(
-                    instance,
-                    decision.target_state,
-                    reason=decision.reason,
-                    source_event_id=event.source_event_id,
+                should_transition = decision.route != "IGNORE" or instance_created
+                restarting_active_turn = (
+                    decision.target_state == ConversationInstance.State.CONTEXT_HYDRATING
+                    and instance.state
+                    in {
+                        ConversationInstance.State.CONTEXT_READY,
+                        ConversationInstance.State.TRIAGE_PENDING,
+                        ConversationInstance.State.TRIAGE_RUNNING,
+                        ConversationInstance.State.AI_SERVICE_PENDING,
+                        ConversationInstance.State.AI_SERVICE_RUNNING,
+                    }
                 )
+                if should_transition and not restarting_active_turn:
+                    self.transition(
+                        instance,
+                        decision.target_state,
+                        reason=decision.reason,
+                        source_event_id=event.source_event_id,
+                    )
+                elif restarting_active_turn:
+                    logger.info(
+                        "conversation_active_turn_preserved",
+                        conversation_instance_id=str(instance.pk),
+                        state=instance.state,
+                        source_event_id=event.source_event_id,
+                    )
             else:
                 lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE
                 lifecycle_event.save(update_fields=["processing_status"])
