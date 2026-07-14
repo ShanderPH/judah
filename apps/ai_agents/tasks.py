@@ -37,7 +37,11 @@ def _redis_client() -> redis.Redis:
 
 
 @shared_task(name="ai_agents.run_supervisor_pipeline_task")
-def run_supervisor_pipeline_task(ticket_id: str, is_off_hours: bool = False) -> None:
+def run_supervisor_pipeline_task(
+    ticket_id: str,
+    is_off_hours: bool = False,
+    enforce_ai_pipeline: bool = False,
+) -> None:
     """Run the Salomão supervisor pipeline for a HubSpot ticket.
 
     Acquires a short-lived Redis lock keyed on ``ticket_id`` so that duplicate
@@ -72,7 +76,13 @@ def run_supervisor_pipeline_task(ticket_id: str, is_off_hours: bool = False) -> 
     from apps.ai_agents.api.webhooks import _run_supervisor_pipeline
 
     try:
-        asyncio.run(_run_supervisor_pipeline(ticket_id, is_off_hours=is_off_hours))
+        asyncio.run(
+            _run_supervisor_pipeline(
+                ticket_id,
+                is_off_hours=is_off_hours,
+                enforce_ai_pipeline=enforce_ai_pipeline,
+            )
+        )
     finally:
         if client is not None:
             try:

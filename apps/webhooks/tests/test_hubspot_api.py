@@ -78,7 +78,7 @@ class TestHubSpotWebhookAPI:
         HUBSPOT_APP_SECRET=production_secret,
         AI_ROUTING_ENABLED=True,
         SALOMAO_V1_BASE_URL="https://salomao.local",
-        HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
         DEBUG=False,
     )
     def test_production_triage_stage_dispatches_salomao_supervisor(self) -> None:
@@ -88,7 +88,7 @@ class TestHubSpotWebhookAPI:
                 "objectId": "ticket-triage",
                 "subscriptionType": "ticket.propertyChange",
                 "propertyName": "hs_pipeline_stage",
-                "propertyValue": "ai-triage",
+                "propertyValue": "ai-new",
             }
         ]
         body = json.dumps(payload).encode("utf-8")
@@ -108,7 +108,7 @@ class TestHubSpotWebhookAPI:
 
         assert response.status_code == 202
         assert response.json()["status"] == "accepted"
-        supervisor_task.assert_called_once_with("ticket-triage", False)
+        supervisor_task.assert_called_once_with("ticket-triage", False, True)
 
     @override_settings(
         HUBSPOT_APP_SECRET=production_secret,

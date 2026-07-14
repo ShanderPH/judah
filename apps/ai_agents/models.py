@@ -125,6 +125,7 @@ class ConversationInstance(models.Model):
         TRIAGE_RUNNING = "TRIAGE_RUNNING", "Triage Running"
         AI_SERVICE_PENDING = "AI_SERVICE_PENDING", "AI Service Pending"
         AI_SERVICE_RUNNING = "AI_SERVICE_RUNNING", "AI Service Running"
+        WAITING_FOR_CUSTOMER = "WAITING_FOR_CUSTOMER", "Waiting for Customer"
         HUMAN_HANDOFF_REQUESTED = "HUMAN_HANDOFF_REQUESTED", "Human Handoff Requested"
         QUEUE_PENDING = "QUEUE_PENDING", "Queue Pending"
         HUMAN_ASSIGNED = "HUMAN_ASSIGNED", "Human Assigned"

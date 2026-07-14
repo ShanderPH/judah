@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import base64
+import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from apps.ai_agents.services.hubspot import (
     _download_image_attachment,
+    _extract_thread_ids,
     _fetch_conversation_history,
     build_conversation_context_from_hubspot_context,
     build_salomao_prompt_from_hubspot_context,
+    send_salomao_reply_to_hubspot_thread,
+    update_hubspot_ticket_stage,
 )
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"image-content"
@@ -69,6 +74,21 @@ def test_build_salomao_prompt_accepts_image_without_caption() -> None:
 
     assert prompt is not None
     assert "Mensagem atual do cliente:\n[Imagem enviada pelo cliente]" in prompt
+
+
+def test_extract_thread_ids_uses_restore_property_and_deduplicates() -> None:
+    payload = {
+        "properties": {"hs_thread_ids_to_restore": '["123", "456"]'},
+        "associations": {"conversations": {"results": [{"id": "123"}]}},
+    }
+
+    assert _extract_thread_ids(payload) == ["123", "456"]
+
+
+def test_extract_thread_ids_parses_delimited_restore_property() -> None:
+    payload = {"properties": {"hs_thread_ids_to_restore": "threads: 123; 456"}}
+
+    assert _extract_thread_ids(payload) == ["123", "456"]
 
 
 async def test_fetch_history_keeps_hubspot_attachments() -> None:
@@ -147,6 +167,74 @@ async def test_download_image_attachment_rejects_non_image_content() -> None:
                 client,
                 {"type": "FILE", "url": "https://cdn.hubspotusercontent.com/image.png"},
             )
+
+
+@pytest.mark.asyncio
+async def test_send_reply_infers_sender_actor_from_incoming_recipients(monkeypatch, settings) -> None:
+    captured_payload: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return httpx.Response(201, json={"id": "outgoing-1"})
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.ai_agents.services.hubspot.httpx.AsyncClient",
+        lambda **kwargs: real_async_client(transport=transport, **kwargs),
+    )
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    settings.HUBSPOT_SALOMAO_SENDER_ACTOR_ID = ""
+    context = {
+        "conversation_history": [
+            {
+                "id": "incoming-1",
+                "thread_id": "thread-1",
+                "direction": "INCOMING",
+                "text": "Preciso de ajuda",
+                "channel_id": "channel-1",
+                "channel_account_id": "account-1",
+                "senders": [{"actorId": "V-customer", "name": "Cliente"}],
+                "recipients": [{"actorId": "A-inbox"}],
+            }
+        ]
+    }
+
+    result = await send_salomao_reply_to_hubspot_thread(context, "Como posso ajudar?")
+
+    assert result["sent"] is True
+    assert captured_payload["senderActorId"] == "A-inbox"
+    assert captured_payload["recipients"] == [{"actorId": "V-customer", "name": "Cliente"}]
+
+
+@pytest.mark.asyncio
+async def test_ticket_stage_update_retries_transient_failure(monkeypatch) -> None:
+    statuses = iter([500, 200])
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(next(statuses), json={"id": "ticket-1"})
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.ai_agents.services.hubspot.httpx.AsyncClient",
+        lambda **kwargs: real_async_client(transport=transport, **kwargs),
+    )
+    monkeypatch.setattr("apps.ai_agents.services.hubspot.asyncio.sleep", AsyncMock())
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+
+    result = await update_hubspot_ticket_stage("ticket-1", "waiting-stage")
+
+    assert result == {
+        "updated": True,
+        "ticket_id": "ticket-1",
+        "stage_id": "waiting-stage",
+        "attempts": 2,
+    }
+    assert len(requests) == 2
+    assert json.loads(requests[-1].content) == {"properties": {"hs_pipeline_stage": "waiting-stage"}}
 
 
 def test_build_conversation_context_from_hubspot_context() -> None:

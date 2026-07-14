@@ -112,12 +112,16 @@ Os fluxos conectam clientes finais, agentes de suporte, sistemas externos (HubSp
 
 1. HubSpot envia `ticket-change` para `/api/v1/webhooks/hubspot/`.
 2. O handler canônico valida HMAC v1/v3 e persiste `WebhookEvent`.
-3. Quando `AI_ROUTING_ENABLED=true`, o handler dispara `run_supervisor_pipeline_task.delay(ticket_id, is_off_hours)`.
+3. Quando o ticket entra em `HUBSPOT_N1_NEW_STAGE_ID`, ou recebe uma nova mensagem em `hs_last_message_from_visitor`, o handler dispara `run_supervisor_pipeline_task.delay(ticket_id, is_off_hours, True)`.
 4. A task adquire lock Redis.
 5. `_run_supervisor_pipeline`:
    - Hidrata contexto do ticket via HubSpot API.
+   - Confirma que o ticket pertence a `HUBSPOT_AI_TRIAGE_PIPELINE_ID`.
+   - Move o ticket para `HUBSPOT_AI_TRIAGE_STAGE_ID` durante o atendimento.
    - Monta mensagem com assunto, canal e histórico.
    - Executa Supervisor.
+   - Envia a resposta para a thread do cliente.
+   - Move para `HUBSPOT_AI_WAITING_STAGE_ID` ou `HUBSPOT_HUMAN_ESCALATION_STAGE_ID`.
    - Registra `TokenTrackingLog`.
 
 ### Decisões

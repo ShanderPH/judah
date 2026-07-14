@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
+from django.test import override_settings
 
 from apps.ai_agents.services.protocol_lookup import (
     SUPPORT_N2_OPEN_STAGE_IDS,
@@ -258,10 +259,12 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
 
     lookup = AsyncMock(return_value="Resposta de protocolo")
     send_reply = AsyncMock(return_value={"sent": True, "message_id": "message-1"})
+    move_ticket = AsyncMock(return_value={"updated": True})
     advance = AsyncMock()
     supervisor = Mock()
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", lookup)
     monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", send_reply)
+    monkeypatch.setattr(webhooks, "_move_hubspot_ticket", move_ticket)
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", advance)
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor)
 
@@ -284,17 +287,20 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
 
     lookup.assert_awaited_once_with(context)
     send_reply.assert_awaited_once_with(context, "Resposta de protocolo")
+    assert move_ticket.await_count == 2
     supervisor.assert_not_called()
 
 
 @pytest.mark.django_db
 @pytest.mark.asyncio
+@override_settings(HUBSPOT_AI_TRIAGE_STAGE_ID="ai-active", HUBSPOT_AI_WAITING_STAGE_ID="ai-waiting")
 async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypatch) -> None:
     from apps.ai_agents.agents.supervisor import SalomaoResponse
     from apps.ai_agents.api import webhooks
 
     lookup = AsyncMock()
     send_reply = AsyncMock(return_value={"sent": True, "message_id": "message-1"})
+    move_ticket = AsyncMock(return_value={"updated": True})
     advance = AsyncMock()
     record_usage = AsyncMock()
     result = SalomaoResponse(
@@ -312,6 +318,7 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
     supervisor_factory = Mock(return_value=supervisor_instance)
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", lookup)
     monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", send_reply)
+    monkeypatch.setattr(webhooks, "_move_hubspot_ticket", move_ticket)
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", advance)
     monkeypatch.setattr(webhooks, "_record_usage", record_usage)
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor_factory)
@@ -336,6 +343,67 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
     lookup.assert_not_awaited()
     supervisor_factory.assert_called_once()
     send_reply.assert_awaited_once_with(context, "Resposta normal do Salomao")
+    move_ticket.assert_has_awaits(
+        [
+            call("current-ticket", "ai-active", reason="ai_turn_started"),
+            call("current-ticket", "ai-waiting", reason="ai_reply_sent"),
+        ]
+    )
+    assert advance.await_args.args[2] == [webhooks.ConversationInstance.State.WAITING_FOR_CUSTOMER]
+
+
+@pytest.mark.django_db
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_STAGE_ID="ai-active",
+    HUBSPOT_HUMAN_ESCALATION_STAGE_ID="human-escalation",
+)
+async def test_human_handoff_replies_and_moves_ticket_to_human_stage(monkeypatch) -> None:
+    from apps.ai_agents.agents.supervisor import SalomaoResponse
+    from apps.ai_agents.api import webhooks
+
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-current-ticket",
+        message="Sinto muito por essa situação. Vou encaminhar você ao nosso time humano.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Cliente frustrado e com impacto alto.",
+        agent_trace=[],
+        tokens_used=0,
+        latency_ms=1,
+    )
+    supervisor_instance = Mock()
+    supervisor_instance.run_pipeline_async = AsyncMock(return_value=result)
+    send_reply = AsyncMock(return_value={"sent": True, "message_id": "message-1"})
+    move_ticket = AsyncMock(return_value={"updated": True})
+    advance = AsyncMock()
+    monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", Mock(return_value=supervisor_instance))
+    monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", send_reply)
+    monkeypatch.setattr(webhooks, "_move_hubspot_ticket", move_ticket)
+    monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", advance)
+    monkeypatch.setattr(webhooks, "_record_usage", AsyncMock())
+
+    context = {
+        "ticket_id": "current-ticket",
+        "originating_channel": "whatsapp",
+        "thread_ids": ["thread-1"],
+        "conversation_history": [{"direction": "INCOMING", "text": "Estou muito frustrado"}],
+    }
+
+    await webhooks._run_supervisor_for_hubspot_context(
+        context,
+        session_id="hubspot-ticket-current-ticket",
+        ticket_id="current-ticket",
+    )
+
+    send_reply.assert_awaited_once_with(context, result.message)
+    move_ticket.assert_has_awaits(
+        [
+            call("current-ticket", "ai-active", reason="ai_turn_started"),
+            call("current-ticket", "human-escalation", reason="human_handoff_or_reply_failed"),
+        ]
+    )
+    assert advance.await_args.args[2] == [webhooks.ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
 
 
 @pytest.mark.django_db
@@ -359,6 +427,7 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
     supervisor_factory = Mock(return_value=supervisor_instance)
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", AsyncMock(return_value=None))
     monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", AsyncMock(return_value={"sent": True}))
+    monkeypatch.setattr(webhooks, "_move_hubspot_ticket", AsyncMock(return_value={"updated": True}))
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", AsyncMock())
     monkeypatch.setattr(webhooks, "_record_usage", AsyncMock())
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor_factory)
@@ -391,3 +460,26 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
     assert metadata["image_base64"] == "aW1hZ2U="
     assert metadata["image_mime_type"] == "image/png"
     assert "aW1hZ2U=" not in supervisor_instance.run_pipeline_async.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@override_settings(HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline")
+async def test_ticket_pipeline_enforcement_skips_non_ai_ticket(monkeypatch) -> None:
+    from apps.ai_agents.api import webhooks
+
+    hydrate = AsyncMock(
+        return_value={
+            "ticket_id": "ticket-1",
+            "pipeline": "support-pipeline",
+            "subject": "Atendimento humano",
+            "errors": [],
+        }
+    )
+    run_context = AsyncMock()
+    monkeypatch.setattr(webhooks, "hydrate_ticket_context", hydrate)
+    monkeypatch.setattr(webhooks, "_run_supervisor_for_hubspot_context", run_context)
+
+    await webhooks._run_supervisor_pipeline("ticket-1", enforce_ai_pipeline=True)
+
+    hydrate.assert_awaited_once_with("ticket-1")
+    run_context.assert_not_awaited()

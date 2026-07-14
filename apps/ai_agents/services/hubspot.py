@@ -15,13 +15,17 @@ Decisões:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import os
+import re
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 import httpx
 import structlog
+from django.conf import settings
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
@@ -300,12 +304,111 @@ async def _fetch_thread(client: httpx.AsyncClient, thread_id: str) -> dict[str, 
     return response.json()
 
 
+def _parse_restored_thread_ids(value: Any) -> list[str]:
+    """Parse HubSpot's thread restore property into stable thread IDs."""
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if not value:
+        return []
+
+    text = str(value).strip()
+    try:
+        decoded = json.loads(text)
+    except TypeError, ValueError:
+        decoded = None
+    if isinstance(decoded, list):
+        return [str(item) for item in decoded if str(item).strip()]
+
+    return re.findall(r"\d+", text)
+
+
 def _extract_thread_ids(ticket_payload: dict[str, Any]) -> list[str]:
-    """Extrai IDs de thread de conversa associados ao ticket."""
+    """Extract associated threads, with the ticket restore property as fallback."""
     associations = ticket_payload.get("associations") or {}
     conv = associations.get("conversations") or {}
     results = conv.get("results") or []
-    return [str(item.get("id")) for item in results if item.get("id")]
+    association_ids = [str(item.get("id")) for item in results if item.get("id")]
+    properties = ticket_payload.get("properties") or {}
+    restored_ids = _parse_restored_thread_ids(properties.get("hs_thread_ids_to_restore"))
+    return list(dict.fromkeys([*association_ids, *restored_ids]))
+
+
+async def update_hubspot_ticket_stage(
+    ticket_id: str,
+    stage_id: str,
+    *,
+    timeout_seconds: float = 20.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Move a HubSpot ticket to a stage, retrying transient provider failures."""
+    if USE_MOCK_HUBSPOT:
+        return {"updated": True, "ticket_id": str(ticket_id), "stage_id": str(stage_id), "attempts": 1}
+
+    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
+    async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.patch(
+                    f"{HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
+                    json={"properties": {"hs_pipeline_stage": str(stage_id)}},
+                )
+                if (response.status_code == 429 or response.status_code >= 500) and attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                response.raise_for_status()
+                logger.info(
+                    "hubspot_ticket_stage_updated",
+                    ticket_id=ticket_id,
+                    stage_id=stage_id,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": True,
+                    "ticket_id": str(ticket_id),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                }
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "hubspot_ticket_stage_update_http_error",
+                    ticket_id=ticket_id,
+                    stage_id=stage_id,
+                    status=exc.response.status_code,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": False,
+                    "ticket_id": str(ticket_id),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                    "reason": f"http:{exc.response.status_code}",
+                }
+            except httpx.HTTPError as exc:
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                logger.error(
+                    "hubspot_ticket_stage_update_error",
+                    ticket_id=ticket_id,
+                    stage_id=stage_id,
+                    error_type=type(exc).__name__,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": False,
+                    "ticket_id": str(ticket_id),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                    "reason": type(exc).__name__,
+                }
+
+    return {
+        "updated": False,
+        "ticket_id": str(ticket_id),
+        "stage_id": str(stage_id),
+        "attempts": max_attempts,
+        "reason": "unknown",
+    }
 
 
 async def hydrate_ticket_context(
@@ -619,7 +722,15 @@ async def send_salomao_reply_to_hubspot_thread(
     thread_id = latest.get("thread_id")
     channel_id = latest.get("channel_id")
     channel_account_id = latest.get("channel_account_id")
-    sender_actor_id = os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "")
+    configured_sender_actor_id = str(getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or "").strip()
+    incoming_recipients = latest.get("recipients") or []
+    fallback_sender_actor_id = next(
+        (str(recipient.get("actorId")) for recipient in incoming_recipients if recipient.get("actorId")),
+        "",
+    )
+    sender_actor_id = configured_sender_actor_id or fallback_sender_actor_id
+    if sender_actor_id and not configured_sender_actor_id:
+        logger.info("hubspot_salomao_sender_actor_inferred", thread_id=thread_id)
     recipients = [_recipient_from_sender(sender) for sender in latest.get("senders", [])]
     recipients = [recipient for recipient in recipients if recipient]
 
@@ -688,4 +799,5 @@ __all__ = [
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "send_salomao_reply_to_hubspot_thread",
+    "update_hubspot_ticket_stage",
 ]

@@ -255,9 +255,11 @@ _ACTION_INSTRUCTIONS = [
     "saia da fila de triagem e o contato receba o retorno.",
     "Padrão de chamada: `hubspot_update_ticket(ticket_id=<id>, "
     "pipeline_stage='<novo_stage>', reply_note='<texto_da_resposta>')`. "
-    f"Use pipeline_stage='{settings.HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID}' (closed) quando resolveu o "
-    f"problema, ou '{settings.HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID}' (waiting) se ficou aguardando "
-    "resposta do contato.",
+    f"No pipeline de Triagem IA, use pipeline_stage='{settings.HUBSPOT_AI_WAITING_STAGE_ID}' "
+    "depois de responder e ficar aguardando o contato. "
+    f"Use pipeline_stage='{settings.HUBSPOT_HUMAN_ESCALATION_STAGE_ID}' quando houver transbordo humano. "
+    f"Use pipeline_stage='{settings.HUBSPOT_CLOSED_STAGE_ID}' somente quando o atendimento tiver sido "
+    "explicitamente encerrado.",
     "ATENÇÃO AOS PIPELINES E ESTÁGIOS:",
     f"- Se a flag `is_off_hours` for True E houver transbordo, OBRIGATORIAMENTE atualize o ticket para "
     f"`pipeline_stage='{settings.HUBSPOT_HUMAN_ESCALATION_STAGE_ID}'` "
