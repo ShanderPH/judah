@@ -34,6 +34,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
 | `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py`, `apps/ai_agents/agents/salomao_chat.py` | URL base do servico standalone Salomao v1. Quando preenchida, o Supervisor pode expor o Salomao v1 como membro interno `SalomaoChat`. |
 | `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
+| `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
 
 ## Variáveis de HubSpot
@@ -46,8 +47,20 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
-| `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Stage opcional que roteia tickets para `AI_TRIAGE` no lifecycle determinístico. |
-| `HUBSPOT_AI_REPLY_DISABLED_CHANNELS` | `apps/ai_agents/services/channel_capabilities.py` | Lista separada por vírgulas de canais sem resposta automática por IA (padrão: `whatsapp`). |
+| `HUBSPOT_AI_TRIAGE_PIPELINE_ID` | `apps/ai_agents/services/lifecycle.py` | Pipeline dedicada à Triagem IA. |
+| `HUBSPOT_N1_NEW_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Novo Atendimento da Triagem IA. |
+| `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Exibindo Menu/Em atendimento da Triagem IA. |
+| `HUBSPOT_AI_WAITING_STAGE_ID` | Configuração de lifecycle | Estágio Aguardando Resposta da Triagem IA. |
+| `HUBSPOT_HUMAN_ESCALATION_STAGE_ID` | Action Agent | Estágio Escalado para Humano da Triagem IA. |
+| `HUBSPOT_CLOSED_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Atendimento Encerrado da Triagem IA. |
+| `HUBSPOT_AI_REPLY_DISABLED_CHANNELS` | `apps/ai_agents/services/channel_capabilities.py` | Lista separada por vírgulas de canais sem resposta automática por IA (padrão: vazio; chat e WhatsApp habilitados). |
+| `HUBSPOT_IMAGE_MAX_BYTES` | `apps/ai_agents/services/hubspot.py` | Tamanho máximo do anexo de imagem encaminhado ao Salomão (padrão: `8388608`, ou 8 MB). |
+| `HUBSPOT_SUPPORT_PIPELINE_ID` | Autoatribuição e HubSpot client | Pipeline principal do suporte N1. |
+| `HUBSPOT_SUPPORT_NEW_STAGE_ID` | Autoatribuição e lifecycle | Estágio de entrada/NOVO do suporte N1. |
+| `HUBSPOT_SUPPORT_CLOSED_STAGE_ID` | Fechamento e lifecycle | Estágio FECHADO do suporte N1. |
+| `HUBSPOT_DEFAULT_TICKET_*` | HubSpot client e MCP | Pipeline e estágios genéricos para criação/atualização de tickets. |
+| `HUBSPOT_N2_PIPELINE_ID` | Consulta de protocolos | Pipeline técnico N2 consultável pelo cliente. |
+| `HUBSPOT_N2_*_STAGE_ID` | Consulta de protocolos | Estágios de entrada, prioridade e resolução do N2. |
 | `HUBSPOT_TICKET_CHURCH_PROPERTY` | `apps/ai_agents/services/protocol_lookup.py` | Propriedade do ticket que armazena o ID da igreja local (padrão: `codigo_de_igreja_local___ticket`). |
 
 ## Variáveis de Jira
@@ -115,14 +128,37 @@ PINECONE_API_KEY=your-pinecone-key
 PINECONE_INDEX_NAME=inchurch-knowledge
 SALOMAO_V1_BASE_URL=http://localhost:8001
 SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_IMAGE_TIMEOUT_SECONDS=180
 SALOMAO_V1_AS_TEAM_AGENT=true
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
 HUBSPOT_PORTAL_ID=your-portal-id
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
-HUBSPOT_AI_TRIAGE_STAGE_ID=
-HUBSPOT_AI_REPLY_DISABLED_CHANNELS=whatsapp
+HUBSPOT_AI_TRIAGE_PIPELINE_ID=636594474
+HUBSPOT_N1_NEW_STAGE_ID=939271304
+HUBSPOT_AI_TRIAGE_STAGE_ID=1115636653
+HUBSPOT_AI_WAITING_STAGE_ID=1113543321
+HUBSPOT_HUMAN_ESCALATION_STAGE_ID=1113543321
+HUBSPOT_CLOSED_STAGE_ID=939271307
+HUBSPOT_AI_REPLY_DISABLED_CHANNELS=
+HUBSPOT_IMAGE_MAX_BYTES=8388608
+HUBSPOT_SUPPORT_PIPELINE_ID=636459134
+HUBSPOT_SUPPORT_NEW_STAGE_ID=939275049
+HUBSPOT_SUPPORT_CLOSED_STAGE_ID=939275052
+HUBSPOT_DEFAULT_TICKET_PIPELINE_ID=0
+HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID=1
+HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID=2
+HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID=3
+HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID=4
+HUBSPOT_N2_PIPELINE_ID=634240100
+HUBSPOT_N2_ENTRY_STAGE_ID=936942376
+HUBSPOT_N2_CRITICAL_STAGE_ID=1060950860
+HUBSPOT_N2_HIGH_STAGE_ID=1060950861
+HUBSPOT_N2_MEDIUM_STAGE_ID=1060950862
+HUBSPOT_N2_LOW_STAGE_ID=1060950863
+HUBSPOT_N2_TRIVIAL_STAGE_ID=1060950864
+HUBSPOT_N2_RESOLVED_STAGE_ID=936942379
 HUBSPOT_TICKET_CHURCH_PROPERTY=codigo_de_igreja_local___ticket
 
 JIRA_SERVER_URL=https://inchurch.atlassian.net

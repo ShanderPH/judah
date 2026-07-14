@@ -11,7 +11,15 @@ from common.exceptions import ExternalServiceError
 
 
 class FakeSalomaoClient:
-    async def chat(self, *, message: str, session_id: str) -> SalomaoV1ChatResult:
+    async def chat(
+        self,
+        *,
+        message: str,
+        session_id: str,
+        image_base64: str | None = None,
+        image_mime_type: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> SalomaoV1ChatResult:
         assert "Mensagem atual:\nComo fazer um cupom?" in message
         assert session_id == "hubspot-thread-123"
         return SalomaoV1ChatResult(
@@ -24,8 +32,25 @@ class FakeSalomaoClient:
 
 
 class FailingSalomaoClient:
-    async def chat(self, *, message: str, session_id: str) -> SalomaoV1ChatResult:
+    async def chat(self, *, message: str, session_id: str, **_kwargs) -> SalomaoV1ChatResult:
         raise ExternalServiceError("salomao_v1", "provider unavailable")
+
+
+class ImageSalomaoClient:
+    async def chat(
+        self,
+        *,
+        message: str,
+        session_id: str,
+        image_base64: str | None = None,
+        image_mime_type: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> SalomaoV1ChatResult:
+        assert "base64" not in message
+        assert image_base64 == "aW1hZ2U="
+        assert image_mime_type == "image/png"
+        assert timeout_seconds == 180.0
+        return SalomaoV1ChatResult(response="A imagem mostra a tela de eventos.", session_id=session_id)
 
 
 def _conversation_context() -> ConversationContext:
@@ -79,6 +104,23 @@ async def test_salomao_chat_tool_returns_handoff_draft_on_client_error() -> None
     assert draft.requires_human_handoff is True
     assert draft.recommended_actions[0].name == "assign_ticket_to_human_queue"
     assert "ExternalServiceError" in (draft.handoff_reason or "")
+
+
+@override_settings(SALOMAO_V1_BASE_URL="http://salomao.local")
+async def test_salomao_chat_tool_forwards_image_outside_prompt() -> None:
+    tool = SalomaoChatTool(
+        session_id="fallback-session",
+        client_factory=ImageSalomaoClient,
+        image_base64="aW1hZ2U=",
+        image_mime_type="image/png",
+    )
+
+    draft = await tool.create_chat_draft_async(
+        message="Analise esta imagem.",
+        conversation_context=_conversation_context(),
+    )
+
+    assert draft.response_text == "A imagem mostra a tela de eventos."
 
 
 def test_salomao_v1_empty_response_becomes_handoff_draft() -> None:

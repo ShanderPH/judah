@@ -59,15 +59,10 @@ class TriageResult(BaseModel):
     lê `rota` para decidir a delegação (RAG, Action ou escalonamento humano).
     """
 
-    rota: Rota = Field(
-        description=(
-            "Fila final de atendimento. Valores aceitos: BOLETO, EVENTOS, "
-            "DUVIDAS_PLATAFORMA, MEIOS_DE_PAGAMENTO, FINANCEIRO, "
-            "SUPORTE_TECNICO_N1, CUSTOMER_SUCCESS, ESCALAR_IMEDIATAMENTE, "
-            "ATENDIMENTO_IA."
-        )
-    )
-    prioridade: Prioridade = Field(description="Prioridade do atendimento: CRITICA, ALTA, MEDIA ou BAIXA.")
+    # OpenAI rejects JSON Schema properties that combine an enum $ref with
+    # sibling keywords such as description. The enum classes document values.
+    rota: Rota
+    prioridade: Prioridade
     tags: list[str] = Field(
         default_factory=list,
         description=(
@@ -82,7 +77,7 @@ class TriageResult(BaseModel):
             "para resolver o caso (ex: 'cpf', 'id_do_ticket', 'nome_da_igreja')."
         ),
     )
-    sentimento: Sentimento = Field(description="Sentimento predominante: positivo, neutro ou negativo.")
+    sentimento: Sentimento
 
 
 # ---------------------------------------------------------------------------

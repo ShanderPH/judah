@@ -22,14 +22,14 @@ def normalize_channel(value: str | None) -> str:
 
 
 def _disabled_auto_reply_channels() -> set[str]:
-    raw = getattr(settings, "HUBSPOT_AI_REPLY_DISABLED_CHANNELS", "whatsapp")
+    raw = getattr(settings, "HUBSPOT_AI_REPLY_DISABLED_CHANNELS", "")
     return {normalize_channel(item) for item in str(raw).split(",") if item.strip()}
 
 
 def can_send_automated_reply(channel: str | None) -> bool:
     """Return whether Judah is allowed to send automated replies on a channel."""
     normalized = normalize_channel(channel)
-    if normalized == "unknown":
+    if normalized in {"unknown", "whatsapp"}:
         return True
     return normalized not in _disabled_auto_reply_channels()
 

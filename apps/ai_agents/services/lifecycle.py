@@ -32,11 +32,12 @@ RouteName = Literal[
     "WAIT_FOR_CONTACT_DATA",
 ]
 
-_PROP_STAGE_NOVO = "hs_v2_date_entered_939275049"
-_PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"
+_STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
+_STAGE_FECHADO_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
+_PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
+_PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
-_STAGE_FECHADO_ID = "939275052"
 _REQUIRED_LIFECYCLE_TABLES = {
     "conversation_instances",
     "conversation_events",
@@ -284,7 +285,7 @@ class EventNormalizer:
             hubspot_ticket_id = object_id or None
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
-                pipeline_stage_id = "939275049"
+                pipeline_stage_id = _STAGE_NOVO_ID
             elif property_name == _PROP_STAGE_CLOSED:
                 normalized_type = "ticket_closed"
                 pipeline_stage_id = _STAGE_FECHADO_ID
@@ -358,16 +359,36 @@ class RoutingPolicyEngine:
                 can_send_reply=can_reply,
             )
 
+        triage_pipeline_id = getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "")
+        triage_new_stage_id = getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "")
         triage_stage_id = getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", "")
+        triage_closed_stage_id = getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", "")
+        belongs_to_triage_pipeline = (
+            not triage_pipeline_id or not event.pipeline_id or event.pipeline_id == triage_pipeline_id
+        )
         if (
             event.event_type == "ticket_stage_changed"
-            and triage_stage_id
-            and event.pipeline_stage_id == triage_stage_id
+            and belongs_to_triage_pipeline
+            and triage_closed_stage_id
+            and event.pipeline_stage_id == triage_closed_stage_id
+        ):
+            return RouteDecision(
+                route="CLOSE",
+                target_state=ConversationInstance.State.CLOSED,
+                reason="Ticket entered the configured AI triage closed stage.",
+                can_send_reply=can_reply,
+            )
+
+        if (
+            event.event_type == "ticket_stage_changed"
+            and belongs_to_triage_pipeline
+            and event.pipeline_stage_id in {triage_new_stage_id, triage_stage_id}
+            and event.pipeline_stage_id
         ):
             return RouteDecision(
                 route="AI_TRIAGE",
                 target_state=ConversationInstance.State.CONTEXT_HYDRATING,
-                reason="Ticket entered the configured AI triage stage.",
+                reason="Ticket entered a configured AI triage stage.",
                 can_send_reply=can_reply,
             )
 

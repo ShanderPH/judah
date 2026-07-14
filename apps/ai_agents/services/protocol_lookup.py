@@ -14,23 +14,29 @@ from django.conf import settings
 logger = structlog.get_logger(__name__)
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
-SUPPORT_N2_PIPELINE_ID = "634240100"
-SUPPORT_N2_RESOLVED_STAGE_ID = "936942379"
+SUPPORT_N2_PIPELINE_ID = settings.HUBSPOT_N2_PIPELINE_ID
+SUPPORT_N2_ENTRY_STAGE_ID = settings.HUBSPOT_N2_ENTRY_STAGE_ID
+SUPPORT_N2_CRITICAL_STAGE_ID = settings.HUBSPOT_N2_CRITICAL_STAGE_ID
+SUPPORT_N2_HIGH_STAGE_ID = settings.HUBSPOT_N2_HIGH_STAGE_ID
+SUPPORT_N2_MEDIUM_STAGE_ID = settings.HUBSPOT_N2_MEDIUM_STAGE_ID
+SUPPORT_N2_LOW_STAGE_ID = settings.HUBSPOT_N2_LOW_STAGE_ID
+SUPPORT_N2_TRIVIAL_STAGE_ID = settings.HUBSPOT_N2_TRIVIAL_STAGE_ID
+SUPPORT_N2_RESOLVED_STAGE_ID = settings.HUBSPOT_N2_RESOLVED_STAGE_ID
 SUPPORT_N2_STAGE_STATUS = {
-    "936942376": "Sendo analisado pelo time t\u00e9cnico",
-    "1060950860": "Em atendimento pelo time t\u00e9cnico",
-    "1060950861": "Em atendimento pelo time t\u00e9cnico",
-    "1060950862": "Em atendimento pelo time t\u00e9cnico",
-    "1060950863": "Em atendimento pelo time t\u00e9cnico",
-    "1060950864": "Em atendimento pelo time t\u00e9cnico",
+    SUPPORT_N2_ENTRY_STAGE_ID: "Sendo analisado pelo time t\u00e9cnico",
+    SUPPORT_N2_CRITICAL_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
+    SUPPORT_N2_HIGH_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
+    SUPPORT_N2_MEDIUM_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
+    SUPPORT_N2_LOW_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
+    SUPPORT_N2_TRIVIAL_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_RESOLVED_STAGE_ID: "Resolvido",
 }
 SUPPORT_N2_STAGE_PRIORITY = {
-    "1060950860": "Cr\u00edtica",
-    "1060950861": "Alta",
-    "1060950862": "M\u00e9dia",
-    "1060950863": "Baixa",
-    "1060950864": "Trivial",
+    SUPPORT_N2_CRITICAL_STAGE_ID: "Cr\u00edtica",
+    SUPPORT_N2_HIGH_STAGE_ID: "Alta",
+    SUPPORT_N2_MEDIUM_STAGE_ID: "M\u00e9dia",
+    SUPPORT_N2_LOW_STAGE_ID: "Baixa",
+    SUPPORT_N2_TRIVIAL_STAGE_ID: "Trivial",
 }
 SUPPORT_N2_OPEN_STAGE_IDS = set(SUPPORT_N2_STAGE_STATUS) - {
     SUPPORT_N2_RESOLVED_STAGE_ID,
@@ -298,11 +304,11 @@ class ProtocolConversationHandler:
             return str(exc)
 
         identity = f'O ticket "{ticket.name}" (protocolo #{ticket.protocol})'
-        if ticket.status == SUPPORT_N2_STAGE_STATUS["936942376"]:
+        if ticket.status == SUPPORT_N2_STAGE_STATUS[SUPPORT_N2_ENTRY_STAGE_ID]:
             text = f"{identity} est\u00e1 sendo analisado pelo time t\u00e9cnico."
             if ticket.priority:
                 text += f" A prioridade registrada \u00e9 {ticket.priority}."
-        elif ticket.status == SUPPORT_N2_STAGE_STATUS["1060950860"]:
+        elif ticket.status == SUPPORT_N2_STAGE_STATUS[SUPPORT_N2_CRITICAL_STAGE_ID]:
             text = f"{identity} est\u00e1 em atendimento pelo time t\u00e9cnico"
             text += f", com prioridade {ticket.priority}." if ticket.priority else "."
         else:

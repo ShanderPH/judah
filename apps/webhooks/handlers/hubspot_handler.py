@@ -8,18 +8,18 @@ in the request thread beyond the initial event recording.
 from __future__ import annotations
 
 import structlog
+from django.conf import settings
 
 logger = structlog.get_logger(__name__)
 
 # HubSpot property names that trigger auto-assignment logic
-_PROP_STAGE_NOVO = "hs_v2_date_entered_939275049"  # Ticket entered NOVO stage
-_PROP_STAGE_CLOSED = "hs_v2_date_entered_939275052"  # Ticket entered FECHADO stage
+_STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
+_STAGE_FECHADO_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
+_PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
+_PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
 _PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
-
-# Stage IDs
-_STAGE_FECHADO_ID = "939275052"
 
 
 def handle_hubspot_event(event) -> None:
@@ -120,13 +120,13 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
 def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
     """Handle pipeline stage transitions.
 
-    When a ticket moves to FECHADO (stage 939275052), this event is logged for
+    When a ticket moves to the configured FECHADO stage, this event is logged for
     observability only. The actual closure flow is triggered exclusively by the
-    ``hs_v2_date_entered_939275052`` property change event (``_PROP_STAGE_CLOSED``)
+    configured closed-stage property change event (``_PROP_STAGE_CLOSED``)
     to avoid dispatching duplicate ``task_handle_ticket_closed`` tasks.
 
     Dispatching closure from both ``hs_pipeline_stage`` and
-    ``hs_v2_date_entered_939275052`` would cause double decrements of
+    the closed-stage timestamp property would cause double decrements of
     ``current_simultaneous_chats`` even though ``handle_ticket_closed`` now
     holds a Redis dedup lock — the lock prevents re-entry within 60 s, but
     two rapid concurrent dispatches (one per webhook property) could both
@@ -137,7 +137,7 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
         logger.info(
             "hubspot_ticket_pipeline_stage_fechado_logged",
             ticket_id=object_id,
-            note="closure dispatched by hs_v2_date_entered_939275052 handler, not here",
+            note=f"closure dispatched by {_PROP_STAGE_CLOSED} handler, not here",
         )
         return
 

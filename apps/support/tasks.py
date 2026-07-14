@@ -176,7 +176,7 @@ def task_handle_ticket_closed(
 
     Args:
         hubspot_ticket_id: HubSpot ticket ID string.
-        closed_at_ms: Value of ``hs_v2_date_entered_939275052`` (ms epoch).
+        closed_at_ms: Value of the configured closed-stage timestamp (ms epoch).
         owner_id: HubSpot owner ID at the time of closure.
     """
     from apps.support.auto_assign_service import handle_ticket_closed
@@ -535,7 +535,7 @@ def task_aggregate_queue_metrics() -> None:
 def task_sync_novo_stage_tickets(self) -> dict:
     """Celery task: sync HubSpot NOVO-stage tickets into the internal queue.
 
-    Fetches all tickets currently in stage ``939275049`` (NOVO) from HubSpot
+    Fetches all tickets currently in the configured NOVO stage from HubSpot
     and creates ``NewConversation`` records for those not yet tracked locally.
     After populating, triggers Matchmaker drain.
 

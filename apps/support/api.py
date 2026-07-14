@@ -243,7 +243,7 @@ def get_queue_health(request) -> dict:
     auth=None,
 )
 def sync_novo_tickets(request) -> tuple[int, dict]:
-    """Fetch all tickets currently in the NOVO stage (939275049) from HubSpot
+    """Fetch all tickets currently in the configured NOVO stage from HubSpot
     and enqueue any that are not yet tracked in ``new_conversations``.
 
     Does NOT perform any assignment — tickets will be picked up automatically
