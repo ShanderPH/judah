@@ -24,6 +24,8 @@ Crie um `.env.local` dentro de `webapp/` com:
 ```bash
 JUDAH_API_URL=http://127.0.0.1:8000/api/v1
 NEXT_PUBLIC_HUBSPOT_PORTAL_ID=51734496
+# The sandbox's official tracking code is loaded from
+# https://js-na1.hs-scripts.com/51734496.js on /sandbox-chat.
 # Server-only OAuth token from the sandbox test install. Requires
 # conversations.visitor_identification.tokens.create.
 HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN=...
