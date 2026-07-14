@@ -56,6 +56,12 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
     property_value = payload.get("propertyValue", "")
 
     if event_type == "ticket.propertyChange":
+        logger.info(
+            "hubspot_ticket_property_changed",
+            ticket_id=object_id,
+            property_name=property_name,
+        )
+
         if property_name == _PROP_STAGE_NOVO:
             _handle_ticket_entered_novo(object_id, property_value)
 
@@ -63,10 +69,17 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
             _handle_ticket_entered_closed(object_id, property_value, payload)
 
         elif property_name == _PROP_PIPELINE_STAGE:
-            _handle_pipeline_stage_change(object_id, property_value)
+            _handle_pipeline_stage_change(object_id, property_value, payload)
 
         elif property_name == _PROP_OWNER_ID:
             _handle_ticket_owner_change(object_id, property_value, payload)
+
+        else:
+            logger.info(
+                "hubspot_ticket_property_change_recorded",
+                ticket_id=object_id,
+                property_name=property_name,
+            )
 
     elif event_type in ("ticket.creation", "ticket.created"):
         logger.debug("hubspot_ticket_created_event", ticket_id=object_id)
@@ -117,23 +130,28 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
     task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
 
 
-def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
-    """Handle pipeline stage transitions.
+def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict | None = None) -> None:
+    """Route configured stage transitions without changing unrelated tickets."""
+    payload = payload or {}
+    new_stage = str(new_stage or "")
+    support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
+    support_closed_stage = str(getattr(settings, "HUBSPOT_SUPPORT_CLOSED_STAGE_ID", ""))
+    ai_triage_stage = str(getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", ""))
+    ai_closed_stage = str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", ""))
 
-    When a ticket moves to the configured FECHADO stage, this event is logged for
-    observability only. The actual closure flow is triggered exclusively by the
-    configured closed-stage property change event (``_PROP_STAGE_CLOSED``)
-    to avoid dispatching duplicate ``task_handle_ticket_closed`` tasks.
+    logger.info("hubspot_ticket_pipeline_stage_changed", ticket_id=object_id, new_stage=new_stage)
 
-    Dispatching closure from both ``hs_pipeline_stage`` and
-    the closed-stage timestamp property would cause double decrements of
-    ``current_simultaneous_chats`` even though ``handle_ticket_closed`` now
-    holds a Redis dedup lock — the lock prevents re-entry within 60 s, but
-    two rapid concurrent dispatches (one per webhook property) could both
-    reach the cache.add() check before either has committed.
-    """
-    if new_stage == _STAGE_FECHADO_ID:
-        # Log for observability — closure is handled by _PROP_STAGE_CLOSED handler.
+    if new_stage == support_new_stage:
+        entered_at_ms = payload.get("occurredAt") or payload.get("occurred_at")
+        _handle_ticket_entered_novo(object_id, str(entered_at_ms) if entered_at_ms else None)
+        return
+
+    if new_stage == ai_triage_stage:
+        _handle_ticket_entered_ai_triage(object_id, new_stage)
+        return
+
+    if new_stage == support_closed_stage:
+        # Closure remains owned by the calculated closed-stage event.
         logger.info(
             "hubspot_ticket_pipeline_stage_fechado_logged",
             ticket_id=object_id,
@@ -141,15 +159,38 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
         )
         return
 
-    from apps.support.models import Ticket
+    if new_stage == ai_closed_stage:
+        logger.info("hubspot_ai_ticket_closed_stage_recorded", ticket_id=object_id)
+        return
 
-    try:
-        ticket = Ticket.objects.get(ticket_id=object_id)
-        ticket.status = "RESOLVED"
-        ticket.save(update_fields=["status", "updated_at"])
-        logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
-    except Ticket.DoesNotExist:
-        logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
+    logger.info(
+        "hubspot_ticket_pipeline_stage_recorded_without_action",
+        ticket_id=object_id,
+        new_stage=new_stage,
+    )
+
+
+def _handle_ticket_entered_ai_triage(hubspot_ticket_id: str, stage_id: str) -> None:
+    """Dispatch the ticket Supervisor when it enters the configured AI stage."""
+    if not getattr(settings, "AI_ROUTING_ENABLED", False):
+        logger.info("hubspot_ticket_ai_routing_disabled", ticket_id=hubspot_ticket_id, stage_id=stage_id)
+        return
+
+    if not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
+        logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, stage_id=stage_id)
+        return
+
+    from apps.ai_agents.tasks import run_supervisor_pipeline_task
+    from apps.ai_agents.utils.business_rules import is_business_hours, is_quinta_fire, off_hours_reason
+
+    is_off_hours = bool(off_hours_reason() or is_quinta_fire() or not is_business_hours())
+    run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours)
+    logger.info(
+        "hubspot_ticket_supervisor_dispatched",
+        ticket_id=hubspot_ticket_id,
+        stage_id=stage_id,
+        is_off_hours=is_off_hours,
+    )
 
 
 def _handle_ticket_owner_change(

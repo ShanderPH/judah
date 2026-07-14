@@ -113,7 +113,8 @@ HubSpot ticket-change
   │ 2. Persiste WebhookEvent
   ▼
 apps/webhooks/handlers/hubspot_handler.py
-  │ Quando AI_ROUTING_ENABLED=true
+  │ Quando hs_pipeline_stage=HUBSPOT_AI_TRIAGE_STAGE_ID,
+  │ AI_ROUTING_ENABLED=true e SALOMAO_V1_BASE_URL está configurada
   ▼
 run_supervisor_pipeline_task.delay  [apps/ai_agents/tasks.py]
   │ 1. Redis lock por ticket

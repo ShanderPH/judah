@@ -41,6 +41,7 @@ Base: `/api/v1/webhooks/`
 | Método | Path | Auth | Descrição |
 |--------|------|------|-----------|
 | POST | `/hubspot/` | — | Recebe webhooks do HubSpot |
+| POST | `/hubspot/sandbox/` | — | Alias de sandbox com a mesma validação e o mesmo roteamento |
 | POST | `/jira/` | — | Recebe webhooks do Jira |
 
 ## Validação de assinatura
@@ -67,6 +68,10 @@ X-Hub-Signature = sha256=<HMAC-SHA256(body)>
 
 - Eventos `ticket.*`, `contact.*`, `deal.*`, `company.*`, `conversation.*` → `hubspot_handler`.
 - Outros eventos → tentativa de `jira_handler`.
+- Toda mudança de propriedade de ticket recebida é persistida e registrada nos logs.
+- `hs_pipeline_stage=HUBSPOT_SUPPORT_NEW_STAGE_ID` dispara o Matchmaker de atribuição automática.
+- `hs_pipeline_stage=HUBSPOT_AI_TRIAGE_STAGE_ID` dispara o Supervisor com Salomão quando a IA está habilitada.
+- Estágios não configurados não alteram o status local nem executam tarefas com efeito colateral.
 
 ## Regras de negócio
 
