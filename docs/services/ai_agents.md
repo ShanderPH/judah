@@ -101,7 +101,7 @@ Custo e consumo de tokens por execução.
 - `channel_capabilities`: aplica bloqueios configuráveis por canal; WhatsApp é sempre permitido para evitar que configurações legadas interrompam o atendimento.
 - `tool_permissions`: aplica allowlist de tools por estado do lifecycle.
 - `build_handoff_package`: monta contexto minimo para transferencia humana.
-- `run_lifecycle_watchdog`: detecta instancias presas e transiciona para `FAILED_RETRYABLE` ou `FAILED_TERMINAL`.
+- `run_lifecycle_watchdog`: detecta instancias presas e transiciona para `FAILED_RETRYABLE` ou `FAILED_TERMINAL`; o Celery Beat executa o watchdog a cada minuto e reenvia retries cujo backoff expirou.
 
 ## Endpoints
 

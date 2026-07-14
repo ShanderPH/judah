@@ -36,6 +36,9 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
 | `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
+| `SALOMAO_V1_MAX_ATTEMPTS` | `apps/integrations/salomao_v1/client.py` | Tentativas para timeout, HTTP 429 e HTTP 5xx (padrão: `3`). |
+| `SALOMAO_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima do draft do Salomão antes de transbordar para humano (padrão: `0.65`). |
+| `HEIMDALL_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima da triagem Heimdall antes de transbordar para humano (padrão: `0.65`). |
 
 ## Variáveis de HubSpot
 
@@ -90,7 +93,8 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `CORS_ALLOWED_ORIGINS` | `core/settings/base.py` | Origens permitidas para CORS. |
 | `JWT_ACCESS_TOKEN_LIFETIME_MINUTES` | `core/settings/base.py` | TTL do access token JWT (padrão: `60`). |
 | `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | `core/settings/base.py` | TTL do refresh token JWT (padrão: `7`). |
-| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` define `true` por conveniência de dev, mas o fallback do código é `False`. |
+| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` e o fallback do código permanecem desabilitados por segurança. |
+| `AI_ROUTING_ROLLOUT_PERCENTAGE` | `apps/ai_agents/services/rollout.py` | Percentual determinístico de tickets habilitados para IA, de `0` a `100` (padrão: `100`). |
 
 ## Variáveis de observabilidade
 
@@ -131,6 +135,9 @@ SALOMAO_V1_BASE_URL=http://localhost:8001
 SALOMAO_V1_TIMEOUT_SECONDS=45
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS=180
 SALOMAO_V1_AS_TEAM_AGENT=true
+SALOMAO_V1_MAX_ATTEMPTS=3
+SALOMAO_MIN_CONFIDENCE=0.65
+HEIMDALL_MIN_CONFIDENCE=0.65
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
@@ -175,6 +182,7 @@ JWT_ACCESS_TOKEN_LIFETIME_MINUTES=60
 JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
 
 AI_ROUTING_ENABLED=false
+AI_ROUTING_ROLLOUT_PERCENTAGE=100
 ```
 
 ## Arquivos relacionados

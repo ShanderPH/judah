@@ -162,6 +162,7 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `DATABASE_URL`                  | Always             | `postgres://...`                                        |
 | `REDIS_URL`                     | Always             | Broker, cache, and agent session store                  |
 | `AI_ROUTING_ENABLED`            | AI endpoints       | Mounts `/api/v1/ai/*` when `true`                       |
+| `AI_ROUTING_ROLLOUT_PERCENTAGE` | AI routing         | Stable rollout cohort from `0` to `100`; default `100` |
 | `OPENAI_API_KEY`                | AI endpoints       | For GPT-4o / 4o-mini and embeddings                     |
 | `PINECONE_API_KEY`              | RAG                | Pinecone serverless                                     |
 | `PINECONE_INDEX_NAME`           | RAG                |                                                         |
@@ -169,6 +170,9 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `SALOMAO_V1_BASE_URL`           | Salomao v1 adapter | When set, the Supervisor can expose Salomao v1 as an internal Team member |
 | `SALOMAO_V1_TIMEOUT_SECONDS`    | Salomao v1 adapter | HTTP timeout for the Salomao v1 adapter                 |
 | `SALOMAO_V1_AS_TEAM_AGENT`      | Salomao v1 adapter | Enables the internal `SalomaoChat` Team member, default `true` |
+| `SALOMAO_V1_MAX_ATTEMPTS`       | Salomao v1 adapter | Retries for timeout, HTTP 429, and HTTP 5xx; default `3` |
+| `SALOMAO_MIN_CONFIDENCE`        | AI policy         | Minimum Salomao draft confidence before human handoff; default `0.65` |
+| `HEIMDALL_MIN_CONFIDENCE`       | AI policy         | Minimum Heimdall confidence before human handoff; default `0.65` |
 | `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
 | `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | HubSpot chat AI   | HubSpot actor ID used by Salomao to answer conversation threads |
@@ -289,9 +293,13 @@ Set these variables on the Judah API and worker services:
 
 ```env
 AI_ROUTING_ENABLED=true
+AI_ROUTING_ROLLOUT_PERCENTAGE=100
 SALOMAO_V1_BASE_URL=https://salomao-v1-production.up.railway.app
 SALOMAO_V1_TIMEOUT_SECONDS=45
 SALOMAO_V1_AS_TEAM_AGENT=true
+SALOMAO_V1_MAX_ATTEMPTS=3
+SALOMAO_MIN_CONFIDENCE=0.65
+HEIMDALL_MIN_CONFIDENCE=0.65
 HUBSPOT_ACCESS_TOKEN=...
 HUBSPOT_APP_SECRET=...
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=...

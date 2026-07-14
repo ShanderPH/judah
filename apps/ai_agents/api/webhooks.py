@@ -26,7 +26,8 @@ from django.conf import settings
 from ninja import Router, Schema
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
-from apps.ai_agents.models import ConversationInstance, TokenTrackingLog
+from apps.ai_agents.models import AgentRun, ConversationInstance, TokenTrackingLog, ToolCallAuditLog
+from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.hubspot import (
     USE_MOCK_HUBSPOT,
     build_conversation_context_from_hubspot_context,
@@ -36,7 +37,7 @@ from apps.ai_agents.services.hubspot import (
     send_salomao_reply_to_hubspot_thread,
     update_hubspot_ticket_stage,
 )
-from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine, is_lifecycle_schema_ready
 from apps.ai_agents.services.protocol_lookup import handle_protocol_lookup_from_hubspot_context
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
@@ -208,6 +209,134 @@ async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse
 
 
 @sync_to_async
+def _record_hubspot_turn_audit(
+    *,
+    context: dict[str, Any],
+    ticket_id: str | None,
+    session_id: str,
+    agent_name: str,
+    output_structured: dict[str, Any],
+    reply_result: dict[str, Any],
+    active_stage_result: dict[str, Any],
+    final_stage_result: dict[str, Any],
+    conversation_context: Any | None = None,
+    triage_decision: Any | None = None,
+    handoff_reason: str | None = None,
+    tokens_used: int = 0,
+    latency_ms: int = 0,
+) -> None:
+    """Persist one agent run and every stateful HubSpot effect for the turn."""
+    if not is_lifecycle_schema_ready():
+        logger.warning("hubspot_turn_audit_schema_missing", ticket_id=ticket_id, session_id=session_id)
+        return
+    thread_ids = context.get("thread_ids") or []
+    instance = None
+    if thread_ids:
+        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
+    if instance is None and ticket_id:
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    if instance is None:
+        return
+
+    history = context.get("conversation_history") or []
+    latest_incoming = next(
+        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
+        {},
+    )
+    turn_source = str(latest_incoming.get("id") or latest_incoming.get("created_at") or session_id)
+    turn_key = hashlib.sha256(turn_source.encode("utf-8")).hexdigest()[:20]
+    engine = LifecycleEngine()
+    agent_run = engine.record_agent_run(
+        instance=instance,
+        agent_name=agent_name,
+        input_snapshot={
+            "session_id": session_id,
+            "ticket_id": ticket_id,
+            "thread_id": str(thread_ids[0]) if thread_ids else None,
+            "message_id": latest_incoming.get("id"),
+            "policy_version": (output_structured.get("triage_decision") or {}).get("policy_version"),
+        },
+        output_structured=output_structured,
+        tokens_used=tokens_used,
+        latency_ms=latency_ms,
+        status=AgentRun.Status.SUCCEEDED,
+    )
+
+    triage_payload = output_structured.get("triage_decision")
+    if isinstance(triage_payload, dict):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="HeimdallTriageAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            output_structured=triage_payload,
+            status=AgentRun.Status.SUCCEEDED,
+        )
+    elif any("heimdall: failed" in str(item) for item in output_structured.get("agent_trace") or []):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="HeimdallTriageAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            status=AgentRun.Status.FAILED,
+            error_message="Heimdall triage failed; Supervisor selected safe human handoff.",
+        )
+
+    trace = output_structured.get("agent_trace") or []
+    if any("salomao_chat: OK" in str(item) for item in trace):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="SalomaoChatAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            output_structured={
+                "message": output_structured.get("message"),
+                "confidence": output_structured.get("confidence"),
+                "model_name": output_structured.get("model_name"),
+            },
+            status=AgentRun.Status.SUCCEEDED,
+        )
+    elif any("salomao_chat: failed" in str(item) for item in trace):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="SalomaoChatAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            status=AgentRun.Status.FAILED,
+            error_message=str(output_structured.get("handoff_reason") or "Salomao adapter failed."),
+        )
+
+    effects = (
+        ("update_ticket_stage_active", active_stage_result, "updated"),
+        ("send_thread_reply", reply_result, "sent"),
+        ("update_ticket_stage_final", final_stage_result, "updated"),
+    )
+    for tool_name, effect_result, success_field in effects:
+        succeeded = bool(effect_result.get(success_field))
+        engine.record_tool_call(
+            instance=instance,
+            agent_run=agent_run,
+            tool_name=tool_name,
+            idempotency_key=f"{instance.pk}:{turn_key}:{tool_name}",
+            input_payload={"ticket_id": ticket_id, "session_id": session_id},
+            output_payload=effect_result,
+            status=ToolCallAuditLog.Status.SUCCEEDED if succeeded else ToolCallAuditLog.Status.FAILED,
+            external_object_type="hubspot_ticket" if "stage" in tool_name else "hubspot_thread",
+            external_object_id=str(ticket_id or (thread_ids[0] if thread_ids else "")),
+        )
+
+    if handoff_reason:
+        package = build_handoff_package(
+            instance=instance,
+            reason=handoff_reason,
+            conversation_context=conversation_context,
+            triage_decision=triage_decision,
+            ai_summary=str(output_structured.get("message") or "")[:1000],
+            missing_data=output_structured.get("missing_data") or [],
+        )
+        metadata = dict(instance.metadata or {})
+        metadata["handoff_package"] = package
+        instance.metadata = metadata
+        instance.save(update_fields=["metadata", "updated_at"])
+
+
+@sync_to_async
 def _advance_lifecycle_for_hubspot_context(
     context: dict[str, Any],
     ticket_id: str | None,
@@ -367,6 +496,18 @@ async def _run_supervisor_for_hubspot_context(
                 [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED],
                 reason=reply_result.get("reason") or "Judah could not send the protocol lookup reply.",
             )
+        await _record_hubspot_turn_audit(
+            context=context,
+            ticket_id=effective_ticket_id,
+            session_id=session_id,
+            agent_name="ProtocolLookupService",
+            output_structured={"message": protocol_reply, "outcome": "waiting_customer"},
+            reply_result=reply_result,
+            active_stage_result=active_stage_result,
+            final_stage_result=final_stage_result,
+            conversation_context=conversation_context,
+            handoff_reason=None if reply_result.get("sent") else reply_result.get("reason") or "reply_failed",
+        )
         logger.info(
             "hubspot_protocol_lookup_completed",
             ticket_id=ticket_id,
@@ -397,7 +538,8 @@ async def _run_supervisor_for_hubspot_context(
     reply_result = await send_salomao_reply_to_hubspot_thread(context, result.message)
     await _record_usage(ticket_id or context.get("ticket_id", ""), session_id, result)
 
-    if result.requires_human_handoff or not reply_result.get("sent"):
+    requires_handoff = result.requires_human_handoff or result.outcome in {"escalate_human", "failed"}
+    if requires_handoff or not reply_result.get("sent"):
         final_stage_result = await _move_hubspot_ticket(
             effective_ticket_id,
             str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", "")),
@@ -422,6 +564,26 @@ async def _run_supervisor_for_hubspot_context(
             reason="Supervisor sent an answer and is waiting for the customer.",
         )
 
+    await _record_hubspot_turn_audit(
+        context=context,
+        ticket_id=effective_ticket_id,
+        session_id=session_id,
+        agent_name="SalomaoSupervisorAgent",
+        output_structured=result.model_dump(mode="json"),
+        reply_result=reply_result,
+        active_stage_result=active_stage_result,
+        final_stage_result=final_stage_result,
+        conversation_context=conversation_context,
+        triage_decision=result.triage_decision,
+        handoff_reason=(
+            result.handoff_reason or reply_result.get("reason") or "Supervisor requested handoff."
+            if requires_handoff or not reply_result.get("sent")
+            else None
+        ),
+        tokens_used=result.tokens_used,
+        latency_ms=result.latency_ms,
+    )
+
     logger.info(
         "supervisor_hubspot_completed",
         ticket_id=ticket_id,
@@ -430,6 +592,7 @@ async def _run_supervisor_for_hubspot_context(
         reply_reason=reply_result.get("reason"),
         tokens_used=result.tokens_used,
         requires_human_handoff=result.requires_human_handoff,
+        outcome=result.outcome,
         active_stage_updated=active_stage_result.get("updated"),
         final_stage_updated=final_stage_result.get("updated"),
     )

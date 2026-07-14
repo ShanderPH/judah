@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.ai_agents.contracts import ConversationContext, TriageDecision
+from apps.ai_agents.contracts import ConversationContext, HandoffPackage, TriageDecision
 from apps.ai_agents.models import ConversationInstance
 
 
@@ -32,23 +32,24 @@ def build_handoff_package(
         ]
 
     triage_payload = triage_decision.model_dump(mode="json") if triage_decision is not None else None
-    return {
-        "conversation_instance_id": str(instance.pk),
-        "state": instance.state,
-        "hubspot_thread_id": instance.hubspot_thread_id,
-        "hubspot_ticket_id": instance.hubspot_ticket_id,
-        "hubspot_contact_id": instance.hubspot_contact_id,
-        "channel": instance.channel,
-        "assigned_agent_id": instance.assigned_agent_id,
-        "reason": reason,
-        "priority": triage_payload.get("prioridade") if triage_payload else None,
-        "tags": triage_payload.get("tags", []) if triage_payload else [],
-        "missing_data": missing_data or (triage_payload.get("dados_faltantes", []) if triage_payload else []),
-        "triage": triage_payload,
-        "ai_summary": ai_summary,
-        "recent_messages": recent_messages,
-        "recommended_queue": "support_n1",
-    }
+    package = HandoffPackage(
+        conversation_instance_id=str(instance.pk),
+        state=instance.state,
+        hubspot_thread_id=instance.hubspot_thread_id,
+        hubspot_ticket_id=instance.hubspot_ticket_id,
+        hubspot_contact_id=instance.hubspot_contact_id,
+        channel=instance.channel,
+        assigned_agent_id=instance.assigned_agent_id,
+        reason=reason,
+        priority=triage_payload.get("prioridade") if triage_payload else None,
+        tags=triage_payload.get("tags", []) if triage_payload else [],
+        missing_data=missing_data or (triage_payload.get("dados_faltantes", []) if triage_payload else []),
+        triage=triage_payload,
+        ai_summary=ai_summary,
+        recent_messages=recent_messages,
+        recommended_queue="support_n1",
+    )
+    return package.model_dump(mode="json")
 
 
 __all__ = ["build_handoff_package"]

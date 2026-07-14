@@ -3,7 +3,7 @@
     "type": "webhooks",
     "config": {
         "settings": {
-            "targetUrl": "https://judah-production.up.railway.app/api/v1/webhooks/hubspot/sandbox/",
+            "targetUrl": "https://judah-spi1.onrender.com/api/v1/webhooks/hubspot/sandbox/",
             "maxConcurrentRequests": 10
         },
         "subscriptions": {
