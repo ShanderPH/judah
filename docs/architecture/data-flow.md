@@ -113,16 +113,20 @@ HubSpot ticket-change
   │ 2. Persiste WebhookEvent
   ▼
 apps/webhooks/handlers/hubspot_handler.py
-  │ Quando hs_pipeline_stage=HUBSPOT_AI_TRIAGE_STAGE_ID,
-  │ AI_ROUTING_ENABLED=true e SALOMAO_V1_BASE_URL está configurada
+  │ Quando hs_pipeline_stage=HUBSPOT_N1_NEW_STAGE_ID ou chega
+  │ hs_last_message_from_visitor, com a integração de IA habilitada
   ▼
 run_supervisor_pipeline_task.delay  [apps/ai_agents/tasks.py]
   │ 1. Redis lock por ticket
   ▼
 _run_supervisor_pipeline
   │ 1. hydrate_ticket_context (HubSpot API)
-  │ 2. Instancia supervisor
-  │ 3. Team.run(message)
+  │ 2. Confirma HUBSPOT_AI_TRIAGE_PIPELINE_ID
+  │ 3. Move para HUBSPOT_AI_TRIAGE_STAGE_ID
+  │ 4. Instancia supervisor e executa Team.run(message)
+  │ 5. Publica a resposta na thread HubSpot
+  │ 6. Move para HUBSPOT_AI_WAITING_STAGE_ID ou
+  │    HUBSPOT_HUMAN_ESCALATION_STAGE_ID
   ▼
 TokenTrackingLog
 ```

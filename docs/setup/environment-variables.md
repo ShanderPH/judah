@@ -47,7 +47,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `HUBSPOT_PORTAL_ID` | `apps/ai_agents/mcp_servers/hubspot_server.py` | Portal ID para construir URLs de ticket. |
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
-| `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
+| `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID preferencial para postar respostas nas threads. Opcional: quando vazio, Judah usa o ator destinatário da mensagem recebida. |
 | `HUBSPOT_AI_TRIAGE_PIPELINE_ID` | `apps/ai_agents/services/lifecycle.py` | Pipeline dedicada à Triagem IA. |
 | `HUBSPOT_N1_NEW_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Novo Atendimento da Triagem IA. |
 | `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Exibindo Menu/Em atendimento da Triagem IA. |

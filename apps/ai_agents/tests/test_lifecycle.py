@@ -67,6 +67,33 @@ def test_lifecycle_records_and_deduplicates_conversation_events() -> None:
 
 
 @pytest.mark.django_db
+def test_last_visitor_message_resumes_waiting_ticket_conversation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:ticket-123",
+        hubspot_ticket_id="ticket-123",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        object_id="ticket-123",
+        id="db-customer-message",
+        payload={
+            "eventId": "evt-customer-message",
+            "objectId": "ticket-123",
+            "propertyName": "hs_last_message_from_visitor",
+            "propertyValue": "1783022765000",
+        },
+    )
+
+    result = record_lifecycle_for_webhook_event(event)
+
+    instance.refresh_from_db()
+    assert result.decision.route == "AI_TRIAGE"
+    assert result.event.event_type == "conversation_message_received"
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+
+
+@pytest.mark.django_db
 def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> None:
     first_event = _conversation_event(eventId="")
     second_event = _conversation_event(eventId="")
@@ -182,6 +209,29 @@ def test_lifecycle_rejects_invalid_transition() -> None:
         )
 
     assert ConversationStateTransition.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_waiting_customer_conversation_can_resume_ai_triage() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:waiting-customer",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+    engine = LifecycleEngine()
+
+    engine.transition(
+        instance,
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        reason="AI answered and is waiting for the customer.",
+    )
+    engine.transition(
+        instance,
+        ConversationInstance.State.CONTEXT_HYDRATING,
+        reason="Customer sent another message.",
+    )
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
 
 
 @pytest.mark.django_db

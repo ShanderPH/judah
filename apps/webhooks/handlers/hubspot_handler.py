@@ -19,6 +19,7 @@ _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
+_PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
 _PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
 
 
@@ -73,6 +74,9 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
 
         elif property_name == _PROP_OWNER_ID:
             _handle_ticket_owner_change(object_id, property_value, payload)
+
+        elif property_name == _PROP_LAST_VISITOR_MESSAGE:
+            _dispatch_salomao_ticket_pipeline(object_id, trigger="customer_message")
 
         else:
             logger.info(
@@ -136,6 +140,7 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict 
     new_stage = str(new_stage or "")
     support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
     support_closed_stage = str(getattr(settings, "HUBSPOT_SUPPORT_CLOSED_STAGE_ID", ""))
+    ai_new_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", ""))
     ai_triage_stage = str(getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", ""))
     ai_closed_stage = str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", ""))
 
@@ -146,8 +151,12 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict 
         _handle_ticket_entered_novo(object_id, str(entered_at_ms) if entered_at_ms else None)
         return
 
+    if new_stage == ai_new_stage:
+        _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage")
+        return
+
     if new_stage == ai_triage_stage:
-        _handle_ticket_entered_ai_triage(object_id, new_stage)
+        logger.info("hubspot_ticket_ai_triage_stage_recorded", ticket_id=object_id)
         return
 
     if new_stage == support_closed_stage:
@@ -170,25 +179,25 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict 
     )
 
 
-def _handle_ticket_entered_ai_triage(hubspot_ticket_id: str, stage_id: str) -> None:
-    """Dispatch the ticket Supervisor when it enters the configured AI stage."""
+def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -> None:
+    """Dispatch the ticket Supervisor for a new AI ticket or customer reply."""
     if not getattr(settings, "AI_ROUTING_ENABLED", False):
-        logger.info("hubspot_ticket_ai_routing_disabled", ticket_id=hubspot_ticket_id, stage_id=stage_id)
+        logger.info("hubspot_ticket_ai_routing_disabled", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
     if not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
-        logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, stage_id=stage_id)
+        logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
     from apps.ai_agents.tasks import run_supervisor_pipeline_task
     from apps.ai_agents.utils.business_rules import is_business_hours, is_quinta_fire, off_hours_reason
 
     is_off_hours = bool(off_hours_reason() or is_quinta_fire() or not is_business_hours())
-    run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours)
+    run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
     logger.info(
         "hubspot_ticket_supervisor_dispatched",
         ticket_id=hubspot_ticket_id,
-        stage_id=stage_id,
+        trigger=trigger,
         is_off_hours=is_off_hours,
     )
 

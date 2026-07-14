@@ -104,15 +104,15 @@ class TestHandleHubspotEvent:
     @override_settings(
         AI_ROUTING_ENABLED=True,
         SALOMAO_V1_BASE_URL="https://salomao.local",
-        HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
     )
-    def test_ai_triage_stage_dispatches_salomao_supervisor(self) -> None:
+    def test_ai_new_stage_dispatches_salomao_supervisor(self) -> None:
         event = _event(
             "ticket.propertyChange",
             {
                 "objectId": "ticket-ai",
                 "propertyName": "hs_pipeline_stage",
-                "propertyValue": "ai-triage",
+                "propertyValue": "ai-new",
             },
         )
 
@@ -124,22 +124,54 @@ class TestHandleHubspotEvent:
         ):
             handle_hubspot_event(event)
 
-        mock_delay.assert_called_once_with("ticket-ai", False)
+        mock_delay.assert_called_once_with("ticket-ai", False, True)
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
+    )
+    def test_customer_message_dispatches_salomao_supervisor(self) -> None:
+        event = _event(
+            "ticket.propertyChange",
+            {
+                "objectId": "ticket-ai",
+                "propertyName": "hs_last_message_from_visitor",
+                "propertyValue": "Preciso de ajuda",
+            },
+        )
+
+        with (
+            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
+            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
+            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+        ):
+            handle_hubspot_event(event)
+
+        mock_delay.assert_called_once_with("ticket-ai", False, True)
+
+    @override_settings(HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage")
+    def test_active_ai_stage_does_not_dispatch_duplicate_turn(self) -> None:
+        with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
+            _handle_pipeline_stage_change("ticket-ai", "ai-triage")
+
+        mock_delay.assert_not_called()
 
     @override_settings(
         AI_ROUTING_ENABLED=False,
         SALOMAO_V1_BASE_URL="https://salomao.local",
-        HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
     )
-    def test_ai_triage_stage_respects_routing_flag(self) -> None:
+    def test_ai_new_stage_respects_routing_flag(self) -> None:
         with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
-            _handle_pipeline_stage_change("ticket-ai-disabled", "ai-triage")
+            _handle_pipeline_stage_change("ticket-ai-disabled", "ai-new")
 
         mock_delay.assert_not_called()
 
     @override_settings(
         HUBSPOT_SUPPORT_NEW_STAGE_ID="support-new",
         HUBSPOT_SUPPORT_CLOSED_STAGE_ID="support-closed",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
         HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
         HUBSPOT_CLOSED_STAGE_ID="ai-closed",
     )

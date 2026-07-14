@@ -38,6 +38,7 @@ _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
+_PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
 _REQUIRED_LIFECYCLE_TABLES = {
     "conversation_instances",
     "conversation_events",
@@ -174,8 +175,15 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.AI_SERVICE_RUNNING: {
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.FAILED_RETRYABLE,
+    },
+    ConversationInstance.State.WAITING_FOR_CUSTOMER: {
+        ConversationInstance.State.CONTEXT_HYDRATING,
+        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.CLOSED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
@@ -291,6 +299,9 @@ class EventNormalizer:
                 pipeline_stage_id = _STAGE_FECHADO_ID
             elif property_name == _PROP_OWNER_ID:
                 normalized_type = "owner_changed"
+            elif property_name == _PROP_LAST_VISITOR_MESSAGE:
+                normalized_type = "conversation_message_received"
+                direction = "INCOMING"
             elif property_name == _PROP_PIPELINE_STAGE:
                 pipeline_stage_id = property_value or None
                 normalized_type = "ticket_closed" if property_value == _STAGE_FECHADO_ID else "ticket_stage_changed"
