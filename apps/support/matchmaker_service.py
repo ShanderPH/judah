@@ -444,7 +444,7 @@ def enqueue_new_ticket(
     )
 
     if not created:
-        if new_conv.queue_status == NewConversation.QueueStatus.FAILED:
+        if new_conv.can_reactivate:
             new_conv.queue_status = NewConversation.QueueStatus.PENDING
             new_conv.assignment_attempts = 0
             new_conv.last_assignment_attempt_at = None

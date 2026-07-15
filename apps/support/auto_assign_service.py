@@ -559,7 +559,7 @@ def sync_novo_stage_tickets() -> dict:
         # Skip tickets already in our queue (pending)
         if ticket_id in existing_pending:
             conversation = existing_pending[ticket_id]
-            if conversation.queue_status == NewConversation.QueueStatus.FAILED:
+            if conversation.can_reactivate:
                 conversation.queue_status = NewConversation.QueueStatus.PENDING
                 conversation.assignment_attempts = 0
                 conversation.last_assignment_attempt_at = None

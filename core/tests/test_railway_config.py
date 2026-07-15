@@ -11,5 +11,5 @@ def test_api_runs_migrations_as_pre_deploy_command() -> None:
         config = tomllib.load(config_file)
 
     deploy_config = config["deploy"]
-    assert deploy_config["preDeployCommand"] == "python manage.py migrate --noinput"
+    assert deploy_config["preDeployCommand"] == "python manage.py railway_predeploy"
     assert "releaseCommand" not in deploy_config

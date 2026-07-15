@@ -5,13 +5,15 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Runs once per new deploy, before the new instance accepts traffic.
-# Migrations run here so the DB schema is ready when the app starts.
+# Runs once per new deploy, before the new instance accepts traffic. The
+# command migrates first and suppresses the pre-existing assignment backlog
+# only when migrations were pending, preventing delayed bulk assignment after
+# recovery. Deploys without schema changes preserve the active queue.
 # collectstatic is intentionally NOT here — Railway runs preDeployCommand in
 # an ephemeral container whose filesystem is discarded before the runtime
 # container boots, so static files written here never reach /app/staticfiles
 # in the live image. collectstatic now runs at Docker build time instead.
-preDeployCommand = "python manage.py migrate --noinput"
+preDeployCommand = "python manage.py railway_predeploy"
 
 # Railway pings this path to determine if the container is healthy.
 # Must return 2xx for the deploy to be marked successful. The plain `/health/`

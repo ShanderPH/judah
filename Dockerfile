@@ -59,7 +59,8 @@ EXPOSE 8000
 
 # Use shell form so ${PORT} is expanded at runtime by the shell.
 # Railway injects PORT; falls back to 8000 for local Docker runs.
-# collectstatic runs at build time; migrate runs as Railway preDeployCommand.
+# collectstatic runs at build time; railway_predeploy handles migrations and
+# assignment-backlog suppression before the runtime container starts.
 CMD gunicorn core.asgi:application \
     -k uvicorn.workers.UvicornWorker \
     --bind "0.0.0.0:${PORT}" \
