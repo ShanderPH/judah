@@ -230,6 +230,11 @@ class NewConversation(models.Model):
         return f"NewConversation {self.hubspot_ticket_id}"
 
     @property
+    def can_reactivate(self) -> bool:
+        """Return whether a fresh HubSpot event may restore this queue row."""
+        return self.queue_status == self.QueueStatus.FAILED and self.failure_code == "hubspot_ticket_not_found"
+
+    @property
     def queue_position(self) -> int:
         """Calculate the current position in the queue (1-indexed).
 

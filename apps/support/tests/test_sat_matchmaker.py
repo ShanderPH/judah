@@ -445,6 +445,27 @@ class TestEnqueueNewTicket:
         assert result.failure_code == ""
         assert result.failure_message == ""
 
+    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    def test_does_not_reactivate_predeploy_suppressed_ticket(self, mock_client_fn):
+        conversation = _make_pending_ticket("T001")
+        conversation.queue_status = NewConversation.QueueStatus.FAILED
+        conversation.failure_code = "predeploy_queue_cleared"
+        conversation.save(update_fields=["queue_status", "failure_code", "updated_at"])
+        mock_client_fn.return_value.get_ticket_details.return_value = {
+            "id": "T001",
+            "pipeline": "636459134",
+            "owner_id": "",
+        }
+
+        from apps.support.matchmaker_service import enqueue_new_ticket
+
+        result = enqueue_new_ticket("T001")
+
+        assert result is not None
+        result.refresh_from_db()
+        assert result.queue_status == NewConversation.QueueStatus.FAILED
+        assert result.failure_code == "predeploy_queue_cleared"
+
 
 # ---------------------------------------------------------------------------
 # Webhook Handler Tests (async dispatch)
