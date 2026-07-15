@@ -7,11 +7,11 @@ dockerfilePath = "Dockerfile"
 [deploy]
 # Runs once per new deploy, before the new instance accepts traffic.
 # Migrations run here so the DB schema is ready when the app starts.
-# collectstatic is intentionally NOT here — Railway runs releaseCommand in
+# collectstatic is intentionally NOT here — Railway runs preDeployCommand in
 # an ephemeral container whose filesystem is discarded before the runtime
 # container boots, so static files written here never reach /app/staticfiles
 # in the live image. collectstatic now runs at Docker build time instead.
-releaseCommand = "python manage.py migrate --noinput"
+preDeployCommand = "python manage.py migrate --noinput"
 
 # Railway pings this path to determine if the container is healthy.
 # Must return 2xx for the deploy to be marked successful. The plain `/health/`
