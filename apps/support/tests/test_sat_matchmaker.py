@@ -235,7 +235,7 @@ class TestMatchmakerAssignNext:
 
         result = matchmaker_assign_next()
 
-        assert result is True
+        assert result.value == "assigned"
         assert not NewConversation.objects.filter(hubspot_ticket_id="T001").exists()
         assert NewConversation.objects.filter(hubspot_ticket_id="T002").exists()
 
@@ -252,7 +252,7 @@ class TestMatchmakerAssignNext:
         from apps.support.matchmaker_service import matchmaker_assign_next
 
         result = matchmaker_assign_next()
-        assert result is False
+        assert result.value == "queue_empty"
 
     def test_returns_false_when_no_agents(self):
         _make_pending_ticket("T001")
@@ -261,7 +261,7 @@ class TestMatchmakerAssignNext:
         from apps.support.matchmaker_service import matchmaker_assign_next
 
         result = matchmaker_assign_next()
-        assert result is False
+        assert result.value == "no_agent"
 
         # Ticket should be marked as queued
         conv = NewConversation.objects.get(hubspot_ticket_id="T001")
@@ -297,6 +297,66 @@ class TestMatchmakerDrainQueue:
         result = matchmaker_drain_queue()
         assert result["assigned"] == 0
         assert result["total_pending"] == 0
+
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
+    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    def test_quarantines_stale_head_and_assigns_next_ticket(self, mock_client_fn, mock_reconcile):
+        from apps.integrations.hubspot.exceptions import HubSpotResourceNotFoundError
+        from apps.support.matchmaker_service import matchmaker_drain_queue
+
+        _make_agent("Agent1", 100, chats=0, max_chats=5)
+        _make_pending_ticket("STALE", minutes_ago=10)
+        _make_pending_ticket("VALID", minutes_ago=5)
+        mock_reconcile.return_value = 0
+        mock_client = MagicMock()
+        mock_client.assign_ticket_owner.side_effect = [
+            HubSpotResourceNotFoundError("ticket", "STALE"),
+            {"id": "VALID", "owner_id": 100},
+        ]
+        mock_client_fn.return_value = mock_client
+
+        result = matchmaker_drain_queue()
+
+        assert result == {
+            "assigned": 1,
+            "remaining": 0,
+            "total_pending": 2,
+            "quarantined": 1,
+            "deferred": 0,
+        }
+        stale = NewConversation.objects.get(hubspot_ticket_id="STALE")
+        assert stale.queue_status == NewConversation.QueueStatus.FAILED
+        assert stale.failure_code == "hubspot_ticket_not_found"
+        assert stale.assignment_attempts == 1
+        assert not NewConversation.objects.filter(hubspot_ticket_id="VALID").exists()
+
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
+    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    def test_defers_transient_provider_failure_with_backoff(self, mock_client_fn, mock_reconcile):
+        from apps.integrations.hubspot.exceptions import HubSpotAPIError
+        from apps.support.matchmaker_service import matchmaker_drain_queue
+
+        _make_agent("Agent1", 100, chats=0, max_chats=5)
+        _make_pending_ticket("RETRY", minutes_ago=10)
+        mock_reconcile.return_value = 0
+        mock_client = MagicMock()
+        mock_client.assign_ticket_owner.side_effect = HubSpotAPIError(
+            "temporary outage",
+            external_status=503,
+            retryable=True,
+        )
+        mock_client_fn.return_value = mock_client
+
+        result = matchmaker_drain_queue()
+
+        assert result["assigned"] == 0
+        assert result["deferred"] == 1
+        retry = NewConversation.objects.get(hubspot_ticket_id="RETRY")
+        assert retry.queue_status == NewConversation.QueueStatus.QUEUED
+        assert retry.failure_code == "hubspot_http_503"
+        assert retry.assignment_attempts == 1
+        assert retry.next_assignment_attempt_at is not None
+        assert retry.next_assignment_attempt_at > timezone.now()
 
 
 @pytest.mark.django_db
@@ -357,6 +417,33 @@ class TestEnqueueNewTicket:
         enqueue_new_ticket("T001")  # Second call should not duplicate
 
         assert NewConversation.objects.count() == 1
+
+    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    def test_reactivates_quarantined_ticket_when_hubspot_sends_it_again(self, mock_client_fn):
+        conversation = _make_pending_ticket("T001")
+        conversation.queue_status = NewConversation.QueueStatus.FAILED
+        conversation.assignment_attempts = 3
+        conversation.next_assignment_attempt_at = timezone.now()
+        conversation.failure_code = "hubspot_ticket_not_found"
+        conversation.failure_message = "stale"
+        conversation.save()
+        mock_client_fn.return_value.get_ticket_details.return_value = {
+            "id": "T001",
+            "pipeline": "636459134",
+            "owner_id": "",
+        }
+
+        from apps.support.matchmaker_service import enqueue_new_ticket
+
+        result = enqueue_new_ticket("T001")
+
+        assert result is not None
+        result.refresh_from_db()
+        assert result.queue_status == NewConversation.QueueStatus.PENDING
+        assert result.assignment_attempts == 0
+        assert result.next_assignment_attempt_at is None
+        assert result.failure_code == ""
+        assert result.failure_message == ""
 
 
 # ---------------------------------------------------------------------------

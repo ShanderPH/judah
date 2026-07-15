@@ -442,6 +442,7 @@ class LifecycleEngine:
                     decision.target_state,
                     reason=decision.reason,
                     source_event_id=event.source_event_id,
+                    allow_terminal_reopen=event.event_type == "ticket_entered_n1",
                 )
             else:
                 lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE
@@ -475,6 +476,8 @@ class LifecycleEngine:
         instance.last_activity_at = now
         if to_state == ConversationInstance.State.CLOSED and instance.closed_at is None:
             instance.closed_at = now
+        elif allow_terminal_reopen and to_state not in TERMINAL_STATES:
+            instance.closed_at = None
         instance.save(update_fields=["state", "state_version", "last_activity_at", "closed_at", "updated_at"])
         ConversationStateTransition.objects.create(
             instance=instance,
@@ -633,7 +636,9 @@ class LifecycleEngine:
         instance.save(update_fields=list(dict.fromkeys(update_fields)))
 
     def _validate_transition(self, from_state: str, to_state: str, *, allow_terminal_reopen: bool = False) -> None:
-        if from_state in TERMINAL_STATES and not allow_terminal_reopen:
+        if from_state in TERMINAL_STATES:
+            if allow_terminal_reopen:
+                return
             raise InvalidStateTransitionError(f"Cannot transition terminal state {from_state} to {to_state}.")
         if to_state in {ConversationInstance.State.CLOSED, ConversationInstance.State.RESOLVED_BY_HUMAN}:
             return

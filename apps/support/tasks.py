@@ -111,13 +111,15 @@ def task_matchmaker_assign_single(
         if new_conv is None:
             return False
 
-        result = matchmaker_assign_next()
+        outcome = matchmaker_assign_next()
+        assigned = outcome.value == "assigned"
         logger.info(
             "task_matchmaker_assign_single_done",
             ticket_id=hubspot_ticket_id,
-            assigned=result,
+            assigned=assigned,
+            outcome=outcome.value,
         )
-        return result
+        return assigned
     except Exception as exc:
         logger.warning(
             "task_matchmaker_assign_single_retry",

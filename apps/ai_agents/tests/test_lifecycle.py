@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from django.test import override_settings
+from django.utils import timezone
 
 from apps.ai_agents.models import ConversationEvent, ConversationInstance, ConversationStateTransition
 from apps.ai_agents.services.lifecycle import (
@@ -206,3 +207,40 @@ def test_process_webhook_event_records_lifecycle_before_hubspot_handler() -> Non
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
     assert instance.events.count() == 1
     assert instance.state_transitions.count() == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "terminal_state",
+    [ConversationInstance.State.IGNORED, ConversationInstance.State.CLOSED],
+)
+def test_ticket_entered_n1_reopens_terminal_lifecycle(terminal_state: str) -> None:
+    closed_at = timezone.now() if terminal_state == ConversationInstance.State.CLOSED else None
+    instance = ConversationInstance.objects.create(
+        idempotency_key=f"conversation:ticket:reopened-{terminal_state}",
+        hubspot_ticket_id=f"reopened-{terminal_state}",
+        state=terminal_state,
+        closed_at=closed_at,
+    )
+    event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": f"evt-reopened-{terminal_state}",
+            "objectId": instance.hubspot_ticket_id,
+            "propertyName": "hs_v2_date_entered_939275049",
+            "propertyValue": "1783022765000",
+        },
+        object_id=instance.hubspot_ticket_id,
+        id=f"db-reopened-{terminal_state}",
+    )
+
+    result = record_lifecycle_for_webhook_event(event)
+
+    result.instance.refresh_from_db()
+    assert result.instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert result.instance.closed_at is None
+    assert ConversationStateTransition.objects.filter(
+        instance=instance,
+        from_state=terminal_state,
+        to_state=ConversationInstance.State.QUEUE_PENDING,
+    ).exists()
