@@ -312,7 +312,7 @@ class TestMatchmakerRetryReconciliation:
 
         result = matchmaker_assign_next()
 
-        assert result is True
+        assert result.value == "assigned"
 
         # sat_reconcile_agent_load must have been called at least twice —
         # once for first_agent (rejected) and once for second_agent (accepted).
@@ -344,7 +344,7 @@ class TestMatchmakerRetryReconciliation:
 
         result = matchmaker_assign_next()
 
-        assert result is False
+        assert result.value == "no_agent"
         pending.refresh_from_db()
         assert pending.queue_status == "queued"
 

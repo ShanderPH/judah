@@ -755,7 +755,9 @@ async def send_salomao_reply_to_hubspot_thread(
     thread_id = latest.get("thread_id")
     channel_id = latest.get("channel_id")
     channel_account_id = latest.get("channel_account_id")
-    configured_sender_actor_id = str(getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or "").strip()
+    configured_sender_actor_id = str(
+        os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID") or getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or ""
+    ).strip()
     incoming_recipients = latest.get("recipients") or []
     fallback_sender_actor_id = next(
         (str(recipient.get("actorId")) for recipient in incoming_recipients if recipient.get("actorId")),

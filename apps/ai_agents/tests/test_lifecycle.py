@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from django.test import override_settings
+from django.utils import timezone
 
 from apps.ai_agents.models import ConversationEvent, ConversationInstance, ConversationStateTransition
 from apps.ai_agents.services.lifecycle import (
@@ -67,34 +68,7 @@ def test_lifecycle_records_and_deduplicates_conversation_events() -> None:
 
 
 @pytest.mark.django_db
-def test_last_visitor_message_resumes_waiting_ticket_conversation() -> None:
-    instance = ConversationInstance.objects.create(
-        idempotency_key="conversation:ticket:ticket-123",
-        hubspot_ticket_id="ticket-123",
-        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
-    )
-    event = SimpleNamespace(
-        event_type="ticket.propertyChange",
-        object_id="ticket-123",
-        id="db-customer-message",
-        payload={
-            "eventId": "evt-customer-message",
-            "objectId": "ticket-123",
-            "propertyName": "hs_last_message_from_visitor",
-            "propertyValue": "1783022765000",
-        },
-    )
-
-    result = record_lifecycle_for_webhook_event(event)
-
-    instance.refresh_from_db()
-    assert result.decision.route == "AI_TRIAGE"
-    assert result.event.event_type == "conversation_message_received"
-    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
-
-
-@pytest.mark.django_db
-def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> None:
+def test_lifecycle_uses_message_id_when_provider_event_id_is_missing() -> None:
     first_event = _conversation_event(eventId="")
     second_event = _conversation_event(eventId="")
     second_event.id = "db-2"
@@ -103,9 +77,61 @@ def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> No
     second = record_lifecycle_for_webhook_event(second_event)
 
     assert first.event_created is True
-    assert second.event_created is True
+    assert second.event_created is False
     assert ConversationInstance.objects.count() == 1
-    assert ConversationEvent.objects.count() == 2
+    assert ConversationEvent.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_outgoing_event_is_logged_without_terminalizing_active_conversation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:outgoing-preserves-state",
+        hubspot_thread_id="outgoing-preserves-state",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-outgoing",
+        event_type="conversation_message_received",
+        idempotency_key="hubspot:conversation.newMessage:evt-outgoing",
+        payload={"direction": "OUTGOING"},
+        hubspot_thread_id="outgoing-preserves-state",
+        channel="chat",
+        direction="OUTGOING",
+        message_id="outgoing-message",
+    )
+
+    result = LifecycleEngine().record_normalized_event(event)
+
+    instance.refresh_from_db()
+    assert result.event_created is True
+    assert result.decision.route == "IGNORE"
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+
+
+@pytest.mark.django_db
+def test_outgoing_event_starts_assigned_human_work() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:human-started",
+        hubspot_thread_id="human-started",
+        state=ConversationInstance.State.HUMAN_ASSIGNED,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-human-outgoing",
+        event_type="conversation_message_received",
+        idempotency_key="hubspot:conversation.newMessage:evt-human-outgoing",
+        payload={"direction": "OUTGOING"},
+        hubspot_thread_id="human-started",
+        channel="chat",
+        direction="OUTGOING",
+        message_id="human-outgoing-message",
+    )
+
+    LifecycleEngine().record_normalized_event(event)
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.HUMAN_IN_PROGRESS
 
 
 @pytest.mark.django_db
@@ -212,56 +238,6 @@ def test_lifecycle_rejects_invalid_transition() -> None:
 
 
 @pytest.mark.django_db
-def test_unrelated_ticket_change_does_not_ignore_active_conversation() -> None:
-    instance = ConversationInstance.objects.create(
-        idempotency_key="conversation:ticket:active-1",
-        hubspot_ticket_id="active-1",
-        state=ConversationInstance.State.AI_SERVICE_RUNNING,
-    )
-    event = SimpleNamespace(
-        id="event-unrelated",
-        event_type="ticket.propertyChange",
-        object_id="active-1",
-        payload={
-            "eventId": "event-unrelated",
-            "subscriptionType": "ticket.propertyChange",
-            "objectId": "active-1",
-            "propertyName": "subject",
-            "propertyValue": "Novo assunto",
-        },
-    )
-
-    result = LifecycleEngine().record_normalized_event(EventNormalizer().normalize_webhook_event(event))
-
-    instance.refresh_from_db()
-    assert result.decision.route == "IGNORE"
-    assert instance.state == ConversationInstance.State.AI_SERVICE_RUNNING
-
-
-@pytest.mark.django_db
-def test_waiting_customer_conversation_can_resume_ai_triage() -> None:
-    instance = ConversationInstance.objects.create(
-        idempotency_key="conversation:waiting-customer",
-        state=ConversationInstance.State.AI_SERVICE_RUNNING,
-    )
-    engine = LifecycleEngine()
-
-    engine.transition(
-        instance,
-        ConversationInstance.State.WAITING_FOR_CUSTOMER,
-        reason="AI answered and is waiting for the customer.",
-    )
-    engine.transition(
-        instance,
-        ConversationInstance.State.CONTEXT_HYDRATING,
-        reason="Customer sent another message.",
-    )
-
-    instance.refresh_from_db()
-    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
-
-
-@pytest.mark.django_db
 def test_process_webhook_event_records_lifecycle_before_hubspot_handler() -> None:
     event = WebhookEvent.objects.create(
         event_type="ticket.propertyChange",
@@ -283,3 +259,40 @@ def test_process_webhook_event_records_lifecycle_before_hubspot_handler() -> Non
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
     assert instance.events.count() == 1
     assert instance.state_transitions.count() == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "terminal_state",
+    [ConversationInstance.State.IGNORED, ConversationInstance.State.CLOSED],
+)
+def test_ticket_entered_n1_reopens_terminal_lifecycle(terminal_state: str) -> None:
+    closed_at = timezone.now() if terminal_state == ConversationInstance.State.CLOSED else None
+    instance = ConversationInstance.objects.create(
+        idempotency_key=f"conversation:ticket:reopened-{terminal_state}",
+        hubspot_ticket_id=f"reopened-{terminal_state}",
+        state=terminal_state,
+        closed_at=closed_at,
+    )
+    event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": f"evt-reopened-{terminal_state}",
+            "objectId": instance.hubspot_ticket_id,
+            "propertyName": "hs_v2_date_entered_939275049",
+            "propertyValue": "1783022765000",
+        },
+        object_id=instance.hubspot_ticket_id,
+        id=f"db-reopened-{terminal_state}",
+    )
+
+    result = record_lifecycle_for_webhook_event(event)
+
+    result.instance.refresh_from_db()
+    assert result.instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert result.instance.closed_at is None
+    assert ConversationStateTransition.objects.filter(
+        instance=instance,
+        from_state=terminal_state,
+        to_state=ConversationInstance.State.QUEUE_PENDING,
+    ).exists()

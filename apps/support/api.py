@@ -85,7 +85,7 @@ def list_pending_conversations(request) -> list[NewConversation]:
     """Return tickets currently waiting in the assignment queue."""
     from apps.support.models import NewConversation
 
-    return NewConversation.objects.order_by("entered_queue_at")
+    return NewConversation.objects.exclude(queue_status=NewConversation.QueueStatus.FAILED).order_by("entered_queue_at")
 
 
 @router.get(
@@ -163,7 +163,9 @@ def get_queue_health(request) -> dict:
     absent = [a for a in all_agents if (a.status_enum or "offline") in ("away", "offline", "busy")]
     online_count = sum(1 for a in all_agents if a.status_enum == "online")
 
-    pending_qs = NewConversation.objects.order_by("entered_queue_at")
+    pending_qs = NewConversation.objects.exclude(queue_status=NewConversation.QueueStatus.FAILED).order_by(
+        "entered_queue_at"
+    )
     now = timezone.now()
     pending_tickets = [
         {
@@ -377,15 +379,10 @@ def create_special_schedule(request, payload: CreateSpecialScheduleRequest) -> t
     Use ``schedule_type: "custom"`` with ``start_hour`` and ``end_hour``
     for modified hours.
     """
-    from datetime import date as date_type
-
     from apps.support.models import SpecialSchedule
 
-    parts = payload.date.split("-")
-    target_date = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
-
     schedule, _ = SpecialSchedule.objects.update_or_create(
-        date=target_date,
+        date=payload.date,
         defaults={
             "schedule_type": payload.schedule_type,
             "start_hour": payload.start_hour,

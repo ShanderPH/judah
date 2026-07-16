@@ -9,6 +9,8 @@ from pathlib import Path
 import structlog
 from decouple import Csv, config
 
+from common.logging import add_service_context, scrub_pii
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = config("DJANGO_SECRET_KEY")
@@ -167,8 +169,11 @@ CELERY_TASK_TIME_LIMIT = 600
 # The queue is declared here but ``run_supervisor_pipeline_task`` only
 # dispatches when ``AI_ROUTING_ENABLED`` is true.
 CELERY_TASK_ROUTES = {
+    "webhooks.process_webhook_event_task": {"queue": "celery"},
     "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
     "ai_agents.run_salomao_v1_thread_pipeline_task": {"queue": "ai_tasks"},
+    "ai_agents.request_human_handoff_task": {"queue": "ai_tasks"},
+    "ai_agents.retry_failed_lifecycle_instances_task": {"queue": "ai_tasks"},
     "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }
 
@@ -183,10 +188,6 @@ AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
-    "ai-lifecycle-watchdog": {
-        "task": "ai_agents.run_lifecycle_watchdog_task",
-        "schedule": 60,
-    },
     # Sync HubSpot N1 team members daily at 06:00 AM (São Paulo)
     "sync-hubspot-team-members-daily": {
         "task": "support.task_sync_hubspot_team_members",
@@ -226,6 +227,14 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-agent-counts-hourly": {
         "task": "support.task_reconcile_agent_counts",
         "schedule": crontab(minute=30),  # :30 of every hour
+    },
+    "ai-lifecycle-watchdog": {
+        "task": "ai_agents.run_lifecycle_watchdog_task",
+        "schedule": 60,
+    },
+    "ai-lifecycle-retry-dispatch": {
+        "task": "ai_agents.retry_failed_lifecycle_instances_task",
+        "schedule": 60,
     },
 }
 
@@ -386,6 +395,8 @@ if SENTRY_DSN:
 _STRUCTLOG_PRE_CHAIN: list = [
     # Merge any context variables bound via structlog.contextvars.bind_contextvars()
     structlog.contextvars.merge_contextvars,
+    add_service_context,
+    scrub_pii,
     # Add log level name ("info", "error", …) to the event dict
     structlog.stdlib.add_log_level,
     # Add the logger name for easy filtering

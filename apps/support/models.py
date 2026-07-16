@@ -199,6 +199,7 @@ class NewConversation(models.Model):
     class QueueStatus(models.TextChoices):
         PENDING = "pending", "Pending Assignment"
         QUEUED = "queued", "In Queue (No Agent Available)"
+        FAILED = "failed", "Quarantined After Permanent Failure"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     hubspot_ticket_id = models.TextField(unique=True, db_index=True)
@@ -215,6 +216,9 @@ class NewConversation(models.Model):
     )
     assignment_attempts = models.IntegerField(default=0)
     last_assignment_attempt_at = models.DateTimeField(null=True, blank=True)
+    next_assignment_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    failure_code = models.CharField(max_length=50, blank=True, default="")
+    failure_message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -226,12 +230,22 @@ class NewConversation(models.Model):
         return f"NewConversation {self.hubspot_ticket_id}"
 
     @property
+    def can_reactivate(self) -> bool:
+        """Return whether a fresh HubSpot event may restore this queue row."""
+        return self.queue_status == self.QueueStatus.FAILED and self.failure_code == "hubspot_ticket_not_found"
+
+    @property
     def queue_position(self) -> int:
         """Calculate the current position in the queue (1-indexed).
 
         Position is based on ``entered_queue_at`` ordering (oldest = position 1).
         """
-        return NewConversation.objects.filter(entered_queue_at__lt=self.entered_queue_at).count() + 1
+        return (
+            NewConversation.objects.exclude(queue_status=self.QueueStatus.FAILED)
+            .filter(entered_queue_at__lt=self.entered_queue_at)
+            .count()
+            + 1
+        )
 
 
 class AssignedConversation(models.Model):

@@ -51,7 +51,7 @@ class TestHubSpotWebhookAPI:
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )
-    @patch("apps.webhooks.api.process_webhook_event")
+    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
     def test_each_endpoint_accepts_only_its_v1_secret(self, process_webhook_event) -> None:
         body = json.dumps(self.payload).encode("utf-8")
 
@@ -81,7 +81,7 @@ class TestHubSpotWebhookAPI:
         HUBSPOT_N1_NEW_STAGE_ID="ai-new",
         DEBUG=False,
     )
-    def test_production_triage_stage_dispatches_salomao_supervisor(self) -> None:
+    def test_production_triage_stage_queues_canonical_processing(self) -> None:
         payload = [
             {
                 "eventId": "event-triage",
@@ -94,10 +94,7 @@ class TestHubSpotWebhookAPI:
         body = json.dumps(payload).encode("utf-8")
 
         with (
-            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
-            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
-            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
-            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as supervisor_task,
+            patch("apps.webhooks.tasks.process_webhook_event_task.delay") as process_task,
         ):
             response = self.client.post(
                 self.production_url,
@@ -108,14 +105,14 @@ class TestHubSpotWebhookAPI:
 
         assert response.status_code == 202
         assert response.json()["status"] == "accepted"
-        supervisor_task.assert_called_once_with("ticket-triage", False, True)
+        process_task.assert_called_once()
 
     @override_settings(
         HUBSPOT_APP_SECRET=production_secret,
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )
-    @patch("apps.webhooks.api.process_webhook_event")
+    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
     def test_sandbox_rejects_production_secret(self, process_webhook_event) -> None:
         body = json.dumps(self.payload).encode("utf-8")
 
@@ -133,7 +130,7 @@ class TestHubSpotWebhookAPI:
         process_webhook_event.assert_not_called()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret, DEBUG=False)
-    @patch("apps.webhooks.api.process_webhook_event")
+    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
     def test_sandbox_accepts_current_v3_signature(self, process_webhook_event) -> None:
         body = json.dumps(self.payload).encode("utf-8")
         timestamp = str(int(time.time() * 1000))
@@ -155,7 +152,7 @@ class TestHubSpotWebhookAPI:
         process_webhook_event.assert_called_once()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret, DEBUG=False)
-    @patch("apps.webhooks.api.process_webhook_event")
+    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
     def test_sandbox_rejects_expired_v3_signature(self, process_webhook_event) -> None:
         body = json.dumps(self.payload).encode("utf-8")
         timestamp = str(int(time.time() * 1000) - 301_000)

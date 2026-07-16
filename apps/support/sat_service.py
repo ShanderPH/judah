@@ -212,7 +212,7 @@ def sat_heartbeat() -> dict:
     if status_changes > 0:
         from apps.support.models import NewConversation
 
-        pending_count = NewConversation.objects.count()
+        pending_count = NewConversation.objects.exclude(queue_status=NewConversation.QueueStatus.FAILED).count()
         logger.info(
             "sat_heartbeat_done",
             agents_checked=len(agents),

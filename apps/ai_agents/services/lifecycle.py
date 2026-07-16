@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -36,13 +38,8 @@ _STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
 _STAGE_FECHADO_ID = settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID
 _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
-_AI_STAGE_NEW_ID = settings.HUBSPOT_N1_NEW_STAGE_ID
-_AI_STAGE_CLOSED_ID = settings.HUBSPOT_CLOSED_STAGE_ID
-_PROP_AI_STAGE_NEW = f"hs_v2_date_entered_{_AI_STAGE_NEW_ID}"
-_PROP_AI_STAGE_CLOSED = f"hs_v2_date_entered_{_AI_STAGE_CLOSED_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"
-_PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
 _REQUIRED_LIFECYCLE_TABLES = {
     "conversation_instances",
     "conversation_events",
@@ -136,6 +133,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     ConversationInstance.State.CONTEXT_HYDRATING: {
         ConversationInstance.State.CONTEXT_READY,
         ConversationInstance.State.CONTACT_REQUIRED,
+        ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
@@ -169,6 +167,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.TRIAGE_RUNNING: {
         ConversationInstance.State.AI_SERVICE_PENDING,
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.QUEUE_PENDING,
         ConversationInstance.State.FAILED_RETRYABLE,
@@ -186,9 +185,10 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.WAITING_FOR_CUSTOMER: {
         ConversationInstance.State.CONTEXT_HYDRATING,
+        ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.CLOSED,
         ConversationInstance.State.FAILED_RETRYABLE,
+        ConversationInstance.State.CLOSED,
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         ConversationInstance.State.QUEUE_PENDING,
@@ -258,8 +258,12 @@ def _idempotency_key(
     occurred_at: str,
     source_event_id: str,
     message_id: str,
+    payload: dict[str, Any],
 ) -> str:
-    natural_id = source_event_id or f"{object_id}:{occurred_at}:{message_id}"
+    fallback = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    natural_id = source_event_id or message_id or fallback
     return f"{source}:{event_type}:{natural_id}"
 
 
@@ -272,7 +276,7 @@ class EventNormalizer:
         object_id = _as_text(payload.get("objectId") or payload.get("object_id") or getattr(event, "object_id", ""))
         property_name = _as_text(payload.get("propertyName") or payload.get("property_name"))
         property_value = _as_text(payload.get("propertyValue") or payload.get("property_value"))
-        source_event_id = _event_id_from_payload(payload) or _as_text(getattr(event, "id", ""))
+        source_event_id = _event_id_from_payload(payload)
         message_id = _message_id_from_payload(payload)
         occurred_at_raw = _as_text(payload.get("occurredAt") or payload.get("occurred_at"))
         occurred_at = _parse_hubspot_timestamp(occurred_at_raw)
@@ -298,20 +302,11 @@ class EventNormalizer:
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
                 pipeline_stage_id = _STAGE_NOVO_ID
-            elif property_name == _PROP_AI_STAGE_NEW:
-                normalized_type = "ticket_stage_changed"
-                pipeline_stage_id = _AI_STAGE_NEW_ID
             elif property_name == _PROP_STAGE_CLOSED:
                 normalized_type = "ticket_closed"
                 pipeline_stage_id = _STAGE_FECHADO_ID
-            elif property_name == _PROP_AI_STAGE_CLOSED:
-                normalized_type = "ticket_closed"
-                pipeline_stage_id = _AI_STAGE_CLOSED_ID
             elif property_name == _PROP_OWNER_ID:
                 normalized_type = "owner_changed"
-            elif property_name == _PROP_LAST_VISITOR_MESSAGE:
-                normalized_type = "conversation_message_received"
-                direction = "INCOMING"
             elif property_name == _PROP_PIPELINE_STAGE:
                 pipeline_stage_id = property_value or None
                 normalized_type = "ticket_closed" if property_value == _STAGE_FECHADO_ID else "ticket_stage_changed"
@@ -330,6 +325,7 @@ class EventNormalizer:
             occurred_at=occurred_at_raw,
             source_event_id=source_event_id,
             message_id=message_id,
+            payload=payload,
         )
 
         return NormalizedEvent(
@@ -458,31 +454,29 @@ class LifecycleEngine:
                         reason="External event normalized.",
                         source_event_id=event.source_event_id,
                     )
-                should_transition = decision.route != "IGNORE" or instance_created
-                restarting_active_turn = (
-                    decision.target_state == ConversationInstance.State.CONTEXT_HYDRATING
-                    and instance.state
-                    in {
-                        ConversationInstance.State.CONTEXT_READY,
-                        ConversationInstance.State.TRIAGE_PENDING,
-                        ConversationInstance.State.TRIAGE_RUNNING,
-                        ConversationInstance.State.AI_SERVICE_PENDING,
-                        ConversationInstance.State.AI_SERVICE_RUNNING,
-                    }
-                )
-                if should_transition and not restarting_active_turn:
+                # Ignored events remain visible in the ledger, but must not
+                # terminalize an existing active conversation. HubSpot emits an
+                # OUTGOING webhook for replies that Judah itself just sent.
+                if (
+                    decision.route == "IGNORE"
+                    and not instance_created
+                    and instance.state == ConversationInstance.State.HUMAN_ASSIGNED
+                    and event.event_type == "conversation_message_received"
+                    and event.direction == "OUTGOING"
+                ):
+                    self.transition(
+                        instance,
+                        ConversationInstance.State.HUMAN_IN_PROGRESS,
+                        reason="Assigned human agent sent the first outgoing message.",
+                        source_event_id=event.source_event_id,
+                    )
+                elif decision.route != "IGNORE" or instance_created:
                     self.transition(
                         instance,
                         decision.target_state,
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
-                    )
-                elif restarting_active_turn:
-                    logger.info(
-                        "conversation_active_turn_preserved",
-                        conversation_instance_id=str(instance.pk),
-                        state=instance.state,
-                        source_event_id=event.source_event_id,
+                        allow_terminal_reopen=event.event_type == "ticket_entered_n1",
                     )
             else:
                 lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE
@@ -516,6 +510,8 @@ class LifecycleEngine:
         instance.last_activity_at = now
         if to_state == ConversationInstance.State.CLOSED and instance.closed_at is None:
             instance.closed_at = now
+        elif allow_terminal_reopen and to_state not in TERMINAL_STATES:
+            instance.closed_at = None
         instance.save(update_fields=["state", "state_version", "last_activity_at", "closed_at", "updated_at"])
         ConversationStateTransition.objects.create(
             instance=instance,
@@ -556,6 +552,9 @@ class LifecycleEngine:
         instance: ConversationInstance | None,
         agent_name: str,
         input_snapshot: dict[str, Any],
+        model_name: str = "",
+        prompt_version: str = "",
+        policy_version: str = "",
         output_structured: dict[str, Any] | None = None,
         tokens_used: int = 0,
         latency_ms: int = 0,
@@ -565,6 +564,9 @@ class LifecycleEngine:
         return AgentRun.objects.create(
             instance=instance,
             agent_name=agent_name,
+            model_name=model_name,
+            prompt_version=prompt_version,
+            policy_version=policy_version,
             input_snapshot=input_snapshot,
             output_structured=output_structured or {},
             tokens_used=tokens_used,
@@ -600,6 +602,31 @@ class LifecycleEngine:
             },
         )
         return log
+
+    def mark_event_processed(self, event: ConversationEvent) -> None:
+        """Mark a lifecycle event as successfully dispatched."""
+        if event.processing_status == ConversationEvent.ProcessingStatus.DUPLICATE:
+            return
+        event.processing_status = ConversationEvent.ProcessingStatus.PROCESSED
+        event.processed_at = timezone.now()
+        event.error_message = ""
+        event.save(update_fields=["processing_status", "processed_at", "error_message"])
+
+    def mark_event_failed(self, event: ConversationEvent, error: Exception | str) -> None:
+        """Mark a lifecycle event as failed while preserving it for replay."""
+        if event.processing_status == ConversationEvent.ProcessingStatus.DUPLICATE:
+            return
+        event.processing_status = ConversationEvent.ProcessingStatus.FAILED
+        event.error_message = str(error)
+        event.save(update_fields=["processing_status", "error_message"])
+
+    def update_metadata(self, instance: ConversationInstance, **values: Any) -> ConversationInstance:
+        """Merge values into the lifecycle metadata snapshot."""
+        metadata = dict(instance.metadata or {})
+        metadata.update(values)
+        instance.metadata = metadata
+        instance.save(update_fields=["metadata", "updated_at"])
+        return instance
 
     def _get_or_create_instance(self, event: NormalizedEvent) -> tuple[ConversationInstance, bool]:
         defaults = {
@@ -674,7 +701,9 @@ class LifecycleEngine:
         instance.save(update_fields=list(dict.fromkeys(update_fields)))
 
     def _validate_transition(self, from_state: str, to_state: str, *, allow_terminal_reopen: bool = False) -> None:
-        if from_state in TERMINAL_STATES and not allow_terminal_reopen:
+        if from_state in TERMINAL_STATES:
+            if allow_terminal_reopen:
+                return
             raise InvalidStateTransitionError(f"Cannot transition terminal state {from_state} to {to_state}.")
         if to_state in {ConversationInstance.State.CLOSED, ConversationInstance.State.RESOLVED_BY_HUMAN}:
             return

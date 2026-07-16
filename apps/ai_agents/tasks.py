@@ -27,11 +27,8 @@ logger = structlog.get_logger(__name__)
 # latency and short enough that a crashed worker's lock will expire before
 # HubSpot's retry window runs out.
 _IDEMPOTENCY_TTL_SECONDS = 600
-_STAGE_TRIGGER_DEDUPE_TTL_SECONDS = 60
 _LOCK_KEY_PREFIX = "salomao:supervisor:ticket"
 _THREAD_LOCK_KEY_PREFIX = "salomao:supervisor:thread"
-_PENDING_KEY_PREFIX = "salomao:supervisor:pending"
-_STAGE_TRIGGER_KEY_PREFIX = "salomao:supervisor:stage-trigger"
 
 
 def _redis_client() -> redis.Redis:
@@ -39,13 +36,13 @@ def _redis_client() -> redis.Redis:
     return redis.Redis.from_url(redis_url)
 
 
-@shared_task(name="ai_agents.run_supervisor_pipeline_task")
-def run_supervisor_pipeline_task(
-    ticket_id: str,
-    is_off_hours: bool = False,
-    enforce_ai_pipeline: bool = False,
-    queue_if_busy: bool = False,
-) -> None:
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+    name="ai_agents.run_supervisor_pipeline_task",
+)
+def run_supervisor_pipeline_task(self, ticket_id: str, is_off_hours: bool = False) -> None:
     """Run the Salomão supervisor pipeline for a HubSpot ticket.
 
     Acquires a short-lived Redis lock keyed on ``ticket_id`` so that duplicate
@@ -55,19 +52,10 @@ def run_supervisor_pipeline_task(
     """
     ticket_id = str(ticket_id)
     lock_key = f"{_LOCK_KEY_PREFIX}:{ticket_id}"
-    pending_key = f"{_PENDING_KEY_PREFIX}:{ticket_id}"
-    stage_trigger_key = f"{_STAGE_TRIGGER_KEY_PREFIX}:{ticket_id}"
 
     client: redis.Redis | None
     try:
         client = _redis_client()
-        if not queue_if_busy:
-            first_stage_trigger = bool(
-                client.set(stage_trigger_key, "1", nx=True, ex=_STAGE_TRIGGER_DEDUPE_TTL_SECONDS)
-            )
-            if not first_stage_trigger:
-                logger.info("supervisor_pipeline_stage_trigger_deduplicated", ticket_id=ticket_id)
-                return
         acquired = bool(client.set(lock_key, "1", nx=True, ex=_IDEMPOTENCY_TTL_SECONDS))
     except redis.RedisError as exc:
         logger.warning(
@@ -79,48 +67,46 @@ def run_supervisor_pipeline_task(
         acquired = True
 
     if not acquired:
-        if client is not None and queue_if_busy:
-            try:
-                client.set(pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
-            except redis.RedisError as exc:
-                logger.warning("supervisor_pipeline_pending_mark_failed", ticket_id=ticket_id, error=str(exc))
         logger.info(
-            "supervisor_pipeline_busy",
+            "supervisor_pipeline_duplicate_skipped",
             ticket_id=ticket_id,
             lock_key=lock_key,
-            followup_queued=queue_if_busy,
         )
         return
 
     from apps.ai_agents.api.webhooks import _run_supervisor_pipeline
 
     try:
-        asyncio.run(
-            _run_supervisor_pipeline(
-                ticket_id,
-                is_off_hours=is_off_hours,
-                enforce_ai_pipeline=enforce_ai_pipeline,
-            )
+        asyncio.run(_run_supervisor_pipeline(ticket_id, is_off_hours=is_off_hours))
+    except Exception as exc:
+        countdown = min(30 * (2**self.request.retries), 300)
+        logger.warning(
+            "supervisor_pipeline_retry",
+            ticket_id=ticket_id,
+            retry=self.request.retries,
+            countdown=countdown,
+            error=str(exc),
         )
+        raise self.retry(exc=exc, countdown=countdown) from exc
     finally:
-        run_followup = False
         if client is not None:
             try:
                 client.delete(lock_key)
-                run_followup = bool(client.delete(pending_key))
             except redis.RedisError as exc:
                 logger.warning(
                     "supervisor_pipeline_lock_release_failed",
                     ticket_id=ticket_id,
                     error=str(exc),
                 )
-        if run_followup:
-            run_supervisor_pipeline_task.delay(ticket_id, is_off_hours, enforce_ai_pipeline, False)
-            logger.info("supervisor_pipeline_followup_dispatched", ticket_id=ticket_id)
 
 
-@shared_task(name="ai_agents.run_salomao_v1_thread_pipeline_task")
-def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+    name="ai_agents.run_salomao_v1_thread_pipeline_task",
+)
+def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
     """Run the Supervisor for a HubSpot conversation thread.
 
     This is used by ``conversation.newMessage`` webhooks. The task re-fetches
@@ -156,6 +142,16 @@ def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
 
     try:
         asyncio.run(_run_salomao_v1_thread_pipeline(thread_id))
+    except Exception as exc:
+        countdown = min(30 * (2**self.request.retries), 300)
+        logger.warning(
+            "supervisor_thread_retry",
+            thread_id=thread_id,
+            retry=self.request.retries,
+            countdown=countdown,
+            error=str(exc),
+        )
+        raise self.retry(exc=exc, countdown=countdown) from exc
     finally:
         if client is not None:
             try:
@@ -168,62 +164,159 @@ def run_salomao_v1_thread_pipeline_task(thread_id: str) -> None:
                 )
 
 
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+    name="ai_agents.request_human_handoff_task",
+)
+def request_human_handoff_task(
+    self,
+    *,
+    thread_id: str | None = None,
+    ticket_id: str | None = None,
+    reason: str,
+) -> None:
+    """Hydrate minimal context and enqueue a deterministic human handoff."""
+    from apps.ai_agents.services.execution import ensure_conversation_instance, request_human_handoff
+    from apps.ai_agents.services.hubspot import (
+        build_conversation_context_from_hubspot_context,
+        hydrate_thread_context,
+        hydrate_ticket_context,
+    )
+
+    try:
+        if thread_id:
+            context = asyncio.run(hydrate_thread_context(str(thread_id)))
+            session_id = (
+                f"hubspot-ticket-{context.get('ticket_id')}"
+                if context.get("ticket_id")
+                else f"hubspot-thread-{thread_id}"
+            )
+        elif ticket_id:
+            context = asyncio.run(hydrate_ticket_context(str(ticket_id)))
+            session_id = f"hubspot-ticket-{ticket_id}"
+        else:
+            raise ValueError("thread_id or ticket_id is required for human handoff.")
+
+        instance = ensure_conversation_instance(
+            context=context,
+            ticket_id=ticket_id or context.get("ticket_id") or None,
+            session_id=session_id,
+        )
+        conversation_context = build_conversation_context_from_hubspot_context(
+            context,
+            session_id=session_id,
+        )
+        request_human_handoff(
+            instance=instance,
+            reason=reason,
+            conversation_context=conversation_context,
+            triage_decision=None,
+            ai_summary=reason,
+        )
+    except Exception as exc:
+        countdown = min(30 * (2**self.request.retries), 300)
+        logger.warning(
+            "human_handoff_retry",
+            thread_id=thread_id,
+            ticket_id=ticket_id,
+            retry=self.request.retries,
+            error=str(exc),
+        )
+        raise self.retry(exc=exc, countdown=countdown) from exc
+
+
 @shared_task(name="ai_agents.run_lifecycle_watchdog_task")
 def run_lifecycle_watchdog_task() -> dict[str, int]:
-    """Detect stuck workflows and dispatch retries whose backoff has expired."""
-    from django.utils import timezone
-
-    from apps.ai_agents.models import ConversationInstance
-    from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+    """Detect stuck lifecycle instances on a periodic schedule."""
     from apps.ai_agents.services.watchdog import run_lifecycle_watchdog
 
-    watchdog = run_lifecycle_watchdog(limit=100, max_failures=3)
-    due_instances = list(
+    result = run_lifecycle_watchdog()
+    return {
+        "scanned": result.scanned,
+        "marked_retryable": result.marked_retryable,
+        "marked_terminal": result.marked_terminal,
+    }
+
+
+@shared_task(name="ai_agents.retry_failed_lifecycle_instances_task")
+def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
+    """Re-dispatch due retryable instances or hand off exhausted failures."""
+    from django.utils import timezone
+
+    from apps.ai_agents.contracts import ConversationContext
+    from apps.ai_agents.models import ConversationInstance
+    from apps.ai_agents.services.execution import request_human_handoff
+    from apps.ai_agents.services.lifecycle import LifecycleEngine
+
+    due = list(
         ConversationInstance.objects.filter(
             state=ConversationInstance.State.FAILED_RETRYABLE,
             next_retry_at__lte=timezone.now(),
-        ).order_by("next_retry_at")[:100]
+        ).order_by("next_retry_at")[:limit]
     )
-    engine = LifecycleEngine()
-    dispatched = 0
+    redispatched = 0
+    handed_off = 0
+    terminal = 0
 
-    for instance in due_instances:
-        try:
-            engine.transition(
-                instance,
-                ConversationInstance.State.CONTEXT_HYDRATING,
-                reason="Lifecycle retry backoff expired.",
-                actor_type="watchdog",
-            )
-        except InvalidStateTransitionError as exc:
-            logger.warning(
-                "lifecycle_retry_transition_skipped",
-                conversation_instance_id=str(instance.pk),
-                error=str(exc),
-            )
+    for instance in due:
+        if instance.failure_count >= 3:
+            if instance.hubspot_ticket_id:
+                context = ConversationContext(
+                    channel="hubspot",
+                    session_id=instance.ai_session_id or f"hubspot-ticket-{instance.hubspot_ticket_id}",
+                    ticket_id=instance.hubspot_ticket_id,
+                    thread_id=instance.hubspot_thread_id,
+                    contact_id=instance.hubspot_contact_id,
+                    pipeline_id=instance.pipeline_id,
+                    pipeline_stage=instance.pipeline_stage_id,
+                    can_send_reply=False,
+                )
+                request_human_handoff(
+                    instance=instance,
+                    reason=f"Retry budget exhausted: {instance.current_error}",
+                    conversation_context=context,
+                    triage_decision=None,
+                    ai_summary="Falha técnica persistente; atendimento transferido com segurança.",
+                )
+                handed_off += 1
+            else:
+                LifecycleEngine().transition(
+                    instance,
+                    ConversationInstance.State.FAILED_TERMINAL,
+                    reason="Retry budget exhausted and no ticket is available for human handoff.",
+                )
+                terminal += 1
             continue
 
         instance.next_retry_at = None
-        instance.current_error = ""
-        instance.save(update_fields=["next_retry_at", "current_error", "updated_at"])
-        if instance.hubspot_ticket_id:
-            run_supervisor_pipeline_task.delay(str(instance.hubspot_ticket_id), False, True, True)
-            dispatched += 1
-        elif instance.hubspot_thread_id:
-            run_salomao_v1_thread_pipeline_task.delay(str(instance.hubspot_thread_id))
-            dispatched += 1
+        instance.save(update_fields=["next_retry_at", "updated_at"])
+        if instance.hubspot_thread_id:
+            run_salomao_v1_thread_pipeline_task.delay(instance.hubspot_thread_id)
+            redispatched += 1
+        elif instance.hubspot_ticket_id:
+            run_supervisor_pipeline_task.delay(instance.hubspot_ticket_id, False)
+            redispatched += 1
         else:
-            logger.error("lifecycle_retry_missing_target", conversation_instance_id=str(instance.pk))
+            LifecycleEngine().transition(
+                instance,
+                ConversationInstance.State.FAILED_TERMINAL,
+                reason="Retryable instance has no routable HubSpot identifier.",
+            )
+            terminal += 1
 
     return {
-        "scanned": watchdog.scanned,
-        "marked_retryable": watchdog.marked_retryable,
-        "marked_terminal": watchdog.marked_terminal,
-        "retries_dispatched": dispatched,
+        "scanned": len(due),
+        "redispatched": redispatched,
+        "handed_off": handed_off,
+        "terminal": terminal,
     }
 
 
 __all__ = [
+    "request_human_handoff_task",
+    "retry_failed_lifecycle_instances_task",
     "run_lifecycle_watchdog_task",
     "run_salomao_v1_thread_pipeline_task",
     "run_supervisor_pipeline_task",

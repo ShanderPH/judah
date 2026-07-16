@@ -482,63 +482,25 @@ def _do_handle_ticket_closed(
 
 
 def assign_pending_tickets() -> dict:
-    """Try to assign all tickets currently pending in new_conversations.
+    """Drain pending tickets through the canonical matchmaker.
 
     Called when an agent comes online (via webhook or polling) so that tickets
     that arrived while no agent was available are promptly picked up — not just
     tickets that trigger a new webhook event.
 
-    Iterates oldest-first so the queue is FIFO.  Stops as soon as there are no
-    more eligible agents to avoid unnecessary HubSpot API calls.
+    The matchmaker owns FIFO ordering, retries, and stale-ticket quarantine.
 
     Returns:
         Dict with ``assigned``, ``skipped``, ``total_pending`` counts.
     """
-    from apps.support.queue_service import get_eligible_agents
+    from apps.support.matchmaker_service import matchmaker_drain_queue
 
-    pending = list(NewConversation.objects.all().order_by("entered_queue_at"))
-    total = len(pending)
-
-    if not total:
-        return {"assigned": 0, "skipped": 0, "total_pending": 0}
-
-    # Quick check before iterating — bail early if no eligible agents
-    if not get_eligible_agents():
-        logger.debug("assign_pending_tickets_no_eligible_agents", total_pending=total)
-        return {"assigned": 0, "skipped": total, "total_pending": total}
-
-    assigned = 0
-    skipped = 0
-
-    for conv in pending:
-        # Re-check eligibility before each assignment (agent may fill up mid-loop)
-        if not get_eligible_agents():
-            skipped += total - assigned - skipped
-            break
-
-        try:
-            success = attempt_auto_assign(conv)
-        except Exception as exc:
-            logger.warning(
-                "assign_pending_tickets_error",
-                ticket_id=conv.hubspot_ticket_id,
-                error=str(exc),
-            )
-            skipped += 1
-            continue
-
-        if success:
-            assigned += 1
-        else:
-            skipped += 1
-
-    logger.info(
-        "assign_pending_tickets_done",
-        total_pending=total,
-        assigned=assigned,
-        skipped=skipped,
-    )
-    return {"assigned": assigned, "skipped": skipped, "total_pending": total}
+    result = matchmaker_drain_queue()
+    return {
+        "assigned": result["assigned"],
+        "skipped": result["remaining"],
+        "total_pending": result["total_pending"],
+    }
 
 
 def sync_novo_stage_tickets() -> dict:
@@ -574,11 +536,10 @@ def sync_novo_stage_tickets() -> dict:
 
     # Pre-fetch existing ticket IDs to avoid N+1 queries in the loop
     ticket_ids_from_hubspot = {str(t["id"]) for t in tickets}
-    existing_pending = set(
-        NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
-            "hubspot_ticket_id", flat=True
-        )
-    )
+    existing_pending = {
+        conversation.hubspot_ticket_id: conversation
+        for conversation in NewConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot)
+    }
     existing_assigned = set(
         AssignedConversation.objects.filter(hubspot_ticket_id__in=ticket_ids_from_hubspot).values_list(
             "hubspot_ticket_id", flat=True
@@ -597,6 +558,28 @@ def sync_novo_stage_tickets() -> dict:
 
         # Skip tickets already in our queue (pending)
         if ticket_id in existing_pending:
+            conversation = existing_pending[ticket_id]
+            if conversation.can_reactivate:
+                conversation.queue_status = NewConversation.QueueStatus.PENDING
+                conversation.assignment_attempts = 0
+                conversation.last_assignment_attempt_at = None
+                conversation.next_assignment_attempt_at = None
+                conversation.failure_code = ""
+                conversation.failure_message = ""
+                conversation.save(
+                    update_fields=[
+                        "queue_status",
+                        "assignment_attempts",
+                        "last_assignment_attempt_at",
+                        "next_assignment_attempt_at",
+                        "failure_code",
+                        "failure_message",
+                        "updated_at",
+                    ]
+                )
+                created += 1
+                logger.info("sync_novo_ticket_reactivated", ticket_id=ticket_id)
+                continue
             skipped += 1
             continue
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class TriageDecision(BaseModel):
@@ -28,7 +28,10 @@ class TriageDecision(BaseModel):
     dados_faltantes: list[str] = Field(default_factory=list)
     sentimento: Literal["positivo", "neutro", "negativo"]
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    evidence: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("evidence", "evidences"),
+    )
     policy_version: str = "heimdall-v1"
 
 
@@ -121,6 +124,8 @@ class SupervisorDecision(BaseModel):
     hubspot_action: HubSpotAction | None = None
     trace_summary: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class HandoffPackage(BaseModel):

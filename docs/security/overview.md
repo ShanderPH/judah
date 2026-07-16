@@ -16,8 +16,19 @@
 ## Webhooks
 
 - HubSpot: HMAC v1 e v3 validados.
+- HubSpot v3: digest Base64, URI normalizada e janela antirreplay de cinco
+  minutos.
 - Jira: `X-Hub-Signature` validada.
 - Em `DEBUG`, validação pode ser relaxada se `HUBSPOT_APP_SECRET` não estiver configurado.
+- Fora de `DEBUG`, a ausência do segredo falha fechado.
+
+## Conteúdo e efeitos de IA
+
+- Conteúdo do cliente é sanitizado e limitado antes de entrar no prompt.
+- Tentativas explícitas de sobrescrever instruções geram handoff antes do LLM.
+- Tools externas são autorizadas pelo estado e pelo `ConversationContext`.
+- Cada efeito usa chave de idempotência e `ToolCallAuditLog`.
+- Snapshots de auditoria usam hashes e tamanhos para evitar duplicar PII.
 
 ## Segredos
 

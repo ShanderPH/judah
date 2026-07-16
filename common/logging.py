@@ -221,9 +221,20 @@ def scrub_pii(logger: WrappedLogger, method_name: str, event_dict: EventDict) ->
 
     Register in ``structlog.configure(processors=[..., scrub_pii, ...])``.
     """
+
+    def _scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: "[REDACTED]" if str(key).lower() in _PII_FIELDS else _scrub(item) for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [_scrub(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_scrub(item) for item in value)
+        return value
+
     for key in list(event_dict.keys()):
-        if key.lower() in _PII_FIELDS:
-            event_dict[key] = "[REDACTED]"
+        event_dict[key] = "[REDACTED]" if key.lower() in _PII_FIELDS else _scrub(event_dict[key])
     return event_dict
 
 

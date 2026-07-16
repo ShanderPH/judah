@@ -36,11 +36,13 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
         half_open_max_calls: int = 1,
+        excluded_exceptions: tuple[type[Exception], ...] = (),
     ) -> None:
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
+        self.excluded_exceptions = excluded_exceptions
 
         self._state = CircuitState.CLOSED
         self._failure_count = 0
@@ -79,6 +81,8 @@ class CircuitBreaker:
             self._on_success()
             return result
         except Exception as exc:
+            if isinstance(exc, self.excluded_exceptions):
+                raise
             self._on_failure()
             raise exc
 
@@ -99,6 +103,8 @@ class CircuitBreaker:
             self._on_success()
             return result
         except Exception as exc:
+            if isinstance(exc, self.excluded_exceptions):
+                raise
             self._on_failure()
             raise exc
 

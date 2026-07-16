@@ -226,7 +226,18 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
 ### Inbound webhook pipeline
 
-`POST /api/v1/webhooks/hubspot/` is the canonical webhook router. It verifies HubSpot HMAC (v1 or v3) and, when `AI_ROUTING_ENABLED=true`, schedules the supervisor pipeline via Celery (`run_supervisor_pipeline_task.delay`). The alternate `POST /api/v1/ai/webhooks/hubspot/ticket-change` router exists in `apps/ai_agents/api/webhooks.py` but is **not mounted** in `core/urls.py` and should be treated as experimental/pending.
+`POST /api/v1/webhooks/hubspot/` is the canonical and authoritative webhook
+router. It verifies HubSpot HMAC v1/v3 (including the v3 replay window),
+persists provider-aware idempotency, and schedules durable processing through
+Celery. `RoutingPolicyEngine` selects exactly one deterministic route before
+any LLM call. AI routes hydrate a normalized `ConversationContext`, run
+content-safety checks, execute Heimdall, and apply the resulting
+`SupervisorDecision` through an audited backend execution layer.
+
+Candidate resolutions and focused questions enter `WAITING_FOR_CUSTOMER`.
+Only explicit customer confirmation closes an AI-resolved conversation.
+Human handoffs persist a `HandoffPackage` and enter Matchmaker. Watchdog and
+retry tasks recover stuck or transiently failed executions.
 
 ### Session persistence
 
@@ -238,11 +249,14 @@ Agno sessions are stored in Redis under `inchurch:agent:{session_id}`. `session_
 
 ## Security Considerations
 
-1. **Webhook signatures.** HubSpot webhooks are verified via v1 SHA-256 *or* v3 HMAC. **Never leave `HUBSPOT_APP_SECRET` blank in production** — the current behavior silently accepts all requests in that case (tracked; see risk S-01).
+1. **Webhook signatures.** HubSpot webhooks are verified via v1 SHA-256 or v3
+   HMAC. Production fails closed when `HUBSPOT_APP_SECRET` is absent.
 2. **JWT.** HS256 using `DJANGO_SECRET_KEY`. Rotating the secret invalidates every active session.
 3. **Rate limiting.** `common/rate_limit.py` applies a sliding window per user or IP. Race-prone under high load — see risk H8.
 4. **CORS.** Explicit origin whitelist via `CORS_ALLOWED_ORIGINS`. Credentials allowed.
-5. **Prompt injection.** Agent prompts currently do **not** isolate untrusted content (ticket bodies, user messages). Treat any deployment as internal-only until an injection guardrail is in place.
+5. **Prompt injection.** Customer content is normalized and explicit
+   instruction-override patterns are handed off before LLM execution. This
+   deterministic guardrail must still be backed by evals and monitoring.
 6. **Secrets in logs.** `debug_mode=True` is still hardcoded on several agents — these expose prompts and tool arguments in logs. Disable before shipping.
 7. **PII.** No encryption at rest for agent traces; rely on the database's TDE (Supabase).
 8. **MCP subprocess.** Inherits the parent env — strip secrets before passing downstream once `env` kwarg usage is audited.
@@ -259,7 +273,9 @@ pytest -m "not slow"         # skip slow suite
 
 **Warning:** `conftest.py:isolate_db` deletes rows from the support tables before every test. If `DATABASE_URL` points at production, this rolls back within the transaction **only** when Django actually opens one. Always confirm you are pointed at a disposable database.
 
-Coverage target: 80% (`pyproject.toml`). CI currently enforces a 50% floor while the project target remains 80%. Both `apps/ai_agents` and `apps/webhooks` have unit tests; expand coverage before relying on edge-case paths.
+Coverage floor: 90% (`pyproject.toml` and CI). The suite uses a private local
+SQLite database through `python run_tests_local.py`; never load production
+credentials into pytest.
 
 ---
 
@@ -334,21 +350,25 @@ HubSpot chat -> Judah Railway webhook -> Judah Celery worker -> Supervisor -> Sa
 
 The following must be resolved before production cutover. See the full audit report for detail.
 
-- [ ] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
-- [ ] **C2** — Add a prompt-injection guardrail around ticket content.
+- [x] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
+- [x] **C2** — Add a deterministic prompt-injection guardrail around ticket content.
 - [x] **C3** — Replace `asyncio.create_task` in `ai_agents/api/webhooks.py` with a Celery task. *(Done — `run_supervisor_pipeline_task.delay` is used.)*
-- [ ] **C4** — Consolidate the two HubSpot webhook entry points. *(Note: `/api/v1/ai/webhooks/hubspot/ticket-change` exists in code but is not mounted in `core/urls.py`.)*
+- [x] **C4** — Make `/api/v1/webhooks/hubspot/` the single mounted,
+  authoritative entry point; the alternate router remains unmounted worker
+  code.
 - [ ] **C5** — Gate `conftest.py:isolate_db` behind an explicit test-env marker.
 - [x] **H1** — Fix `except Ticket.DoesNotExist, ValueError:` in `support/services.py`. *(Done — syntax corrected.)*
 - [ ] **H1b** — Audit `auto_assign_service.py` and `hubspot_handler.py` for any remaining Python 2 exception syntax.
 - [ ] **H2** — Remove `debug_mode=True` from Salomão agents; remove the `loading_openai_key` log line.
 - [ ] **H3** — Stop mutating `self._team.instructions` per request.
 - [ ] **H4** — Switch the token budget to a rolling window.
-- [ ] **H5** — Use `output_schema` instead of string-matching for handoff detection and citations.
+- [x] **H5** — Use structured `TriageDecision` and `SupervisorDecision`
+  contracts for routing and handoff outcomes.
 - [ ] **H6** — Cache Pinecone / Knowledge / MCPTools at process startup.
 - [ ] **H7** — Delete the legacy module-level `salomao_agent` / `heimdall_agent` + `services.chat_with_agent`.
 - [ ] **H8** — Replace the custom rate limiter with an atomic implementation.
 - [ ] **H9** — Move pipeline stage IDs into settings.
-- [ ] **H10** — Enable Agno tracing + persist `TriageResult` in `AgentTrace`.
+- [x] **H10** — Persist correlated Heimdall and Supervisor executions in
+  `AgentRun`, including model, prompt and policy versions.
 
 Once these are green the system can be promoted to production with a staged rollout.

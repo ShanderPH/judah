@@ -9,7 +9,7 @@
 | `debug_mode=True` pode vazar prompts/secrets para logs | `apps/ai_agents/` | Alta | Verificar se `debug_mode` vem de env var |
 | `except Ticket.DoesNotExist, ValueError:` (sintaxe Python 2) | `apps/support/services.py` | Média | **Corrigida**; auditar outros módulos |
 | Webhooks HubSpot aceitos sem assinatura em DEBUG | `apps/webhooks/api.py`, `apps/ai_agents/api/webhooks.py` | Média | Apenas em desenvolvimento; comportamentos ligeiramente diferentes entre os dois routers |
-| Endpoint de IA não montado | `apps/ai_agents/api/webhooks.py` | Média | Código existe mas não é exposto em `core/urls.py` |
+| Guardrail de prompt injection é determinístico | `apps/ai_agents/services/content_safety.py` | Média | Complementar com evals contínuos e monitoramento |
 | Variáveis `*_KEY` em texto plano no env | `.env` | Média | Usar cofre/antigravity secrets |
 | Sem rate limiting nos endpoints de IA | `apps/ai_agents/api.py` | Média | Pode causar custos inesperados |
 | Sem validação de permissão em alguns endpoints | `apps/health/api.py` | Baixa | Health checks são públicos por design |

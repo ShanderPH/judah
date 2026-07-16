@@ -264,6 +264,9 @@ class AgentRun(models.Model):
         related_name="agent_runs",
     )
     agent_name = models.CharField(max_length=100, db_index=True)
+    model_name = models.CharField(max_length=100, blank=True)
+    prompt_version = models.CharField(max_length=100, blank=True)
+    policy_version = models.CharField(max_length=100, blank=True)
     input_snapshot = models.JSONField(default=dict, blank=True)
     output_structured = models.JSONField(default=dict, blank=True)
     tool_calls = models.JSONField(default=list, blank=True)

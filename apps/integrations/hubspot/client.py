@@ -9,13 +9,20 @@ from django.conf import settings
 from hubspot import HubSpot
 from hubspot.crm.tickets import SimplePublicObjectInput as TicketUpdateInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
+from hubspot.crm.tickets.exceptions import ApiException, NotFoundException
 
+from apps.integrations.hubspot.exceptions import HubSpotAPIError, HubSpotResourceNotFoundError
 from common.circuit_breaker import CircuitBreaker
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
 
-_circuit_breaker = CircuitBreaker(name="hubspot", failure_threshold=5, recovery_timeout=60)
+_circuit_breaker = CircuitBreaker(
+    name="hubspot",
+    failure_threshold=5,
+    recovery_timeout=60,
+    excluded_exceptions=(NotFoundException,),
+)
 
 # Pipeline configuration is sourced from the environment through Django settings.
 SUPPORT_PIPELINE_ID = settings.HUBSPOT_SUPPORT_PIPELINE_ID
@@ -234,14 +241,39 @@ class HubSpotClient:
                 "id": ticket.id,
                 "owner_id": owner_id,
             }
+        except NotFoundException as exc:
+            logger.warning(
+                "hubspot_assign_ticket_owner_not_found",
+                ticket_id=ticket_id,
+                owner_id=owner_id,
+                external_status=exc.status or 404,
+            )
+            raise HubSpotResourceNotFoundError("ticket", ticket_id) from exc
+        except ApiException as exc:
+            external_status = int(exc.status) if exc.status is not None else None
+            retryable = external_status is None or external_status == 429 or external_status >= 500
+            logger.error(
+                "hubspot_assign_ticket_owner_failed",
+                ticket_id=ticket_id,
+                owner_id=owner_id,
+                external_status=external_status,
+                reason=exc.reason,
+                retryable=retryable,
+            )
+            raise HubSpotAPIError(
+                "HubSpot rejected the ticket owner update.",
+                external_status=external_status,
+                retryable=retryable,
+            ) from exc
         except Exception as exc:
             logger.error(
                 "hubspot_assign_ticket_owner_failed",
                 ticket_id=ticket_id,
                 owner_id=owner_id,
-                error=str(exc),
+                error_type=type(exc).__name__,
+                retryable=True,
             )
-            raise ExternalServiceError("HubSpot", str(exc)) from exc
+            raise HubSpotAPIError("HubSpot ticket owner update failed.", retryable=True) from exc
 
     def get_owner_details(self, owner_id: int) -> dict[str, Any]:
         """Fetch owner details by owner ID.

@@ -16,19 +16,27 @@ não reprocessar o mesmo ticket quando o HubSpot faz retry do webhook.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
+from copy import deepcopy
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.core.cache import cache
 from ninja import Router, Schema
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
+from apps.ai_agents.contracts import SupervisorDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, TokenTrackingLog, ToolCallAuditLog
+from apps.ai_agents.services.content_safety import assess_customer_content
+from apps.ai_agents.services.execution import (
+    apply_supervisor_result,
+    ensure_conversation_instance,
+    handle_resolution_confirmation,
+    mark_retryable_failure,
+    request_human_handoff,
+)
 from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.hubspot import (
     USE_MOCK_HUBSPOT,
@@ -36,11 +44,12 @@ from apps.ai_agents.services.hubspot import (
     build_salomao_prompt_from_hubspot_context,
     hydrate_thread_context,
     hydrate_ticket_context,
-    send_salomao_reply_to_hubspot_thread,
-    update_hubspot_ticket_route,
-    update_hubspot_ticket_stage,
 )
-from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine, is_lifecycle_schema_ready
+from apps.ai_agents.services.lifecycle import (
+    InvalidStateTransitionError,
+    LifecycleEngine,
+    is_lifecycle_schema_ready,
+)
 from apps.ai_agents.services.protocol_lookup import handle_protocol_lookup_from_hubspot_context
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
@@ -49,6 +58,11 @@ from apps.ai_agents.utils.business_rules import (
     off_hours_reason,
 )
 from apps.ai_agents.utils.pricing import calculate_cost
+from apps.webhooks.signatures import (
+    is_valid_hubspot_request,
+    verify_hubspot_signature_v1,
+    verify_hubspot_signature_v3,
+)
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -57,8 +71,135 @@ logger = structlog.get_logger(__name__)
 
 router = Router()
 
-_TURN_PROCESSING_TTL_SECONDS = 10 * 60
-_TURN_COMPLETED_TTL_SECONDS = 24 * 60 * 60
+
+def _hubspot_turn_source(context: dict[str, Any], *, session_id: str) -> str:
+    """Build a stable source ID even when HubSpot omits a message ID."""
+    history = context.get("conversation_history") or []
+    latest_incoming = next(
+        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
+        None,
+    )
+    if not latest_incoming:
+        return session_id
+    if latest_incoming.get("id"):
+        return str(latest_incoming["id"])
+    fingerprint = {
+        "created_at": latest_incoming.get("created_at"),
+        "sender": latest_incoming.get("sender"),
+        "text": latest_incoming.get("text"),
+        "attachments": latest_incoming.get("attachments") or [],
+    }
+    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+@sync_to_async
+def _record_hubspot_turn_audit(
+    *,
+    context: dict[str, Any],
+    ticket_id: str | None,
+    session_id: str,
+    agent_name: str,
+    output_structured: dict[str, Any],
+    reply_result: dict[str, Any],
+    active_stage_result: dict[str, Any],
+    final_stage_result: dict[str, Any],
+    conversation_context: Any | None = None,
+    triage_decision: Any | None = None,
+    handoff_reason: str | None = None,
+    tokens_used: int = 0,
+    latency_ms: int = 0,
+) -> None:
+    """Persist the legacy staging audit shape for compatibility."""
+    if not is_lifecycle_schema_ready():
+        logger.warning("hubspot_turn_audit_schema_missing", ticket_id=ticket_id, session_id=session_id)
+        return
+    thread_ids = context.get("thread_ids") or []
+    instance = None
+    if thread_ids:
+        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
+    if instance is None and ticket_id:
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    if instance is None:
+        return
+
+    history = context.get("conversation_history") or []
+    latest_incoming = next(
+        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
+        {},
+    )
+    turn_key = hashlib.sha256(_hubspot_turn_source(context, session_id=session_id).encode("utf-8")).hexdigest()[:20]
+    engine = LifecycleEngine()
+    agent_run = engine.record_agent_run(
+        instance=instance,
+        agent_name=agent_name,
+        input_snapshot={
+            "session_id": session_id,
+            "ticket_id": ticket_id,
+            "thread_id": str(thread_ids[0]) if thread_ids else None,
+            "message_id": latest_incoming.get("id"),
+            "policy_version": (output_structured.get("triage_decision") or {}).get("policy_version"),
+        },
+        output_structured=output_structured,
+        tokens_used=tokens_used,
+        latency_ms=latency_ms,
+        status=AgentRun.Status.SUCCEEDED,
+    )
+
+    triage_payload = output_structured.get("triage_decision")
+    if isinstance(triage_payload, dict):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="HeimdallTriageAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            output_structured=triage_payload,
+            status=AgentRun.Status.SUCCEEDED,
+        )
+    trace = output_structured.get("agent_trace") or []
+    if any("salomao_chat: OK" in str(item) for item in trace):
+        engine.record_agent_run(
+            instance=instance,
+            agent_name="SalomaoChatAgent",
+            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
+            output_structured={
+                "message": output_structured.get("message"),
+                "confidence": output_structured.get("confidence"),
+                "model_name": output_structured.get("model_name"),
+            },
+            status=AgentRun.Status.SUCCEEDED,
+        )
+
+    effects = (
+        ("update_ticket_stage_active", active_stage_result, "updated"),
+        ("send_thread_reply", reply_result, "sent"),
+        ("update_ticket_stage_final", final_stage_result, "updated"),
+    )
+    for tool_name, effect_result, success_field in effects:
+        succeeded = bool(effect_result.get(success_field))
+        engine.record_tool_call(
+            instance=instance,
+            agent_run=agent_run,
+            tool_name=tool_name,
+            idempotency_key=f"{instance.pk}:{turn_key}:{tool_name}",
+            input_payload={"ticket_id": ticket_id, "session_id": session_id},
+            output_payload=effect_result,
+            status=ToolCallAuditLog.Status.SUCCEEDED if succeeded else ToolCallAuditLog.Status.FAILED,
+            external_object_type="hubspot_ticket" if "stage" in tool_name else "hubspot_thread",
+            external_object_id=str(ticket_id or (thread_ids[0] if thread_ids else "")),
+        )
+
+    if handoff_reason:
+        package = build_handoff_package(
+            instance=instance,
+            reason=handoff_reason,
+            conversation_context=conversation_context,
+            triage_decision=triage_decision,
+            ai_summary=str(output_structured.get("message") or "")[:1000],
+            missing_data=output_structured.get("missing_data") or [],
+        )
+        metadata = dict(instance.metadata or {})
+        metadata["handoff_package"] = package
+        instance.metadata = metadata
+        instance.save(update_fields=["metadata", "updated_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -88,30 +229,12 @@ class WebhookRejectedResponse(Schema):
 
 def _verify_signature_v1(request: HttpRequest, secret: str) -> bool:
     """HubSpot v1: SHA-256(client_secret + request_body)."""
-    signature = request.headers.get("X-HubSpot-Signature", "")
-    if not signature:
-        return False
-    body = request.body.decode("utf-8")
-    expected = hashlib.sha256((secret + body).encode("utf-8")).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return verify_hubspot_signature_v1(request, secret)
 
 
 def _verify_signature_v3(request: HttpRequest, secret: str) -> bool:
-    """HubSpot v3: HMAC-SHA256(timestamp + method + uri + body), base64."""
-    signature = request.headers.get("X-HubSpot-Signature-v3", "")
-    timestamp = request.headers.get("X-HubSpot-Request-Timestamp", "")
-    if not signature or not timestamp:
-        return False
-    method = (request.method or "POST").upper()
-    url = request.build_absolute_uri()
-    body = request.body.decode("utf-8")
-    source = f"{timestamp}{method}{url}{body}"
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        source.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    """HubSpot v3: HMAC-SHA256(method + uri + body + timestamp), Base64."""
+    return verify_hubspot_signature_v3(request, secret)
 
 
 def _signature_ok(request: HttpRequest) -> bool:
@@ -125,7 +248,7 @@ def _signature_ok(request: HttpRequest) -> bool:
     if not secret:
         # Sem secret configurado: só permitimos em DEBUG para facilitar dev.
         return bool(getattr(settings, "DEBUG", False))
-    return _verify_signature_v1(request, secret) or _verify_signature_v3(request, secret)
+    return is_valid_hubspot_request(request, secret)
 
 
 # ---------------------------------------------------------------------------
@@ -215,134 +338,6 @@ async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse
 
 
 @sync_to_async
-def _record_hubspot_turn_audit(
-    *,
-    context: dict[str, Any],
-    ticket_id: str | None,
-    session_id: str,
-    agent_name: str,
-    output_structured: dict[str, Any],
-    reply_result: dict[str, Any],
-    active_stage_result: dict[str, Any],
-    final_stage_result: dict[str, Any],
-    conversation_context: Any | None = None,
-    triage_decision: Any | None = None,
-    handoff_reason: str | None = None,
-    tokens_used: int = 0,
-    latency_ms: int = 0,
-) -> None:
-    """Persist one agent run and every stateful HubSpot effect for the turn."""
-    if not is_lifecycle_schema_ready():
-        logger.warning("hubspot_turn_audit_schema_missing", ticket_id=ticket_id, session_id=session_id)
-        return
-    thread_ids = context.get("thread_ids") or []
-    instance = None
-    if thread_ids:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
-    if instance is None and ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
-    if instance is None:
-        return
-
-    history = context.get("conversation_history") or []
-    latest_incoming = next(
-        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
-        {},
-    )
-    turn_source = _hubspot_turn_source(context, session_id=session_id)
-    turn_key = hashlib.sha256(turn_source.encode("utf-8")).hexdigest()[:20]
-    engine = LifecycleEngine()
-    agent_run = engine.record_agent_run(
-        instance=instance,
-        agent_name=agent_name,
-        input_snapshot={
-            "session_id": session_id,
-            "ticket_id": ticket_id,
-            "thread_id": str(thread_ids[0]) if thread_ids else None,
-            "message_id": latest_incoming.get("id"),
-            "policy_version": (output_structured.get("triage_decision") or {}).get("policy_version"),
-        },
-        output_structured=output_structured,
-        tokens_used=tokens_used,
-        latency_ms=latency_ms,
-        status=AgentRun.Status.SUCCEEDED,
-    )
-
-    triage_payload = output_structured.get("triage_decision")
-    if isinstance(triage_payload, dict):
-        engine.record_agent_run(
-            instance=instance,
-            agent_name="HeimdallTriageAgent",
-            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
-            output_structured=triage_payload,
-            status=AgentRun.Status.SUCCEEDED,
-        )
-    elif any("heimdall: failed" in str(item) for item in output_structured.get("agent_trace") or []):
-        engine.record_agent_run(
-            instance=instance,
-            agent_name="HeimdallTriageAgent",
-            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
-            status=AgentRun.Status.FAILED,
-            error_message="Heimdall triage failed; Supervisor selected safe human handoff.",
-        )
-
-    trace = output_structured.get("agent_trace") or []
-    if any("salomao_chat: OK" in str(item) for item in trace):
-        engine.record_agent_run(
-            instance=instance,
-            agent_name="SalomaoChatAgent",
-            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
-            output_structured={
-                "message": output_structured.get("message"),
-                "confidence": output_structured.get("confidence"),
-                "model_name": output_structured.get("model_name"),
-            },
-            status=AgentRun.Status.SUCCEEDED,
-        )
-    elif any("salomao_chat: failed" in str(item) for item in trace):
-        engine.record_agent_run(
-            instance=instance,
-            agent_name="SalomaoChatAgent",
-            input_snapshot={"session_id": session_id, "message_id": latest_incoming.get("id")},
-            status=AgentRun.Status.FAILED,
-            error_message=str(output_structured.get("handoff_reason") or "Salomao adapter failed."),
-        )
-
-    effects = (
-        ("update_ticket_stage_active", active_stage_result, "updated"),
-        ("send_thread_reply", reply_result, "sent"),
-        ("update_ticket_stage_final", final_stage_result, "updated"),
-    )
-    for tool_name, effect_result, success_field in effects:
-        succeeded = bool(effect_result.get(success_field))
-        engine.record_tool_call(
-            instance=instance,
-            agent_run=agent_run,
-            tool_name=tool_name,
-            idempotency_key=f"{instance.pk}:{turn_key}:{tool_name}",
-            input_payload={"ticket_id": ticket_id, "session_id": session_id},
-            output_payload=effect_result,
-            status=ToolCallAuditLog.Status.SUCCEEDED if succeeded else ToolCallAuditLog.Status.FAILED,
-            external_object_type="hubspot_ticket" if "stage" in tool_name else "hubspot_thread",
-            external_object_id=str(ticket_id or (thread_ids[0] if thread_ids else "")),
-        )
-
-    if handoff_reason:
-        package = build_handoff_package(
-            instance=instance,
-            reason=handoff_reason,
-            conversation_context=conversation_context,
-            triage_decision=triage_decision,
-            ai_summary=str(output_structured.get("message") or "")[:1000],
-            missing_data=output_structured.get("missing_data") or [],
-        )
-        metadata = dict(instance.metadata or {})
-        metadata["handoff_package"] = package
-        instance.metadata = metadata
-        instance.save(update_fields=["metadata", "updated_at"])
-
-
-@sync_to_async
 def _advance_lifecycle_for_hubspot_context(
     context: dict[str, Any],
     ticket_id: str | None,
@@ -377,79 +372,6 @@ def _advance_lifecycle_for_hubspot_context(
             break
 
 
-def _hubspot_turn_source(context: dict[str, Any], *, session_id: str) -> str:
-    """Build a stable source ID even when HubSpot omits a message ID."""
-    history = context.get("conversation_history") or []
-    latest_incoming = next(
-        (item for item in reversed(history) if str(item.get("direction") or "").upper() == "INCOMING"),
-        None,
-    )
-    if not latest_incoming:
-        return session_id
-    if latest_incoming.get("id"):
-        return str(latest_incoming["id"])
-    fingerprint = {
-        "created_at": latest_incoming.get("created_at"),
-        "sender": latest_incoming.get("sender"),
-        "text": latest_incoming.get("text"),
-        "attachments": latest_incoming.get("attachments") or [],
-    }
-    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-
-
-@sync_to_async
-def _claim_hubspot_turn(
-    context: dict[str, Any],
-    *,
-    ticket_id: str | None,
-    session_id: str,
-) -> tuple[bool, str | None]:
-    """Atomically claim one incoming message across ticket and thread events."""
-    history = context.get("conversation_history") or []
-    has_incoming = any(str(item.get("direction") or "").upper() == "INCOMING" for item in history)
-    if not has_incoming:
-        return True, None
-
-    source = _hubspot_turn_source(context, session_id=session_id)
-    turn_key = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
-    thread_ids = context.get("thread_ids") or []
-    instance = None
-    schema_ready = is_lifecycle_schema_ready()
-    if schema_ready and thread_ids:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
-    if instance is None and schema_ready and ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
-    if instance is not None:
-        audit_key = f"{instance.pk}:{turn_key}:send_thread_reply"
-        already_sent = ToolCallAuditLog.objects.filter(
-            idempotency_key=audit_key,
-            status=ToolCallAuditLog.Status.SUCCEEDED,
-        ).exists()
-        if already_sent:
-            return False, None
-
-    scope = str(ticket_id or (thread_ids[0] if thread_ids else session_id))
-    cache_key = f"salomao:hubspot-turn:{scope}:{turn_key}"
-    try:
-        return bool(cache.add(cache_key, "processing", timeout=_TURN_PROCESSING_TTL_SECONDS)), cache_key
-    except Exception as exc:
-        logger.warning("hubspot_turn_idempotency_cache_unavailable", error=str(exc), error_type=type(exc).__name__)
-        return True, None
-
-
-@sync_to_async
-def _finish_hubspot_turn(cache_key: str | None, *, completed: bool) -> None:
-    if not cache_key:
-        return
-    try:
-        if completed:
-            cache.set(cache_key, "completed", timeout=_TURN_COMPLETED_TTL_SECONDS)
-        else:
-            cache.delete(cache_key)
-    except Exception as exc:
-        logger.warning("hubspot_turn_idempotency_cache_finalize_failed", error=str(exc), error_type=type(exc).__name__)
-
-
 def _build_hubspot_supervisor_message(context: dict[str, Any], ticket_id: str | None) -> str | None:
     prompt = build_salomao_prompt_from_hubspot_context(context)
     if prompt:
@@ -470,49 +392,55 @@ def _build_hubspot_supervisor_message(context: dict[str, Any], ticket_id: str | 
     )
 
 
-async def _move_hubspot_ticket(
-    ticket_id: str | None,
-    stage_id: str,
+def _latest_incoming_customer_text(context: dict[str, Any]) -> str:
+    """Return only the latest raw customer text for deterministic policies."""
+    for item in reversed(context.get("conversation_history") or []):
+        if str(item.get("direction") or "").upper() == "INCOMING":
+            return str(item.get("text") or "").strip()
+    return ""
+
+
+def _sanitize_latest_incoming_customer_text(context: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Return a copied context with untrusted customer text normalized."""
+    safe_context = deepcopy(context)
+    history = safe_context.get("conversation_history") or []
+    for item in reversed(history):
+        if str(item.get("direction") or "").upper() != "INCOMING":
+            continue
+        assessment = assess_customer_content(str(item.get("text") or ""))
+        item["text"] = assessment.sanitized_text
+        return safe_context, assessment.risk_flags
+    return safe_context, ()
+
+
+@sync_to_async
+def _prepare_instance_for_supervisor(instance: ConversationInstance) -> None:
+    """Refresh a retryable instance so the worker can restart hydration."""
+    instance.refresh_from_db()
+    if instance.state == ConversationInstance.State.FAILED_RETRYABLE:
+        LifecycleEngine().transition(
+            instance,
+            ConversationInstance.State.CONTEXT_HYDRATING,
+            reason="Retry worker restarted context hydration.",
+            actor_type="retry_worker",
+        )
+
+
+@sync_to_async
+def _mark_pipeline_failure(
     *,
-    reason: str,
-    pipeline_id: str | None = None,
-) -> dict[str, Any]:
-    """Best-effort deterministic ticket transition around an AI turn."""
-    if not ticket_id or not stage_id:
-        return {"updated": False, "reason": "missing_ticket_or_stage"}
-
-    if pipeline_id:
-        result = await update_hubspot_ticket_route(
-            str(ticket_id),
-            str(stage_id),
-            pipeline_id=str(pipeline_id),
-        )
-    else:
-        result = await update_hubspot_ticket_stage(str(ticket_id), str(stage_id))
-    if not result.get("updated"):
-        logger.error(
-            "supervisor_hubspot_stage_transition_failed",
-            ticket_id=ticket_id,
-            pipeline_id=pipeline_id,
-            stage_id=stage_id,
-            transition_reason=reason,
-            provider_reason=result.get("reason"),
-        )
-    return result
-
-
-async def _handoff_hubspot_ticket(ticket_id: str | None, *, reason: str) -> dict[str, Any]:
-    """Move a human handoff into the N1 queue that drives auto-assignment."""
-    support_pipeline = str(getattr(settings, "HUBSPOT_SUPPORT_PIPELINE_ID", ""))
-    support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
-    fallback_stage = str(getattr(settings, "HUBSPOT_HUMAN_ESCALATION_STAGE_ID", ""))
-    stage_id = support_new_stage or fallback_stage
-    return await _move_hubspot_ticket(
-        ticket_id,
-        stage_id,
-        pipeline_id=support_pipeline or None,
-        reason=reason,
-    )
+    ticket_id: str | None = None,
+    thread_id: str | None = None,
+    error: Exception,
+) -> None:
+    """Correlate uncaught worker failures with the lifecycle retry budget."""
+    instance = None
+    if thread_id:
+        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_id)).first()
+    if instance is None and ticket_id:
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    if instance is not None and instance.state != ConversationInstance.State.FAILED_RETRYABLE:
+        mark_retryable_failure(instance, error)
 
 
 async def _run_supervisor_for_hubspot_context(
@@ -523,36 +451,58 @@ async def _run_supervisor_for_hubspot_context(
     is_off_hours: bool = False,
     require_incoming: bool = False,
 ) -> None:
-    """Run the Supervisor from HubSpot context and send its answer back to HubSpot."""
-    effective_ticket_id = str(ticket_id or context.get("ticket_id") or "") or None
-    message = build_salomao_prompt_from_hubspot_context(context) if require_incoming else None
-    message = message or _build_hubspot_supervisor_message(context, ticket_id)
+    """Run the backend-authoritative HubSpot workflow."""
+    instance = await sync_to_async(ensure_conversation_instance)(
+        context=context,
+        ticket_id=ticket_id,
+        session_id=session_id,
+    )
+    await _prepare_instance_for_supervisor(instance)
+
+    latest_customer_text = _latest_incoming_customer_text(context)
+    if latest_customer_text and await sync_to_async(handle_resolution_confirmation)(instance, latest_customer_text):
+        logger.info(
+            "supervisor_customer_confirmed_resolution",
+            ticket_id=ticket_id,
+            session_id=session_id,
+        )
+        return
+
+    safe_context, content_risk_flags = _sanitize_latest_incoming_customer_text(context)
+    message = build_salomao_prompt_from_hubspot_context(safe_context) if require_incoming else None
+    message = message or _build_hubspot_supervisor_message(safe_context, ticket_id)
     if not message:
         logger.info("supervisor_hubspot_no_message", ticket_id=ticket_id, session_id=session_id)
         return
 
-    active_stage = str(getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", ""))
-    active_stage_result = await _move_hubspot_ticket(
-        effective_ticket_id,
-        active_stage,
-        reason="ai_turn_started",
-    )
-
     conversation_context = build_conversation_context_from_hubspot_context(
-        context,
+        safe_context,
         session_id=session_id,
         is_off_hours=is_off_hours,
     )
+    if "prompt_injection_attempt" in content_risk_flags:
+        await sync_to_async(request_human_handoff)(
+            instance=instance,
+            reason="Deterministic content safety policy detected an instruction-override attempt.",
+            conversation_context=conversation_context,
+            triage_decision=None,
+            ai_summary="Conteúdo potencialmente adversarial detectado antes da execução dos agentes.",
+        )
+        logger.warning(
+            "supervisor_content_safety_handoff",
+            ticket_id=ticket_id,
+            session_id=session_id,
+            risk_flags=content_risk_flags,
+        )
+        return
+
     if not conversation_context.can_send_reply:
-        handoff_result = await _handoff_hubspot_ticket(effective_ticket_id, reason="channel_cannot_reply")
-        handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
-        if handoff_result.get("updated"):
-            handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
-        await _advance_lifecycle_for_hubspot_context(
-            context,
-            ticket_id,
-            handoff_states,
+        await sync_to_async(request_human_handoff)(
+            instance=instance,
             reason="Channel cannot send automated replies.",
+            conversation_context=conversation_context,
+            triage_decision=None,
+            ai_summary="Canal incompatível com resposta automatizada.",
         )
         logger.info("supervisor_hubspot_channel_requires_handoff", ticket_id=ticket_id, session_id=session_id)
         return
@@ -569,56 +519,40 @@ async def _run_supervisor_for_hubspot_context(
         ],
         reason="Supervisor worker processing HubSpot context.",
     )
+    await sync_to_async(instance.refresh_from_db)()
 
-    protocol_reply = await handle_protocol_lookup_from_hubspot_context(context) if require_incoming else None
+    protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if require_incoming else None
     if protocol_reply is not None:
-        reply_result = await send_salomao_reply_to_hubspot_thread(context, protocol_reply)
-        if reply_result.get("sent"):
-            final_stage_result = await _move_hubspot_ticket(
-                effective_ticket_id,
-                str(getattr(settings, "HUBSPOT_AI_WAITING_STAGE_ID", "")),
-                reason="protocol_reply_sent",
-            )
-            await _advance_lifecycle_for_hubspot_context(
-                context,
-                ticket_id,
-                [ConversationInstance.State.WAITING_FOR_CUSTOMER],
-                reason="Judah answered a HubSpot protocol lookup.",
-            )
-        else:
-            final_stage_result = await _handoff_hubspot_ticket(
-                effective_ticket_id,
-                reason="protocol_reply_failed",
-            )
-            handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
-            if final_stage_result.get("updated"):
-                handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
-            await _advance_lifecycle_for_hubspot_context(
-                context,
-                ticket_id,
-                handoff_states,
-                reason=reply_result.get("reason") or "Judah could not send the protocol lookup reply.",
-            )
-        await _record_hubspot_turn_audit(
-            context=context,
-            ticket_id=effective_ticket_id,
+        final_response = f"{protocol_reply.rstrip()}\n\nIsso resolveu sua solicitação?"
+        result = SalomaoResponse(
             session_id=session_id,
-            agent_name="ProtocolLookupService",
-            output_structured={"message": protocol_reply, "outcome": "waiting_customer"},
-            reply_result=reply_result,
-            active_stage_result=active_stage_result,
-            final_stage_result=final_stage_result,
+            message=final_response,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=["protocol_lookup: OK", "supervisor: candidate_resolved"],
+            tokens_used=0,
+            model_name="protocol_lookup",
+            latency_ms=0,
+            decision=SupervisorDecision(
+                outcome="candidate_resolved",
+                final_response=final_response,
+                trace_summary=["protocol_lookup: OK", "supervisor: candidate_resolved"],
+                confidence=1.0,
+            ),
+        )
+        await apply_supervisor_result(
+            instance=instance,
+            context=safe_context,
             conversation_context=conversation_context,
-            handoff_reason=None if reply_result.get("sent") else reply_result.get("reason") or "reply_failed",
+            message=message,
+            result=result,
         )
         logger.info(
             "hubspot_protocol_lookup_completed",
             ticket_id=ticket_id,
             session_id=session_id,
-            reply_sent=reply_result.get("sent"),
-            reply_reason=reply_result.get("reason"),
-            active_stage_updated=active_stage_result.get("updated"),
-            final_stage_updated=final_stage_result.get("updated"),
+            outcome="candidate_resolved",
         )
         return
 
@@ -628,151 +562,60 @@ async def _run_supervisor_for_hubspot_context(
             "user_id": 0,
             "hubspot_ticket_id": ticket_id or context.get("ticket_id", ""),
             "hubspot_owner_id": context.get("owner_id", ""),
-            "hubspot_contact_ids": context.get("contact_ids", []),
+            "hubspot_contact_ids": safe_context.get("contact_ids", []),
             "originating_channel": "hubspot",
             "is_off_hours": is_off_hours,
             "conversation_context": conversation_context.model_dump(mode="json"),
-            "image_base64": context.get("image_base64"),
-            "image_mime_type": context.get("image_mime_type"),
+            "image_base64": safe_context.get("image_base64"),
+            "image_mime_type": safe_context.get("image_mime_type"),
         },
     )
 
     result = await supervisor.run_pipeline_async(message)
-    reply_result = await send_salomao_reply_to_hubspot_thread(context, result.message)
     await _record_usage(ticket_id or context.get("ticket_id", ""), session_id, result)
-
-    requires_handoff = result.requires_human_handoff or result.outcome in {"escalate_human", "failed"}
-    if requires_handoff or not reply_result.get("sent"):
-        final_stage_result = await _handoff_hubspot_ticket(
-            effective_ticket_id,
-            reason="human_handoff_or_reply_failed",
-        )
-        handoff_states = [ConversationInstance.State.HUMAN_HANDOFF_REQUESTED]
-        if final_stage_result.get("updated"):
-            handoff_states.append(ConversationInstance.State.QUEUE_PENDING)
-        await _advance_lifecycle_for_hubspot_context(
-            context,
-            ticket_id,
-            handoff_states,
-            reason=result.handoff_reason or reply_result.get("reason") or "Supervisor requested handoff.",
-        )
-    else:
-        final_stage_result = await _move_hubspot_ticket(
-            effective_ticket_id,
-            str(getattr(settings, "HUBSPOT_AI_WAITING_STAGE_ID", "")),
-            reason="ai_reply_sent",
-        )
-        await _advance_lifecycle_for_hubspot_context(
-            context,
-            ticket_id,
-            [ConversationInstance.State.WAITING_FOR_CUSTOMER],
-            reason="Supervisor sent an answer and is waiting for the customer.",
-        )
-
-    await _record_hubspot_turn_audit(
-        context=context,
-        ticket_id=effective_ticket_id,
-        session_id=session_id,
-        agent_name="SalomaoSupervisorAgent",
-        output_structured=result.model_dump(mode="json"),
-        reply_result=reply_result,
-        active_stage_result=active_stage_result,
-        final_stage_result=final_stage_result,
+    await apply_supervisor_result(
+        instance=instance,
+        context=safe_context,
         conversation_context=conversation_context,
-        triage_decision=result.triage_decision,
-        handoff_reason=(
-            result.handoff_reason or reply_result.get("reason") or "Supervisor requested handoff."
-            if requires_handoff or not reply_result.get("sent")
-            else None
-        ),
-        tokens_used=result.tokens_used,
-        latency_ms=result.latency_ms,
+        message=message,
+        result=result,
     )
 
     logger.info(
         "supervisor_hubspot_completed",
         ticket_id=ticket_id,
         session_id=session_id,
-        reply_sent=reply_result.get("sent"),
-        reply_reason=reply_result.get("reason"),
         tokens_used=result.tokens_used,
         requires_human_handoff=result.requires_human_handoff,
-        outcome=result.outcome,
-        active_stage_updated=active_stage_result.get("updated"),
-        final_stage_updated=final_stage_result.get("updated"),
+        outcome=result.decision.outcome if result.decision else "legacy",
     )
 
 
-async def _run_claimed_hubspot_turn(
-    context: dict[str, Any],
-    *,
-    session_id: str,
-    ticket_id: str | None,
-    is_off_hours: bool = False,
-) -> None:
-    claimed, cache_key = await _claim_hubspot_turn(
-        context,
-        ticket_id=ticket_id,
-        session_id=session_id,
-    )
-    if not claimed:
-        logger.info("supervisor_hubspot_turn_deduplicated", ticket_id=ticket_id, session_id=session_id)
-        return
-    try:
-        await _run_supervisor_for_hubspot_context(
-            context,
-            session_id=session_id,
-            ticket_id=ticket_id,
-            is_off_hours=is_off_hours,
-            require_incoming=True,
-        )
-    except Exception:
-        await _finish_hubspot_turn(cache_key, completed=False)
-        raise
-    await _finish_hubspot_turn(cache_key, completed=True)
-
-
-async def _run_supervisor_pipeline(
-    ticket_id: str,
-    is_off_hours: bool = False,
-    enforce_ai_pipeline: bool = False,
-) -> None:
-    """Hidrata o contexto e executa o Supervisor — roda desconectado do HTTP.
-
-    Qualquer exceção é capturada e logada; nunca sobe (senão o asyncio imprime
-    'Task exception was never retrieved' no stdout do worker).
-    """
+async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -> None:
+    """Hydrate and execute the Supervisor, propagating failures to Celery."""
     try:
         context = await hydrate_ticket_context(ticket_id)
         if context.get("errors") and not context.get("subject"):
             logger.error("supervisor_pipeline_aborted", ticket_id=ticket_id, errors=context["errors"])
-            return
-
-        expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", ""))
-        if enforce_ai_pipeline and expected_pipeline and str(context.get("pipeline") or "") != expected_pipeline:
-            logger.info(
-                "supervisor_pipeline_wrong_pipeline_skipped",
-                ticket_id=ticket_id,
-                pipeline=context.get("pipeline"),
-                expected_pipeline=expected_pipeline,
-            )
-            return
+            raise RuntimeError(f"HubSpot ticket context hydration failed: {context['errors']}")
 
         session_id = f"hubspot-ticket-{ticket_id}"
 
-        await _run_claimed_hubspot_turn(
+        await _run_supervisor_for_hubspot_context(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
             is_off_hours=is_off_hours,
         )
     except Exception as exc:
+        await _mark_pipeline_failure(ticket_id=ticket_id, error=exc)
         logger.error(
             "supervisor_pipeline_failed",
             ticket_id=ticket_id,
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        raise
 
 
 async def _run_salomao_v1_thread_pipeline(thread_id: str) -> None:
@@ -781,45 +624,26 @@ async def _run_salomao_v1_thread_pipeline(thread_id: str) -> None:
         context = await hydrate_thread_context(thread_id)
         if context.get("errors") and not context.get("conversation_history"):
             logger.error("supervisor_thread_pipeline_aborted", thread_id=thread_id, errors=context["errors"])
-            return
+            raise RuntimeError(f"HubSpot thread context hydration failed: {context['errors']}")
 
         ticket_id = context.get("ticket_id") or None
-        if ticket_id:
-            ticket_context = await hydrate_ticket_context(str(ticket_id))
-            ticket_context["thread_ids"] = context.get("thread_ids") or ticket_context.get("thread_ids") or []
-            ticket_context["threads"] = context.get("threads") or ticket_context.get("threads") or []
-            ticket_context["conversation_history"] = (
-                context.get("conversation_history") or ticket_context.get("conversation_history") or []
-            )
-            for image_key in ("image_base64", "image_mime_type", "image_name"):
-                if context.get(image_key):
-                    ticket_context[image_key] = context[image_key]
-            context = ticket_context
-
-            expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", ""))
-            if expected_pipeline and str(context.get("pipeline") or "") != expected_pipeline:
-                logger.info(
-                    "supervisor_thread_wrong_pipeline_skipped",
-                    thread_id=thread_id,
-                    ticket_id=ticket_id,
-                    pipeline=context.get("pipeline"),
-                    expected_pipeline=expected_pipeline,
-                )
-                return
         session_id = f"hubspot-ticket-{ticket_id}" if ticket_id else f"hubspot-thread-{thread_id}"
 
-        await _run_claimed_hubspot_turn(
+        await _run_supervisor_for_hubspot_context(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
+            require_incoming=True,
         )
     except Exception as exc:
+        await _mark_pipeline_failure(thread_id=thread_id, error=exc)
         logger.error(
             "supervisor_thread_pipeline_failed",
             thread_id=thread_id,
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        raise
 
 
 # ---------------------------------------------------------------------------

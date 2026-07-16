@@ -476,3 +476,28 @@ def test_salomao_draft_tokens_are_propagated_to_response() -> None:
     assert response.completion_tokens == 13
     assert response.tokens_used == 24
     assert response.model_name == "gpt-4o-mini"
+    assert response.decision is not None
+    assert response.decision.outcome == "candidate_resolved"
+
+
+def test_missing_triage_data_produces_waiting_decision() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-missing"
+    triage = TriageDecision(
+        rota="FINANCEIRO",
+        prioridade="MEDIA",
+        sentimento="neutro",
+        dados_faltantes=["cpf"],
+        confidence=0.9,
+    )
+
+    response = supervisor._missing_data_response(
+        triage=triage,
+        agent_trace=["heimdall: OK"],
+    )
+
+    assert response.requires_human_handoff is False
+    assert response.decision is not None
+    assert response.decision.outcome == "waiting_customer"
+    assert response.decision.missing_data == ["cpf"]
+    assert "cpf" in response.message
