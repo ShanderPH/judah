@@ -10,7 +10,7 @@
             "hubEvents": [
                 {
                     "subscriptionType": "conversation.newMessage",
-                    "active": false
+                    "active": true
                 }
             ],
             "legacyCrmObjects": [
@@ -37,7 +37,7 @@
                 {
                     "subscriptionType": "ticket.propertyChange",
                     "propertyName": "hs_last_message_from_visitor",
-                    "active": true
+                    "active": false
                 }
             ]
         }

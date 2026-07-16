@@ -459,6 +459,14 @@ async def _run_supervisor_for_hubspot_context(
     )
     await _prepare_instance_for_supervisor(instance)
 
+    if require_incoming and not build_salomao_prompt_from_hubspot_context(context):
+        logger.info(
+            "supervisor_hubspot_no_new_incoming_message",
+            ticket_id=ticket_id,
+            session_id=session_id,
+        )
+        return
+
     latest_customer_text = _latest_incoming_customer_text(context)
     if latest_customer_text and await sync_to_async(handle_resolution_confirmation)(instance, latest_customer_text):
         logger.info(
@@ -469,8 +477,17 @@ async def _run_supervisor_for_hubspot_context(
         return
 
     safe_context, content_risk_flags = _sanitize_latest_incoming_customer_text(context)
-    message = build_salomao_prompt_from_hubspot_context(safe_context) if require_incoming else None
-    message = message or _build_hubspot_supervisor_message(safe_context, ticket_id)
+    if require_incoming:
+        message = build_salomao_prompt_from_hubspot_context(safe_context)
+        if not message:
+            logger.info(
+                "supervisor_hubspot_no_new_incoming_message",
+                ticket_id=ticket_id,
+                session_id=session_id,
+            )
+            return
+    else:
+        message = _build_hubspot_supervisor_message(safe_context, ticket_id)
     if not message:
         logger.info("supervisor_hubspot_no_message", ticket_id=ticket_id, session_id=session_id)
         return
@@ -591,13 +608,27 @@ async def _run_supervisor_for_hubspot_context(
     )
 
 
-async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -> None:
+async def _run_supervisor_pipeline(
+    ticket_id: str,
+    is_off_hours: bool = False,
+    enforce_ai_pipeline: bool = False,
+) -> None:
     """Hydrate and execute the Supervisor, propagating failures to Celery."""
     try:
         context = await hydrate_ticket_context(ticket_id)
         if context.get("errors") and not context.get("subject"):
             logger.error("supervisor_pipeline_aborted", ticket_id=ticket_id, errors=context["errors"])
             raise RuntimeError(f"HubSpot ticket context hydration failed: {context['errors']}")
+
+        expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", ""))
+        if enforce_ai_pipeline and expected_pipeline and str(context.get("pipeline") or "") != expected_pipeline:
+            logger.info(
+                "supervisor_pipeline_wrong_pipeline_skipped",
+                ticket_id=ticket_id,
+                pipeline=context.get("pipeline"),
+                expected_pipeline=expected_pipeline,
+            )
+            return
 
         session_id = f"hubspot-ticket-{ticket_id}"
 
@@ -618,10 +649,14 @@ async def _run_supervisor_pipeline(ticket_id: str, is_off_hours: bool = False) -
         raise
 
 
-async def _run_salomao_v1_thread_pipeline(thread_id: str) -> None:
+async def _run_salomao_v1_thread_pipeline(
+    thread_id: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> None:
     """Run the Supervisor for a HubSpot conversation thread event."""
     try:
-        context = await hydrate_thread_context(thread_id)
+        context = context or await hydrate_thread_context(thread_id)
         if context.get("errors") and not context.get("conversation_history"):
             logger.error("supervisor_thread_pipeline_aborted", thread_id=thread_id, errors=context["errors"])
             raise RuntimeError(f"HubSpot thread context hydration failed: {context['errors']}")

@@ -161,6 +161,63 @@ async def test_pipeline_wrappers_success_and_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ticket_pipeline_enforcement_skips_non_ai_pipeline() -> None:
+    context = {
+        "subject": "A",
+        "pipeline": "support-pipeline",
+    }
+    with (
+        override_settings(HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline"),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_ticket_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
+            new=AsyncMock(),
+        ) as run,
+    ):
+        await webhooks._run_supervisor_pipeline(
+            "ticket-1",
+            enforce_ai_pipeline=True,
+        )
+
+    run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_pipeline_skips_when_latest_message_is_outgoing() -> None:
+    instance = Mock()
+    context = {
+        "ticket_id": "ticket-1",
+        "thread_ids": ["thread-1"],
+        "conversation_history": [
+            {"direction": "INCOMING", "text": "Preciso de ajuda"},
+            {"direction": "OUTGOING", "text": "Como posso ajudar?"},
+        ],
+    }
+    with (
+        patch(
+            "apps.ai_agents.api.webhooks.ensure_conversation_instance",
+            return_value=instance,
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks._prepare_instance_for_supervisor",
+            new=AsyncMock(),
+        ),
+        patch("apps.ai_agents.api.webhooks.SalomaoSupervisorAgent") as supervisor,
+    ):
+        await webhooks._run_supervisor_for_hubspot_context(
+            context,
+            session_id="session-1",
+            ticket_id="ticket-1",
+            require_incoming=True,
+        )
+
+    supervisor.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_ticket_change_endpoint_routes_all_outcomes() -> None:
     request = SimpleNamespace(headers={})
 

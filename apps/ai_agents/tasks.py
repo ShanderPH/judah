@@ -27,8 +27,12 @@ logger = structlog.get_logger(__name__)
 # latency and short enough that a crashed worker's lock will expire before
 # HubSpot's retry window runs out.
 _IDEMPOTENCY_TTL_SECONDS = 600
+_STAGE_TRIGGER_DEDUPE_TTL_SECONDS = 60
 _LOCK_KEY_PREFIX = "salomao:supervisor:ticket"
 _THREAD_LOCK_KEY_PREFIX = "salomao:supervisor:thread"
+_PENDING_KEY_PREFIX = "salomao:supervisor:pending"
+_THREAD_PENDING_KEY_PREFIX = "salomao:supervisor:thread-pending"
+_STAGE_TRIGGER_KEY_PREFIX = "salomao:supervisor:stage-trigger"
 
 
 def _redis_client() -> redis.Redis:
@@ -42,7 +46,13 @@ def _redis_client() -> redis.Redis:
     default_retry_delay=30,
     name="ai_agents.run_supervisor_pipeline_task",
 )
-def run_supervisor_pipeline_task(self, ticket_id: str, is_off_hours: bool = False) -> None:
+def run_supervisor_pipeline_task(
+    self,
+    ticket_id: str,
+    is_off_hours: bool = False,
+    enforce_ai_pipeline: bool = False,
+    queue_if_busy: bool = False,
+) -> None:
     """Run the Salomão supervisor pipeline for a HubSpot ticket.
 
     Acquires a short-lived Redis lock keyed on ``ticket_id`` so that duplicate
@@ -52,10 +62,27 @@ def run_supervisor_pipeline_task(self, ticket_id: str, is_off_hours: bool = Fals
     """
     ticket_id = str(ticket_id)
     lock_key = f"{_LOCK_KEY_PREFIX}:{ticket_id}"
+    pending_key = f"{_PENDING_KEY_PREFIX}:{ticket_id}"
+    stage_trigger_key = f"{_STAGE_TRIGGER_KEY_PREFIX}:{ticket_id}"
 
     client: redis.Redis | None
     try:
         client = _redis_client()
+        if not queue_if_busy:
+            first_stage_trigger = bool(
+                client.set(
+                    stage_trigger_key,
+                    "1",
+                    nx=True,
+                    ex=_STAGE_TRIGGER_DEDUPE_TTL_SECONDS,
+                )
+            )
+            if not first_stage_trigger:
+                logger.info(
+                    "supervisor_pipeline_stage_trigger_deduplicated",
+                    ticket_id=ticket_id,
+                )
+                return
         acquired = bool(client.set(lock_key, "1", nx=True, ex=_IDEMPOTENCY_TTL_SECONDS))
     except redis.RedisError as exc:
         logger.warning(
@@ -67,17 +94,35 @@ def run_supervisor_pipeline_task(self, ticket_id: str, is_off_hours: bool = Fals
         acquired = True
 
     if not acquired:
+        if client is not None and queue_if_busy:
+            try:
+                client.set(pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
+            except redis.RedisError as exc:
+                logger.warning(
+                    "supervisor_pipeline_pending_mark_failed",
+                    ticket_id=ticket_id,
+                    error=str(exc),
+                )
         logger.info(
-            "supervisor_pipeline_duplicate_skipped",
+            "supervisor_pipeline_busy",
             ticket_id=ticket_id,
             lock_key=lock_key,
+            followup_queued=queue_if_busy,
         )
         return
 
     from apps.ai_agents.api.webhooks import _run_supervisor_pipeline
 
+    succeeded = False
     try:
-        asyncio.run(_run_supervisor_pipeline(ticket_id, is_off_hours=is_off_hours))
+        asyncio.run(
+            _run_supervisor_pipeline(
+                ticket_id,
+                is_off_hours=is_off_hours,
+                enforce_ai_pipeline=enforce_ai_pipeline,
+            )
+        )
+        succeeded = True
     except Exception as exc:
         countdown = min(30 * (2**self.request.retries), 300)
         logger.warning(
@@ -89,15 +134,29 @@ def run_supervisor_pipeline_task(self, ticket_id: str, is_off_hours: bool = Fals
         )
         raise self.retry(exc=exc, countdown=countdown) from exc
     finally:
+        run_followup = False
         if client is not None:
             try:
                 client.delete(lock_key)
+                if succeeded:
+                    run_followup = bool(client.delete(pending_key))
             except redis.RedisError as exc:
                 logger.warning(
                     "supervisor_pipeline_lock_release_failed",
                     ticket_id=ticket_id,
                     error=str(exc),
                 )
+        if run_followup:
+            run_supervisor_pipeline_task.delay(
+                ticket_id,
+                is_off_hours,
+                enforce_ai_pipeline,
+                True,
+            )
+            logger.info(
+                "supervisor_pipeline_followup_dispatched",
+                ticket_id=ticket_id,
+            )
 
 
 @shared_task(
@@ -116,6 +175,7 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
     """
     thread_id = str(thread_id)
     lock_key = f"{_THREAD_LOCK_KEY_PREFIX}:{thread_id}"
+    pending_key = f"{_THREAD_PENDING_KEY_PREFIX}:{thread_id}"
 
     client: redis.Redis | None
     try:
@@ -131,17 +191,58 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
         acquired = True
 
     if not acquired:
+        if client is not None:
+            try:
+                client.set(pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
+            except redis.RedisError as exc:
+                logger.warning(
+                    "supervisor_thread_pending_mark_failed",
+                    thread_id=thread_id,
+                    error=str(exc),
+                )
         logger.info(
-            "supervisor_thread_duplicate_skipped",
+            "supervisor_thread_busy",
             thread_id=thread_id,
             lock_key=lock_key,
+            followup_queued=True,
         )
         return
 
     from apps.ai_agents.api.webhooks import _run_salomao_v1_thread_pipeline
+    from apps.ai_agents.services.hubspot import hydrate_thread_context
 
+    succeeded = False
+    ticket_id = ""
+    ticket_lock_key = ""
+    ticket_pending_key = ""
+    ticket_lock_acquired = False
     try:
-        asyncio.run(_run_salomao_v1_thread_pipeline(thread_id))
+        context = asyncio.run(hydrate_thread_context(thread_id))
+        ticket_id = str(context.get("ticket_id") or "")
+        if client is not None and ticket_id:
+            ticket_lock_key = f"{_LOCK_KEY_PREFIX}:{ticket_id}"
+            ticket_pending_key = f"{_PENDING_KEY_PREFIX}:{ticket_id}"
+            ticket_lock_acquired = bool(
+                client.set(
+                    ticket_lock_key,
+                    "1",
+                    nx=True,
+                    ex=_IDEMPOTENCY_TTL_SECONDS,
+                )
+            )
+            if not ticket_lock_acquired:
+                client.set(ticket_pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
+                logger.info(
+                    "supervisor_thread_ticket_busy",
+                    thread_id=thread_id,
+                    ticket_id=ticket_id,
+                    followup_queued=True,
+                )
+                succeeded = True
+                return
+
+        asyncio.run(_run_salomao_v1_thread_pipeline(thread_id, context=context))
+        succeeded = True
     except Exception as exc:
         countdown = min(30 * (2**self.request.retries), 300)
         logger.warning(
@@ -153,15 +254,36 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
         )
         raise self.retry(exc=exc, countdown=countdown) from exc
     finally:
+        run_thread_followup = False
+        run_ticket_followup = False
         if client is not None:
             try:
+                if ticket_lock_acquired:
+                    client.delete(ticket_lock_key)
                 client.delete(lock_key)
+                if succeeded:
+                    run_thread_followup = bool(client.delete(pending_key))
+                    if ticket_lock_acquired:
+                        run_ticket_followup = bool(client.delete(ticket_pending_key))
             except redis.RedisError as exc:
                 logger.warning(
                     "supervisor_thread_lock_release_failed",
                     thread_id=thread_id,
                     error=str(exc),
                 )
+        if run_thread_followup:
+            run_salomao_v1_thread_pipeline_task.delay(thread_id)
+            logger.info(
+                "supervisor_thread_followup_dispatched",
+                thread_id=thread_id,
+            )
+        elif run_ticket_followup:
+            run_supervisor_pipeline_task.delay(ticket_id, False, True, True)
+            logger.info(
+                "supervisor_thread_ticket_followup_dispatched",
+                thread_id=thread_id,
+                ticket_id=ticket_id,
+            )
 
 
 @shared_task(

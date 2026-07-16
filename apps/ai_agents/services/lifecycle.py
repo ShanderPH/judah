@@ -470,13 +470,25 @@ class LifecycleEngine:
                         reason="Assigned human agent sent the first outgoing message.",
                         source_event_id=event.source_event_id,
                     )
-                elif decision.route != "IGNORE" or instance_created:
+                elif decision.route != "IGNORE":
                     self.transition(
                         instance,
                         decision.target_state,
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                         allow_terminal_reopen=event.event_type == "ticket_entered_n1",
+                    )
+                elif instance_created and not event.hubspot_ticket_id:
+                    # A ticket can emit metadata/property events before the
+                    # actionable pipeline or customer-message event. Keeping
+                    # that new ticket instance NORMALIZED allows the later
+                    # event to enter AI processing instead of failing because
+                    # an unrelated first property terminalized it as IGNORED.
+                    self.transition(
+                        instance,
+                        decision.target_state,
+                        reason=decision.reason,
+                        source_event_id=event.source_event_id,
                     )
             else:
                 lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE

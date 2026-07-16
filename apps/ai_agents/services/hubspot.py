@@ -628,16 +628,18 @@ async def hydrate_thread_context(
 
 def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
     history = context.get("conversation_history") or []
-    incoming = [
+    usable = [
         message
         for message in history
-        if (message.get("direction") or "").upper() == "INCOMING"
-        and (
+        if (
             (message.get("text") or "").strip()
             or any(_looks_like_image_attachment(a) for a in message.get("attachments") or [] if isinstance(a, dict))
         )
     ]
-    return incoming[-1] if incoming else None
+    if not usable:
+        return None
+    latest = usable[-1]
+    return latest if (latest.get("direction") or "").upper() == "INCOMING" else None
 
 
 def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | None:

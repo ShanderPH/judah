@@ -69,6 +69,18 @@ def test_build_salomao_prompt_skips_when_no_incoming_message() -> None:
     assert build_salomao_prompt_from_hubspot_context(context) is None
 
 
+def test_build_salomao_prompt_skips_stale_incoming_after_outgoing_reply() -> None:
+    context = {
+        "ticket_id": "123",
+        "conversation_history": [
+            {"direction": "INCOMING", "text": "Preciso de ajuda"},
+            {"direction": "OUTGOING", "text": "Resposta já enviada"},
+        ],
+    }
+
+    assert build_salomao_prompt_from_hubspot_context(context) is None
+
+
 def test_build_salomao_prompt_accepts_image_without_caption() -> None:
     context = {
         "ticket_id": "123",

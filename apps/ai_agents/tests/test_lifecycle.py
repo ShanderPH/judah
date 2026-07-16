@@ -83,6 +83,47 @@ def test_lifecycle_uses_message_id_when_provider_event_id_is_missing() -> None:
 
 
 @pytest.mark.django_db
+@override_settings(
+    HUBSPOT_N1_NEW_STAGE_ID="ai-new",
+    HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage",
+)
+def test_ignored_ticket_property_does_not_block_later_ai_stage() -> None:
+    ticket_id = "ticket-property-before-stage"
+    property_event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": "evt-property",
+            "objectId": ticket_id,
+            "propertyName": "hs_last_message_from_visitor",
+            "propertyValue": "false",
+        },
+        object_id=ticket_id,
+        id="db-property",
+    )
+    stage_event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": "evt-stage",
+            "objectId": ticket_id,
+            "propertyName": "hs_pipeline_stage",
+            "propertyValue": "ai-new",
+        },
+        object_id=ticket_id,
+        id="db-stage",
+    )
+
+    first = record_lifecycle_for_webhook_event(property_event)
+    first.instance.refresh_from_db()
+    assert first.decision.route == "IGNORE"
+    assert first.instance.state == ConversationInstance.State.NORMALIZED
+
+    second = record_lifecycle_for_webhook_event(stage_event)
+    second.instance.refresh_from_db()
+    assert second.decision.route == "AI_TRIAGE"
+    assert second.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+
+
+@pytest.mark.django_db
 def test_outgoing_event_is_logged_without_terminalizing_active_conversation() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:thread:outgoing-preserves-state",
