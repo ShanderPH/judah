@@ -82,7 +82,13 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
             _handle_ticket_owner_change(object_id, property_value, payload)
 
         elif property_name == _PROP_LAST_VISITOR_MESSAGE:
-            _dispatch_salomao_ticket_pipeline(object_id, trigger="customer_message")
+            if str(property_value).lower() == "true":
+                _dispatch_salomao_ticket_pipeline(object_id, trigger="customer_message")
+            else:
+                logger.info(
+                    "hubspot_ticket_customer_message_flag_cleared",
+                    ticket_id=object_id,
+                )
 
         else:
             logger.info(
