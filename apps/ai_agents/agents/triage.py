@@ -78,6 +78,20 @@ class TriageResult(BaseModel):
         ),
     )
     sentimento: Sentimento
+    confidence: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Confiança calibrada da classificação.",
+    )
+    evidences: list[str] = Field(
+        default_factory=list,
+        description="Trechos curtos da mensagem que sustentam a classificação.",
+    )
+    policy_version: str = Field(
+        default="heimdall-v1",
+        description="Versão da política de triagem aplicada.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +152,13 @@ SENTIMENTO
 - positivo: elogios, agradecimentos, tom amigável.
 - neutro: perguntas objetivas sem carga emocional.
 - negativo: reclamação, frustração, urgência com tom duro.
+
+CONFIANÇA, EVIDÊNCIAS E POLÍTICA
+- `confidence`: número entre 0 e 1. Use valores abaixo de 0.60 quando a
+  classificação estiver ambígua ou depender de contexto ausente.
+- `evidences`: até 3 trechos curtos presentes na mensagem que justificam rota,
+  prioridade ou sentimento. Nunca invente evidências.
+- `policy_version`: retorne exatamente "heimdall-v1".
 
 TAGS
 - Use snake_case, curto e descritivo (máx 4 tags).

@@ -27,6 +27,9 @@ class TriageDecision(BaseModel):
     tags: list[str] = Field(default_factory=list)
     dados_faltantes: list[str] = Field(default_factory=list)
     sentimento: Literal["positivo", "neutro", "negativo"]
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    evidences: list[str] = Field(default_factory=list)
+    policy_version: str = "heimdall-v1"
 
 
 class ConversationMessage(BaseModel):
@@ -113,11 +116,13 @@ class SupervisorDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    outcome: Literal["resolved", "waiting_customer", "escalate_human", "failed"]
+    outcome: Literal["waiting_customer", "candidate_resolved", "escalate_human", "failed"]
     final_response: str
     hubspot_action: HubSpotAction | None = None
     trace_summary: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 __all__ = [

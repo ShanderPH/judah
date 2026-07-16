@@ -31,6 +31,23 @@ class TestRecordWebhookEvent:
         assert event.property_value == "939275052"
         assert event.processed is False
 
+    def test_provider_event_id_is_idempotent_per_source_and_type(self) -> None:
+        payload = {"eventId": "evt-deduplicated", "objectId": "42"}
+
+        first = record_webhook_event(
+            source="hubspot",
+            event_type="ticket.propertyChange",
+            payload=payload,
+        )
+        duplicate = record_webhook_event(
+            source="hubspot",
+            event_type="ticket.propertyChange",
+            payload=payload,
+        )
+
+        assert duplicate.pk == first.pk
+        assert WebhookEvent.objects.filter(deduplication_key=first.deduplication_key).count() == 1
+
     def test_accepts_snake_case_aliases(self) -> None:
         event = record_webhook_event(
             source="hubspot",
@@ -139,7 +156,7 @@ class TestProcessWebhookEvent:
         assert event.retry_count == 3
         assert DeadLetterQueue.objects.filter(event=event).exists()
 
-    def test_lifecycle_error_does_not_block_ticket_auto_assignment(self) -> None:
+    def test_lifecycle_error_blocks_conflicting_ticket_auto_assignment(self) -> None:
         ConversationInstance.objects.create(
             idempotency_key="conversation:ticket:ticket-blocked",
             hubspot_ticket_id="ticket-blocked",
@@ -159,11 +176,31 @@ class TestProcessWebhookEvent:
         with patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign:
             ok = process_webhook_event(event.pk)
 
-        assert ok is True
-        mock_assign.assert_called_once_with("ticket-blocked", "1783022765000")
+        assert ok is False
+        mock_assign.assert_not_called()
         event.refresh_from_db()
-        assert event.processed is True
-        assert event.retry_count == 0
+        assert event.processed is False
+        assert event.retry_count == 1
+
+    @patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.delay")
+    def test_lifecycle_ai_route_controls_dispatch(self, mock_pipeline) -> None:
+        event = WebhookEvent.objects.create(
+            event_type="conversation.newMessage",
+            object_id="thread-authoritative",
+            payload={
+                "eventId": "evt-authoritative",
+                "objectId": "thread-authoritative",
+                "threadId": "thread-authoritative",
+                "messageId": "message-authoritative",
+                "direction": "INCOMING",
+                "channel": "chat",
+            },
+        )
+
+        with patch("django.conf.settings.AI_ROUTING_ENABLED", True):
+            assert process_webhook_event(event.pk) is True
+
+        mock_pipeline.assert_called_once_with("thread-authoritative")
 
 
 @pytest.mark.django_db

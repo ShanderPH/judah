@@ -379,15 +379,10 @@ def create_special_schedule(request, payload: CreateSpecialScheduleRequest) -> t
     Use ``schedule_type: "custom"`` with ``start_hour`` and ``end_hour``
     for modified hours.
     """
-    from datetime import date as date_type
-
     from apps.support.models import SpecialSchedule
 
-    parts = payload.date.split("-")
-    target_date = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
-
     schedule, _ = SpecialSchedule.objects.update_or_create(
-        date=target_date,
+        date=payload.date,
         defaults={
             "schedule_type": payload.schedule_type,
             "start_hour": payload.start_hour,

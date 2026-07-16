@@ -68,7 +68,7 @@ def test_lifecycle_records_and_deduplicates_conversation_events() -> None:
 
 
 @pytest.mark.django_db
-def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> None:
+def test_lifecycle_uses_message_id_when_provider_event_id_is_missing() -> None:
     first_event = _conversation_event(eventId="")
     second_event = _conversation_event(eventId="")
     second_event.id = "db-2"
@@ -77,9 +77,61 @@ def test_lifecycle_uses_webhook_row_id_when_provider_event_id_is_missing() -> No
     second = record_lifecycle_for_webhook_event(second_event)
 
     assert first.event_created is True
-    assert second.event_created is True
+    assert second.event_created is False
     assert ConversationInstance.objects.count() == 1
-    assert ConversationEvent.objects.count() == 2
+    assert ConversationEvent.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_outgoing_event_is_logged_without_terminalizing_active_conversation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:outgoing-preserves-state",
+        hubspot_thread_id="outgoing-preserves-state",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-outgoing",
+        event_type="conversation_message_received",
+        idempotency_key="hubspot:conversation.newMessage:evt-outgoing",
+        payload={"direction": "OUTGOING"},
+        hubspot_thread_id="outgoing-preserves-state",
+        channel="chat",
+        direction="OUTGOING",
+        message_id="outgoing-message",
+    )
+
+    result = LifecycleEngine().record_normalized_event(event)
+
+    instance.refresh_from_db()
+    assert result.event_created is True
+    assert result.decision.route == "IGNORE"
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+
+
+@pytest.mark.django_db
+def test_outgoing_event_starts_assigned_human_work() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:human-started",
+        hubspot_thread_id="human-started",
+        state=ConversationInstance.State.HUMAN_ASSIGNED,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-human-outgoing",
+        event_type="conversation_message_received",
+        idempotency_key="hubspot:conversation.newMessage:evt-human-outgoing",
+        payload={"direction": "OUTGOING"},
+        hubspot_thread_id="human-started",
+        channel="chat",
+        direction="OUTGOING",
+        message_id="human-outgoing-message",
+    )
+
+    LifecycleEngine().record_normalized_event(event)
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.HUMAN_IN_PROGRESS
 
 
 @pytest.mark.django_db

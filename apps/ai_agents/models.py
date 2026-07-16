@@ -125,6 +125,7 @@ class ConversationInstance(models.Model):
         TRIAGE_RUNNING = "TRIAGE_RUNNING", "Triage Running"
         AI_SERVICE_PENDING = "AI_SERVICE_PENDING", "AI Service Pending"
         AI_SERVICE_RUNNING = "AI_SERVICE_RUNNING", "AI Service Running"
+        WAITING_FOR_CUSTOMER = "WAITING_FOR_CUSTOMER", "Waiting for Customer"
         HUMAN_HANDOFF_REQUESTED = "HUMAN_HANDOFF_REQUESTED", "Human Handoff Requested"
         QUEUE_PENDING = "QUEUE_PENDING", "Queue Pending"
         HUMAN_ASSIGNED = "HUMAN_ASSIGNED", "Human Assigned"
@@ -263,6 +264,9 @@ class AgentRun(models.Model):
         related_name="agent_runs",
     )
     agent_name = models.CharField(max_length=100, db_index=True)
+    model_name = models.CharField(max_length=100, blank=True)
+    prompt_version = models.CharField(max_length=100, blank=True)
+    policy_version = models.CharField(max_length=100, blank=True)
     input_snapshot = models.JSONField(default=dict, blank=True)
     output_structured = models.JSONField(default=dict, blank=True)
     tool_calls = models.JSONField(default=list, blank=True)

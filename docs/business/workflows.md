@@ -106,24 +106,42 @@ Os fluxos conectam clientes finais, agentes de suporte, sistemas externos (HubSp
 
 ## 4. Fluxo de webhook HubSpot → Supervisor de IA
 
-> **Nota:** `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`. O fluxo real de IA passa pelo webhook canônico `/api/v1/webhooks/hubspot/` quando `AI_ROUTING_ENABLED=true`.
+O endpoint `/api/v1/webhooks/hubspot/` é a entrada canônica e o backend é a
+autoridade do workflow. O router alternativo em `apps/ai_agents/api/webhooks.py`
+não é montado; ele concentra o worker reutilizado pelas tasks Celery.
 
 ### Passo a passo
 
-1. HubSpot envia `ticket-change` para `/api/v1/webhooks/hubspot/`.
-2. O handler canônico valida HMAC v1/v3 e persiste `WebhookEvent`.
-3. Quando `AI_ROUTING_ENABLED=true`, o handler dispara `run_supervisor_pipeline_task.delay(ticket_id, is_off_hours)`.
-4. A task adquire lock Redis.
-5. `_run_supervisor_pipeline`:
-   - Hidrata contexto do ticket via HubSpot API.
-   - Monta mensagem com assunto, canal e histórico.
-   - Executa Supervisor.
-   - Registra `TokenTrackingLog`.
+1. HubSpot envia o evento para `/api/v1/webhooks/hubspot/`.
+2. O endpoint valida HMAC v1/v3, incluindo a janela antirreplay de cinco
+   minutos da assinatura v3, e persiste um `WebhookEvent` idempotente.
+3. `process_webhook_event_task` normaliza o evento e o
+   `RoutingPolicyEngine` escolhe exatamente uma rota: `IGNORE`, `CLOSE`,
+   `AUTO_ASSIGNMENT`, `AI_TRIAGE` ou `HUMAN_HANDOFF`.
+4. Em `AI_TRIAGE`, o worker hidrata `ConversationContext`, sanitiza o
+   conteúdo e bloqueia tentativas explícitas de prompt injection antes do LLM.
+5. Heimdall retorna `TriageDecision` com rota, prioridade, sentimento, dados
+   faltantes, confiança, evidências e versão da política.
+6. Dados faltantes produzem uma pergunta objetiva e o estado
+   `WAITING_FOR_CUSTOMER`; risco, baixa confiança ou canal incompatível
+   produzem handoff humano.
+7. Com contexto suficiente, o serviço especializado é executado e o
+   Supervisor retorna apenas `waiting_customer`, `candidate_resolved`,
+   `escalate_human` ou `failed`.
+8. Respostas e handoffs são aplicados pela camada de execução com permissão
+   por estado, chave de idempotência, `AgentRun` e `ToolCallAuditLog`.
+9. Uma resolução candidata permanece em `WAITING_FOR_CUSTOMER`; somente uma
+   confirmação determinística do cliente leva a `RESOLVED_BY_AI` e `CLOSED`.
+10. Handoffs criam `HandoffPackage`, entram no Matchmaker e avançam para os
+    estados humanos. Falhas transitórias usam retry limitado, watchdog e
+    fallback seguro para atendimento humano.
 
 ### Decisões
 
-- Fora do horário comercial: o pipeline ainda roda, mas a mensagem inclui `is_off_hours=True`; Action Agent deve usar stage off-hours.
-- Se assinatura inválida: retorna 401 (canônico) ou 500 (comportamento depende do router). Nunca aceita em produção sem `HUBSPOT_APP_SECRET`.
+- Eventos duplicados não repetem dispatch nem efeitos externos.
+- Fora do horário comercial, `ConversationContext.is_off_hours` informa a
+  política e o handoff continua disponível.
+- Sem `HUBSPOT_APP_SECRET` fora de DEBUG, o endpoint falha fechado.
 
 ### Arquivos relacionados
 
@@ -182,8 +200,9 @@ Os fluxos conectam clientes finais, agentes de suporte, sistemas externos (HubSp
 
 ## Pontos de atenção
 
-- O fluxo de auto-atribuição e o fluxo de IA competem pelo mesmo ticket? Inferência baseada no código: ambos reagem ao webhook, mas `AI_ROUTING_ENABLED` desabilita o router de IA, enquanto o webhook canônico sempre dispara Matchmaker. **TODO: confirmar** se há sobreposição quando IA está habilitada.
 - O fechamento via `hs_pipeline_stage` e `hs_v2_date_entered_939275052` pode chegar quase simultaneamente; o lock Redis mitiga, mas ainda há janela de corrida.
+- A proteção contra prompt injection é determinística e conservadora; deve
+  ser complementada por evals contínuos e monitoramento de falsos positivos.
 
 ## Recomendações
 

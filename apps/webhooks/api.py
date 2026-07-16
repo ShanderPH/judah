@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from ninja import Body, Router
 
-from apps.webhooks.services import process_webhook_event, record_webhook_event
+from apps.webhooks.services import record_webhook_event
+from apps.webhooks.signatures import (
+    is_valid_hubspot_request,
+    verify_hubspot_signature_v1,
+    verify_hubspot_signature_v3,
+)
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -24,34 +29,20 @@ def _verify_hubspot_signature_v1(request: HttpRequest, secret: str) -> bool:
 
     Sent in the ``X-HubSpot-Signature`` header for private apps.
     """
-    signature = request.headers.get("X-HubSpot-Signature", "")
-    if not signature:
-        return False
-    body = request.body.decode("utf-8")
-    expected = hashlib.sha256((secret + body).encode("utf-8")).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return verify_hubspot_signature_v1(request, secret)
 
 
 def _verify_hubspot_signature_v3(request: HttpRequest, secret: str) -> bool:
-    """Verify HubSpot v3 signature: HMAC-SHA256(timestamp + method + url + body).
+    """Verify HubSpot v3 signature: HMAC-SHA256(method + url + body + timestamp).
 
     Sent in the ``X-HubSpot-Signature-v3`` header for newer private apps.
     """
-    signature = request.headers.get("X-HubSpot-Signature-v3", "")
-    timestamp = request.headers.get("X-HubSpot-Request-Timestamp", "")
-    if not signature or not timestamp:
-        return False
-    method = request.method.upper()
-    url = request.build_absolute_uri()
-    body = request.body.decode("utf-8")
-    source = f"{timestamp}{method}{url}{body}"
-    expected = hmac.new(secret.encode("utf-8"), source.encode("utf-8"), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return verify_hubspot_signature_v3(request, secret)
 
 
 def _is_valid_hubspot_request(request: HttpRequest, secret: str) -> bool:
     """Accept if either v1 or v3 signature matches."""
-    return _verify_hubspot_signature_v1(request, secret) or _verify_hubspot_signature_v3(request, secret)
+    return is_valid_hubspot_request(request, secret)
 
 
 def _verify_jira_signature(request: HttpRequest, secret: str) -> bool:
@@ -99,6 +90,8 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
         )
 
     events_queued = 0
+    from apps.webhooks.tasks import process_webhook_event_task
+
     for item in payload:
         event_type = item.get("subscriptionType", "unknown")
 
@@ -114,7 +107,7 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
             )
             continue
 
-        process_webhook_event(event.pk)
+        process_webhook_event_task.delay(str(event.pk))
         events_queued += 1
 
     status = "accepted" if signature_ok else "signature_mismatch"
@@ -142,5 +135,7 @@ def jira_webhook(request: HttpRequest, payload: Body[dict[str, Any]]) -> tuple[i
 
     event_type = payload.get("webhookEvent", "unknown")
     event = record_webhook_event(source="jira", event_type=event_type, payload=payload)
-    process_webhook_event(event.pk)
+    from apps.webhooks.tasks import process_webhook_event_task
+
+    process_webhook_event_task.delay(str(event.pk))
     return 202, {"status": "accepted", "event_id": str(event.pk)}

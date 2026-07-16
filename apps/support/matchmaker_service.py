@@ -55,6 +55,40 @@ class AssignmentOutcome(StrEnum):
     NON_RETRYABLE_EXTERNAL_ERROR = "non_retryable_external_error"
 
 
+def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None:
+    """Advance the deterministic lifecycle after Matchmaker assignment."""
+    try:
+        from apps.ai_agents.models import ConversationInstance
+        from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+
+        engine = LifecycleEngine()
+        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(hubspot_ticket_id)).first()
+        if instance is None:
+            return
+        instance.assigned_agent_id = str(agent.hubspot_owner_id)
+        instance.save(update_fields=["assigned_agent_id", "updated_at"])
+        try:
+            engine.transition(
+                instance,
+                ConversationInstance.State.HUMAN_ASSIGNED,
+                reason="Matchmaker assigned the conversation to a human agent.",
+                actor_type="matchmaker",
+                actor_id=str(agent.hubspot_owner_id),
+            )
+        except InvalidStateTransitionError as exc:
+            logger.info(
+                "matchmaker_lifecycle_transition_skipped",
+                ticket_id=hubspot_ticket_id,
+                error=str(exc),
+            )
+    except Exception as exc:
+        logger.warning(
+            "matchmaker_lifecycle_transition_failed",
+            ticket_id=hubspot_ticket_id,
+            error=str(exc),
+        )
+
+
 def _active_queue():
     """Return queue rows that have not been quarantined."""
     return NewConversation.objects.filter(
@@ -254,6 +288,7 @@ def _do_assign(new_conv: NewConversation) -> AssignmentOutcome:
         agent_current_chats=agent.current_simultaneous_chats,
         agent_max_chats=agent.max_simultaneous_chats,
     )
+    _transition_assigned_lifecycle(new_conv.hubspot_ticket_id, agent)
     return AssignmentOutcome.ASSIGNED
 
 
@@ -466,4 +501,40 @@ def enqueue_new_ticket(
         else:
             logger.info("matchmaker_ticket_already_queued", ticket_id=hubspot_ticket_id)
 
+    return new_conv
+
+
+def enqueue_handoff_ticket(
+    hubspot_ticket_id: str,
+    *,
+    pipeline_id: str = "",
+    priority: str = "",
+    subject: str = "",
+    contact_name: str = "",
+    contact_email: str = "",
+) -> NewConversation:
+    """Enqueue an AI handoff without applying N1 entry-stage eligibility rules."""
+    new_conv, _created = NewConversation.objects.update_or_create(
+        hubspot_ticket_id=str(hubspot_ticket_id),
+        defaults={
+            "pipeline_id": pipeline_id or SUPPORT_PIPELINE_ID,
+            "priority": priority,
+            "subject": subject,
+            "contact_name": contact_name,
+            "contact_email": contact_email,
+            "entered_queue_at": timezone.now(),
+            "queue_status": NewConversation.QueueStatus.PENDING,
+            "assignment_attempts": 0,
+            "last_assignment_attempt_at": None,
+            "next_assignment_attempt_at": None,
+            "failure_code": "",
+            "failure_message": "",
+        },
+    )
+    logger.info(
+        "matchmaker_handoff_enqueued",
+        ticket_id=hubspot_ticket_id,
+        pipeline_id=new_conv.pipeline_id,
+        priority=priority or None,
+    )
     return new_conv

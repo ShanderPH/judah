@@ -79,7 +79,7 @@ def test_watchdog_marks_stuck_instances_retryable() -> None:
 
 
 @pytest.mark.django_db
-def test_watchdog_marks_repeated_failures_terminal() -> None:
+def test_watchdog_schedules_exhausted_failure_for_safe_handoff() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:thread:stuck-2",
         hubspot_thread_id="stuck-2",
@@ -92,6 +92,7 @@ def test_watchdog_marks_repeated_failures_terminal() -> None:
 
     instance.refresh_from_db()
     assert result.scanned == 1
-    assert result.marked_terminal == 1
-    assert instance.state == ConversationInstance.State.FAILED_TERMINAL
+    assert result.marked_retryable == 1
+    assert result.marked_terminal == 0
+    assert instance.state == ConversationInstance.State.FAILED_RETRYABLE
     assert instance.failure_count == 3

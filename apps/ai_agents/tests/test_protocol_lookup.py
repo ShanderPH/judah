@@ -251,17 +251,17 @@ async def test_unrelated_message_is_not_handled() -> None:
     assert await handler.handle(_context("Como criar um cupom?")) is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> None:
     from apps.ai_agents.api import webhooks
 
     lookup = AsyncMock(return_value="Resposta de protocolo")
-    send_reply = AsyncMock(return_value={"sent": True, "message_id": "message-1"})
+    apply_result = AsyncMock()
     advance = AsyncMock()
     supervisor = Mock()
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", lookup)
-    monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", send_reply)
+    monkeypatch.setattr(webhooks, "apply_supervisor_result", apply_result)
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", advance)
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor)
 
@@ -283,18 +283,19 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
     )
 
     lookup.assert_awaited_once_with(context)
-    send_reply.assert_awaited_once_with(context, "Resposta de protocolo")
+    apply_result.assert_awaited_once()
+    assert apply_result.await_args.kwargs["result"].decision.outcome == "candidate_resolved"
     supervisor.assert_not_called()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypatch) -> None:
     from apps.ai_agents.agents.supervisor import SalomaoResponse
     from apps.ai_agents.api import webhooks
 
     lookup = AsyncMock()
-    send_reply = AsyncMock(return_value={"sent": True, "message_id": "message-1"})
+    apply_result = AsyncMock()
     advance = AsyncMock()
     record_usage = AsyncMock()
     result = SalomaoResponse(
@@ -311,7 +312,7 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
     supervisor_instance.run_pipeline_async = AsyncMock(return_value=result)
     supervisor_factory = Mock(return_value=supervisor_instance)
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", lookup)
-    monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", send_reply)
+    monkeypatch.setattr(webhooks, "apply_supervisor_result", apply_result)
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", advance)
     monkeypatch.setattr(webhooks, "_record_usage", record_usage)
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor_factory)
@@ -335,10 +336,10 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
 
     lookup.assert_not_awaited()
     supervisor_factory.assert_called_once()
-    send_reply.assert_awaited_once_with(context, "Resposta normal do Salomao")
+    apply_result.assert_awaited_once()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> None:
     from apps.ai_agents.agents.supervisor import SalomaoResponse
@@ -358,7 +359,7 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
     supervisor_instance.run_pipeline_async = AsyncMock(return_value=result)
     supervisor_factory = Mock(return_value=supervisor_instance)
     monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhooks, "send_salomao_reply_to_hubspot_thread", AsyncMock(return_value={"sent": True}))
+    monkeypatch.setattr(webhooks, "apply_supervisor_result", AsyncMock())
     monkeypatch.setattr(webhooks, "_advance_lifecycle_for_hubspot_context", AsyncMock())
     monkeypatch.setattr(webhooks, "_record_usage", AsyncMock())
     monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor_factory)
