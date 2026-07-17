@@ -95,6 +95,8 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | `core/settings/base.py` | TTL do refresh token JWT (padrão: `7`). |
 | `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` e o fallback do código permanecem desabilitados por segurança. |
 | `AI_ROUTING_ROLLOUT_PERCENTAGE` | `apps/ai_agents/services/rollout.py` | Percentual determinístico de tickets habilitados para IA, de `0` a `100` (padrão: `100`). |
+| `AGENT_STATUS_SYNC_ENABLED` | `apps/support/sat_service.py`, `apps/support/tasks.py` | Permite que sinais explícitos de disponibilidade do HubSpot alterem o status local dos agentes. Padrão `true`, mas `staging` força `false` se a variável não for configurada. |
+| `SAT_HEARTBEAT_MIN_INTERVAL_SECONDS` | `apps/support/sat_service.py` | Intervalo mínimo global entre heartbeats aceitos no mesmo banco (padrão: `18`), protegendo contra Beats duplicados. |
 
 ## Variáveis de observabilidade
 
@@ -119,6 +121,11 @@ No ambiente de staging da Railway, use `DJANGO_ENV=staging`. Esse perfil mantém
 `DEBUG=False`, cookies seguros, tratamento correto do proxy TLS, logs JSON e as
 demais proteções de produção, mas conserva logs de aplicação mais detalhados
 para diagnóstico.
+
+Por segurança, o perfil de staging usa `AGENT_STATUS_SYNC_ENABLED=false` por
+padrão. Só habilite essa sincronização depois de confirmar que `DATABASE_URL`,
+`REDIS_URL` e a conta HubSpot estão totalmente isolados de produção. Valores
+de disponibilidade ausentes, `null` ou desconhecidos nunca alteram o status.
 
 `DJANGO_ENV` escolhe apenas o perfil do Django. A separação real de dados e
 integrações depende de configurar no ambiente de staging seus próprios valores

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -146,15 +147,19 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
         }
 
     # Single API call for all availability status
-    api_calls_made = 1
-    try:
-        availability_data = client.get_all_owners_availability()
-        availability_map = {
-            item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
-        }
-    except Exception as exc:
-        logger.warning("sync_all_agents_availability_fetch_failed", error=str(exc))
-        availability_map = {}
+    api_calls_made = 0
+    availability_map: dict[str, str] = {}
+    if getattr(settings, "AGENT_STATUS_SYNC_ENABLED", True):
+        api_calls_made = 1
+        try:
+            availability_data = client.get_all_owners_availability()
+            availability_map = {
+                item.get("email", "").lower(): item["status_enum"]
+                for item in availability_data
+                if item.get("email") and item.get("status_enum") in {"online", "away"}
+            }
+        except Exception as exc:
+            logger.warning("sync_all_agents_availability_fetch_failed", error=str(exc))
 
     # Fetch conversation counts in parallel (batched by agent)
     count_map: dict[int, int] = {}

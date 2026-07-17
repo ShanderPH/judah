@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
@@ -29,6 +30,34 @@ from django.utils import timezone
 from apps.support.agent_sync_service import is_business_hours
 
 logger = structlog.get_logger(__name__)
+
+_VALID_AGENT_STATUSES = frozenset({"online", "away"})
+
+
+def _claim_sat_heartbeat(now: datetime) -> tuple[bool, str]:
+    """Claim a database-backed heartbeat lease across processes/environments."""
+    from apps.support.models import Agent
+
+    candidate_id = (
+        Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
+        .exclude(hubspot_owner_id__isnull=True)
+        .order_by("id")
+        .values_list("id", flat=True)
+        .first()
+    )
+    if candidate_id is None:
+        return False, "no_active_agents"
+
+    minimum_interval = max(1, int(getattr(settings, "SAT_HEARTBEAT_MIN_INTERVAL_SECONDS", 18)))
+    with transaction.atomic():
+        lease_agent = Agent.objects.select_for_update().get(id=candidate_id)
+        last_heartbeat = lease_agent.sat_last_heartbeat_at
+        if last_heartbeat is not None and (now - last_heartbeat).total_seconds() < minimum_interval:
+            return False, "duplicate_heartbeat"
+        lease_agent.sat_last_heartbeat_at = now
+        lease_agent.updated_at = now
+        lease_agent.save(update_fields=["sat_last_heartbeat_at", "updated_at"])
+    return True, "claimed"
 
 
 def sat_heartbeat() -> dict:
@@ -45,12 +74,33 @@ def sat_heartbeat() -> dict:
         Dict with ``agents_checked``, ``status_changes``, ``agents_came_online``,
         ``skipped_off_hours`` keys.
     """
+    if not getattr(settings, "AGENT_STATUS_SYNC_ENABLED", True):
+        return {
+            "agents_checked": 0,
+            "status_changes": 0,
+            "agents_came_online": 0,
+            "skipped_disabled": True,
+            "skipped_off_hours": False,
+        }
+
     if not is_business_hours():
         return {
             "agents_checked": 0,
             "status_changes": 0,
             "agents_came_online": 0,
             "skipped_off_hours": True,
+        }
+
+    now = timezone.now()
+    claimed, claim_reason = _claim_sat_heartbeat(now)
+    if not claimed:
+        logger.debug("sat_heartbeat_skipped", reason=claim_reason)
+        return {
+            "agents_checked": 0,
+            "status_changes": 0,
+            "agents_came_online": 0,
+            "skipped_duplicate": claim_reason == "duplicate_heartbeat",
+            "skipped_off_hours": False,
         }
 
     from apps.integrations.hubspot.client import get_hubspot_client
@@ -72,8 +122,22 @@ def sat_heartbeat() -> dict:
         }
 
     availability_map: dict[str, str] = {
-        item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
+        item.get("email", "").lower(): item["status_enum"]
+        for item in availability_data
+        if item.get("email") and item.get("status_enum") in _VALID_AGENT_STATUSES
     }
+    remote_emails = {(item.get("email") or "").lower() for item in availability_data if item.get("email")}
+    unknown_availability_emails = [
+        (item.get("email") or "unknown")
+        for item in availability_data
+        if item.get("email") and item.get("status_enum") not in _VALID_AGENT_STATUSES
+    ]
+    if unknown_availability_emails:
+        logger.warning(
+            "sat_unknown_availability_ignored",
+            count=len(unknown_availability_emails),
+            emails=unknown_availability_emails,
+        )
 
     # Get all active agents — only fetch fields needed for heartbeat logic
     agents = list(
@@ -93,7 +157,6 @@ def sat_heartbeat() -> dict:
         .order_by("id")
     )
 
-    now = timezone.now()
     status_changes = 0
     agents_came_online = 0
 
@@ -101,9 +164,7 @@ def sat_heartbeat() -> dict:
     # These agents rely exclusively on contact.propertyChange webhooks for status
     # updates. If their webhook email doesn't match agent_email in the DB, their
     # status can get stuck.
-    unmatched_emails = [
-        (a.agent_email or "N/A") for a in agents if (a.agent_email or "").lower() not in availability_map
-    ]
+    unmatched_emails = [(a.agent_email or "N/A") for a in agents if (a.agent_email or "").lower() not in remote_emails]
     if unmatched_emails:
         logger.warning(
             "sat_heartbeat_agents_not_in_users_api",
@@ -232,6 +293,8 @@ def sat_heartbeat() -> dict:
         "agents_checked": len(agents),
         "status_changes": status_changes,
         "agents_came_online": agents_came_online,
+        "skipped_disabled": False,
+        "skipped_duplicate": False,
         "skipped_off_hours": False,
     }
 

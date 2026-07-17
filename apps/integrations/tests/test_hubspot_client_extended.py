@@ -227,7 +227,8 @@ def test_user_lookup_success_and_failure() -> None:
         assert _client().get_user_by_id("u1") == {}
 
 
-def test_owner_availability_cache_and_pagination() -> None:
+def test_owner_availability_cache_and_pagination(monkeypatch) -> None:
+    monkeypatch.setenv("DJANGO_ENV", "staging")
     cache = Mock()
     cached = [{"user_id": "cached"}]
     cache.get.return_value = cached
@@ -242,7 +243,11 @@ def test_owner_availability_cache_and_pagination() -> None:
     }
     second = Mock()
     second.json.return_value = {
-        "results": [{"id": "u2", "properties": {"hs_email": "b@example.com", "hs_availability_status": "away"}}]
+        "results": [
+            {"id": "u2", "properties": {"hs_email": "b@example.com", "hs_availability_status": "away"}},
+            {"id": "u3", "properties": {"hs_email": "c@example.com", "hs_availability_status": None}},
+            {"id": "u4", "properties": {"hs_email": "d@example.com", "hs_availability_status": "busy"}},
+        ]
     }
     with (
         patch("django.core.cache.cache", cache),
@@ -250,8 +255,8 @@ def test_owner_availability_cache_and_pagination() -> None:
     ):
         result = _client().get_all_owners_availability()
 
-    assert [item["status_enum"] for item in result] == ["online", "away"]
-    cache.set.assert_called_once_with("hubspot_owners_availability", result, timeout=15)
+    assert [item["status_enum"] for item in result] == ["online", "away", None, None]
+    cache.set.assert_called_once_with("hubspot_owners_availability:v2:staging", result, timeout=15)
 
 
 def test_owner_availability_wraps_errors() -> None:

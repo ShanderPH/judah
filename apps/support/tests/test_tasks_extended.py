@@ -187,6 +187,12 @@ def test_availability_change_updates_agent_and_dispatches() -> None:
         is None
     )
 
+    with patch("apps.support.sat_service.sat_accumulate_time") as accumulate:
+        assert task_handle_availability_change.run("contact", "unknown", {"email": "ana@example.com"}) is None
+    agent.refresh_from_db()
+    assert agent.status_enum == Agent.StatusEnum.ONLINE
+    accumulate.assert_not_called()
+
 
 def test_availability_change_fetches_contact_and_retries() -> None:
     client = Mock()

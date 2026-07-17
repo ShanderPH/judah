@@ -356,7 +356,22 @@ def task_handle_availability_change(
         payload: Full webhook payload.
     """
     try:
-        new_status = "online" if availability_value == "available" else "away"
+        from django.conf import settings
+
+        if not getattr(settings, "AGENT_STATUS_SYNC_ENABLED", True):
+            logger.debug("task_availability_change_disabled", contact_id=hubspot_contact_id)
+            return
+
+        normalized_availability = (availability_value or "").strip().lower()
+        status_map = {"available": "online", "away": "away"}
+        new_status = status_map.get(normalized_availability)
+        if new_status is None:
+            logger.warning(
+                "task_availability_change_unknown_ignored",
+                contact_id=hubspot_contact_id,
+                availability_value=availability_value,
+            )
+            return
 
         # Try to get email from payload first
         email = (payload.get("email") or "").lower().strip()

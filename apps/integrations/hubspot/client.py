@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import structlog
@@ -16,6 +17,23 @@ from common.circuit_breaker import CircuitBreaker
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
+
+_HUBSPOT_AVAILABILITY_TO_AGENT_STATUS = {
+    "available": "online",
+    "away": "away",
+}
+
+
+def map_hubspot_availability_status(value: object) -> str | None:
+    """Map only explicit HubSpot availability values to local status.
+
+    Missing, null and unknown values are an absence of signal. They must not
+    make an agent eligible or ineligible for automatic ticket assignment.
+    """
+    if not isinstance(value, str):
+        return None
+    return _HUBSPOT_AVAILABILITY_TO_AGENT_STATUS.get(value.strip().lower())
+
 
 _circuit_breaker = CircuitBreaker(
     name="hubspot",
@@ -468,7 +486,8 @@ class HubSpotClient:
         Uses the HubSpot CRM Users API (``GET /crm/v3/objects/users``) which
         exposes the ``hs_availability_status`` property:
           - ``"available"`` → mapped to ``"online"``
-          - ``"away"`` / anything else → mapped to ``"away"``
+          - ``"away"`` → mapped to ``"away"``
+          - missing/null/unknown → no local status update
 
         Paginates through ALL users using the ``after`` cursor to avoid the
         default 100-record limit. Portals with >100 users would silently miss
@@ -489,7 +508,8 @@ class HubSpotClient:
 
         # Check cache first — avoids redundant API calls within the same
         # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
-        cache_key = "hubspot_owners_availability"
+        environment = os.getenv("DJANGO_ENV", "development").strip().lower()
+        cache_key = f"hubspot_owners_availability:v2:{environment}"
         cached = cache.get(cache_key)
         if cached is not None:
             logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
@@ -522,13 +542,13 @@ class HubSpotClient:
 
                 for user in data.get("results", []):
                     props = user.get("properties") or {}
-                    availability = props.get("hs_availability_status") or "available"
+                    availability = props.get("hs_availability_status")
                     result.append(
                         {
                             "user_id": user.get("id"),
                             "email": props.get("hs_email", ""),
                             "availability_status": availability,
-                            "status_enum": "online" if availability == "available" else "away",
+                            "status_enum": map_hubspot_availability_status(availability),
                         }
                     )
 

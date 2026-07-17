@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.support.models import (
@@ -54,6 +55,16 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
 
 @pytest.mark.django_db
 class TestSATHeartbeat:
+    @override_settings(AGENT_STATUS_SYNC_ENABLED=False)
+    @patch("apps.support.sat_service.is_business_hours")
+    def test_skips_when_status_sync_is_disabled(self, mock_bh):
+        from apps.support.sat_service import sat_heartbeat
+
+        result = sat_heartbeat()
+
+        assert result["skipped_disabled"] is True
+        mock_bh.assert_not_called()
+
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     def test_skips_off_hours(self, mock_bh):
         from apps.support.sat_service import sat_heartbeat
@@ -109,6 +120,37 @@ class TestSATHeartbeat:
         assert result["status_changes"] == 0
         agent.refresh_from_db()
         assert agent.sat_last_heartbeat_at is not None
+
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_null_or_unknown_availability_never_changes_status(self, mock_client_fn, mock_bh):
+        agent = _make_agent("Agent1", 100, status="away")
+        mock_client_fn.return_value.get_all_owners_availability.return_value = [
+            {"email": agent.agent_email, "availability_status": None, "status_enum": None},
+        ]
+
+        from apps.support.sat_service import sat_heartbeat
+
+        result = sat_heartbeat()
+
+        agent.refresh_from_db()
+        assert agent.status_enum == "away"
+        assert result["status_changes"] == 0
+        assert not AgentStatusHistory.objects.filter(agent=agent).exists()
+
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_database_lease_skips_duplicate_heartbeat(self, mock_client_fn, mock_bh):
+        _make_agent("Agent1", 100, status="away")
+
+        from apps.support.sat_service import sat_heartbeat
+
+        first = sat_heartbeat()
+        second = sat_heartbeat()
+
+        assert first["skipped_duplicate"] is False
+        assert second["skipped_duplicate"] is True
+        assert mock_client_fn.return_value.get_all_owners_availability.call_count == 1
 
 
 @pytest.mark.django_db

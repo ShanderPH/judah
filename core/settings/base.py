@@ -184,6 +184,8 @@ CELERY_TASK_ROUTES = {
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
 AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
+AGENT_STATUS_SYNC_ENABLED = config("AGENT_STATUS_SYNC_ENABLED", default=True, cast=bool)
+SAT_HEARTBEAT_MIN_INTERVAL_SECONDS = config("SAT_HEARTBEAT_MIN_INTERVAL_SECONDS", default=18, cast=int)
 
 from celery.schedules import crontab  # noqa: E402
 
