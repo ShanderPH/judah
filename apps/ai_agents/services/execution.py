@@ -356,16 +356,12 @@ def _set_waiting_state(
     engine.transition(
         instance,
         ConversationInstance.State.WAITING_FOR_CUSTOMER,
-        reason=(
-            "Candidate resolution sent; waiting for customer confirmation."
-            if decision.outcome == "candidate_resolved"
-            else "Focused response sent; waiting for customer input."
-        ),
+        reason="Response sent; waiting for additional customer input.",
         actor_type="supervisor",
     )
     engine.update_metadata(
         instance,
-        awaiting_resolution_confirmation=decision.outcome == "candidate_resolved",
+        awaiting_resolution_confirmation=False,
         waiting_for_fields=decision.missing_data,
         last_supervisor_decision=decision.model_dump(mode="json"),
     )

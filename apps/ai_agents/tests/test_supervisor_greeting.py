@@ -222,6 +222,29 @@ def test_first_message_does_not_duplicate_existing_greeting(monkeypatch: Any) ->
     assert response.message.count(FIRST_MESSAGE_GREETING) == 1
 
 
+def test_first_message_removes_model_generated_second_greeting(monkeypatch: Any) -> None:
+    _set_message_count(monkeypatch, 0)
+    supervisor = _supervisor(
+        team_content="Olá! Em que posso ajudar hoje? Se tiver uma dúvida específica, estou à disposição."
+    )
+
+    response = supervisor.run_pipeline("Preciso de ajuda")
+
+    assert response.message.startswith(FIRST_MESSAGE_GREETING)
+    assert response.message.count("Olá!") == 1
+    assert "\n\nEm que posso ajudar hoje?" in response.message
+
+
+def test_automatic_resolution_confirmation_is_removed(monkeypatch: Any) -> None:
+    _set_message_count(monkeypatch, 1)
+    supervisor = _supervisor(deterministic_response=_response("Ajuste concluído. Isso resolveu sua solicitação?"))
+
+    response = supervisor.run_pipeline("Preciso de ajuda")
+
+    assert response.message == "Ajuste concluído."
+    assert "Isso resolveu sua solicitação?" not in response.decision.final_response
+
+
 def test_final_response_is_guarded_and_has_structured_supervisor_decision(monkeypatch: Any) -> None:
     _set_message_count(monkeypatch, 1)
     supervisor = _supervisor(deterministic_response=_response("O CPF informado foi 123.456.789-00."))
@@ -361,6 +384,12 @@ def test_greeting_only_messages_are_detected_without_swallowing_requests() -> No
     assert _is_greeting_only("Olá, tudo bem?") is True
     assert _is_greeting_only("Boa tarde") is True
     assert _is_greeting_only("Oi, não consigo emitir um boleto") is False
+    assert (
+        _is_greeting_only(
+            "Atendimento HubSpot\nTicket: 123\nHistorico recente:\n[INCOMING] olá\n\nMensagem atual do cliente:\nolá"
+        )
+        is True
+    )
 
 
 def test_integrated_chain_asks_customer_need_for_greeting_instead_of_handoff() -> None:
@@ -386,7 +415,7 @@ def test_integrated_chain_asks_customer_need_for_greeting_instead_of_handoff() -
     assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
     assert response.missing_data == ["descricao_da_solicitacao"]
-    assert "Como posso ajudar?" in response.message
+    assert "Como posso ajudar hoje?" in response.message
     assert "supervisor: greeting_clarification" in response.agent_trace
 
 
@@ -412,9 +441,20 @@ def test_first_greeting_runs_full_pipeline_with_intro_and_clarification(monkeypa
     response = supervisor.run_pipeline("Oi!")
 
     assert response.message.startswith(FIRST_MESSAGE_GREETING)
-    assert "Como posso ajudar?" in response.message
+    assert "Como posso ajudar hoje?" in response.message
     assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
+
+
+def test_human_service_wording_requires_handoff() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+
+    requires_handoff, reason = supervisor._check_handoff(
+        FakeTeamResponse("Recomendo abrir um ticket para atendimento humano.")
+    )
+
+    assert requires_handoff is True
+    assert reason is not None
 
 
 def test_integrated_chain_hands_off_when_heimdall_fails() -> None:

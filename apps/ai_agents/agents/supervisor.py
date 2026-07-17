@@ -52,7 +52,19 @@ from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
 logger = structlog.get_logger(__name__)
 
-FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, o seu assistente virtual da inChurch..."
+FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, assistente virtual da inChurch."
+GREETING_CLARIFICATION = "Como posso ajudar hoje? Conte brevemente o que você precisa."
+
+_CURRENT_CUSTOMER_MESSAGE_MARKER = "Mensagem atual do cliente:"
+_LEADING_ASSISTANT_GREETING_RE = re.compile(
+    r"^\s*(?:(?:ol[áa]|oi|bom\s+dia|boa\s+tarde|boa\s+noite)\s*[!,.?:;\-]*\s*)"
+    r"(?:(?:👋\s*)?eu\s+sou\s+o\s+salom[aã]o[^\n.!?]*inchurch(?:\.\.\.|[.!?])?\s*)?",
+    flags=re.IGNORECASE,
+)
+_RESOLUTION_CONFIRMATION_RE = re.compile(
+    r"(?:\s+)?isso\s+resolveu\s+(?:a\s+)?sua\s+solicita(?:ç|c)[ãa]o\?\s*",
+    flags=re.IGNORECASE,
+)
 
 _GREETING_ONLY_MESSAGES = {
     "bom dia",
@@ -72,10 +84,23 @@ _GREETING_ONLY_MESSAGES = {
 
 def _is_greeting_only(message: str) -> bool:
     """Return whether the customer greeted without describing a request."""
-    normalized = unicodedata.normalize("NFKD", message).encode("ascii", "ignore").decode("ascii").lower()
+    customer_message = message
+    if _CURRENT_CUSTOMER_MESSAGE_MARKER in message:
+        customer_message = message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1]
+    normalized = unicodedata.normalize("NFKD", customer_message).encode("ascii", "ignore").decode("ascii").lower()
     normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
     normalized = " ".join(normalized.split())
     return normalized in _GREETING_ONLY_MESSAGES
+
+
+def _without_resolution_confirmation(content: str) -> str:
+    """Remove the deprecated automatic closing question from customer text."""
+    return _RESOLUTION_CONFIRMATION_RE.sub("", content).rstrip()
+
+
+def _without_leading_assistant_greeting(content: str) -> str:
+    """Remove a model-generated salutation before the canonical first intro."""
+    return _LEADING_ASSISTANT_GREETING_RE.sub("", content, count=1).lstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +172,8 @@ _SUPERVISOR_INSTRUCTIONS = [
     "agente delegado — não descarte o output do Heimdall.",
     "Sintetize a resposta final em português brasileiro, cordial e objetivo "
     "(máx 3 parágrafos). Cite as fontes quando o KnowledgeRagAgent as retornar.",
+    "Não repita a saudação ou a apresentação do Salomão na mesma resposta.",
+    "Não acrescente a pergunta 'Isso resolveu sua solicitação?'.",
 ]
 
 
@@ -466,8 +493,9 @@ class SalomaoSupervisorAgent:
                 ]
             )
         )
-        if guarded_output.text:
-            response.message = guarded_output.text
+        sanitized_message = _without_resolution_confirmation(guarded_output.text)
+        if sanitized_message:
+            response.message = sanitized_message
         else:
             response.message = (
                 "Não consegui gerar uma resposta segura agora. Vou encaminhar seu atendimento para o nosso time."
@@ -477,8 +505,16 @@ class SalomaoSupervisorAgent:
             response.outcome = "escalate_human"
             response.confidence = 0.0
 
-        if is_first_message and not response.message.startswith(FIRST_MESSAGE_GREETING):
-            response.message = f"{FIRST_MESSAGE_GREETING}\n\n{response.message.lstrip()}"
+        if is_first_message:
+            if "supervisor: greeting_clarification" in response.agent_trace:
+                response.message = f"{FIRST_MESSAGE_GREETING}\n\n{GREETING_CLARIFICATION}"
+            else:
+                body = response.message
+                if body.startswith(FIRST_MESSAGE_GREETING):
+                    body = body[len(FIRST_MESSAGE_GREETING) :].lstrip()
+                else:
+                    body = _without_leading_assistant_greeting(body)
+                response.message = FIRST_MESSAGE_GREETING if not body else f"{FIRST_MESSAGE_GREETING}\n\n{body}"
 
         canonical = response.decision or SupervisorDecision(
             outcome=response.outcome,
@@ -646,7 +682,7 @@ class SalomaoSupervisorAgent:
         agent_trace: list[str],
     ) -> SalomaoResponse:
         """Keep a greeting in AI service and ask for the actual request."""
-        message = "Como posso ajudar? Conte, por favor, o que você precisa ou qual dificuldade encontrou."
+        message = GREETING_CLARIFICATION
         return SalomaoResponse(
             session_id=self.session_id,
             message=message,
@@ -828,7 +864,7 @@ class SalomaoSupervisorAgent:
             outcome = "candidate_resolved"
             requires_handoff = False
             handoff_reason = None
-            message = self._append_resolution_confirmation(draft.response_text)
+            message = _without_resolution_confirmation(draft.response_text)
         else:
             outcome = "waiting_customer"
             requires_handoff = False
@@ -877,7 +913,7 @@ class SalomaoSupervisorAgent:
     ) -> SalomaoResponse:
         """Build a structured decision from a deterministic service route."""
         outcome = "escalate_human" if requires_handoff else "candidate_resolved"
-        message = content if requires_handoff else self._append_resolution_confirmation(content)
+        message = _without_resolution_confirmation(content)
         return SalomaoResponse(
             session_id=self.session_id,
             message=message,
@@ -897,14 +933,6 @@ class SalomaoSupervisorAgent:
                 confidence=triage.confidence,
             ),
         )
-
-    def _append_resolution_confirmation(self, content: str) -> str:
-        """Ensure candidate resolutions request deterministic confirmation."""
-        normalized = content.rstrip()
-        question = "Isso resolveu sua solicitação?"
-        if question.lower() in normalized.lower():
-            return normalized
-        return f"{normalized}\n\n{question}"
 
     def _risk_flags(self, triage: TriageDecision | None) -> list[str]:
         """Translate triage dimensions into stable risk flags."""
@@ -972,6 +1000,7 @@ class SalomaoSupervisorAgent:
             "escalado",
             "suporte humano",
             "atendente humano",
+            "atendimento humano",
             "requires_human_handoff",
         ]
         requires_handoff = any(kw in content for kw in handoff_keywords)

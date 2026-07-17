@@ -47,11 +47,11 @@ def _triage() -> TriageDecision:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_candidate_resolution_waits_and_audits_reply() -> None:
+async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
-        message="Ajuste concluído.\n\nIsso resolveu sua solicitação?",
+        message="Ajuste concluído.",
         sources=[],
         requires_human_handoff=False,
         handoff_reason=None,
@@ -62,7 +62,7 @@ async def test_candidate_resolution_waits_and_audits_reply() -> None:
         triage_decision=_triage(),
         decision=SupervisorDecision(
             outcome="candidate_resolved",
-            final_response="Ajuste concluído.\n\nIsso resolveu sua solicitação?",
+            final_response="Ajuste concluído.",
             confidence=0.9,
         ),
     )
@@ -81,7 +81,7 @@ async def test_candidate_resolution_waits_and_audits_reply() -> None:
 
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
-    assert instance.metadata["awaiting_resolution_confirmation"] is True
+    assert instance.metadata["awaiting_resolution_confirmation"] is False
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="Heimdall").exists)()
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="SalomaoSupervisor").exists)()
     audit = await sync_to_async(ToolCallAuditLog.objects.get)(
