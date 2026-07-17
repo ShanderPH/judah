@@ -530,13 +530,15 @@ async def hydrate_ticket_context(
         contacts = (associations.get("contacts") or {}).get("results") or []
         context["contact_ids"] = [str(c.get("id")) for c in contacts if c.get("id")]
 
-        thread_ids = _extract_thread_ids(ticket)[:max_threads]
-        context["thread_ids"] = thread_ids
+        candidate_thread_ids = _extract_thread_ids(ticket)
+        valid_thread_ids: list[str] = []
         history: list[dict[str, Any]] = []
-        for thread_id in thread_ids:
+        for thread_id in candidate_thread_ids:
+            if len(valid_thread_ids) >= max_threads:
+                break
             try:
-                context["threads"].append(await _fetch_thread(client, thread_id))
-                history.extend(await _fetch_conversation_history(client, thread_id))
+                thread = await _fetch_thread(client, thread_id)
+                thread_history = await _fetch_conversation_history(client, thread_id)
             except httpx.HTTPError as exc:
                 logger.warning(
                     "hubspot_history_fetch_error",
@@ -544,6 +546,13 @@ async def hydrate_ticket_context(
                     error=str(exc),
                 )
                 errors.append(f"history:{thread_id}")
+                continue
+
+            valid_thread_ids.append(thread_id)
+            context["threads"].append(thread)
+            history.extend(thread_history)
+
+        context["thread_ids"] = valid_thread_ids
 
         context["conversation_history"] = sorted(
             history,

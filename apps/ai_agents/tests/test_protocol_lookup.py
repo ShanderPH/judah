@@ -285,6 +285,7 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
     lookup.assert_awaited_once_with(context)
     apply_result.assert_awaited_once()
     assert apply_result.await_args.kwargs["result"].decision.outcome == "candidate_resolved"
+    assert apply_result.await_args.kwargs["result"].message == "Resposta de protocolo"
     supervisor.assert_not_called()
 
 

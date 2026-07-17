@@ -540,7 +540,7 @@ async def _run_supervisor_for_hubspot_context(
 
     protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if require_incoming else None
     if protocol_reply is not None:
-        final_response = f"{protocol_reply.rstrip()}\n\nIsso resolveu sua solicitação?"
+        final_response = protocol_reply.rstrip()
         result = SalomaoResponse(
             session_id=session_id,
             message=final_response,

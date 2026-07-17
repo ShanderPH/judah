@@ -423,7 +423,51 @@ async def test_hydrate_ticket_context_keeps_partial_thread_failure(monkeypatch) 
         context = await hydrate_ticket_context("ticket-1")
 
     assert context["errors"] == ["history:bad-thread"]
+    assert context["thread_ids"] == []
     assert context["conversation_history"] == []
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ticket_context_skips_stale_thread_and_uses_active_one(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    request = httpx.Request("GET", "https://api.hubapi.com/thread/stale")
+    response = httpx.Response(404, request=request)
+    stale = httpx.HTTPStatusError("missing", request=request, response=response)
+    ticket = {
+        "properties": {},
+        "associations": {"conversations": {"results": [{"id": "stale-thread"}, {"id": "active-thread"}]}},
+    }
+    client = MagicMock()
+    with (
+        patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
+        patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)),
+        patch.object(
+            hubspot,
+            "_fetch_thread",
+            new=AsyncMock(side_effect=[stale, {"id": "active-thread"}]),
+        ),
+        patch.object(
+            hubspot,
+            "_fetch_conversation_history",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "incoming-1",
+                        "thread_id": "active-thread",
+                        "direction": "INCOMING",
+                        "text": "Como criar um cupom?",
+                        "created_at": "2026-07-17T14:49:00Z",
+                    }
+                ]
+            ),
+        ),
+        patch.object(hubspot, "_hydrate_latest_incoming_image", new=AsyncMock()),
+    ):
+        context = await hydrate_ticket_context("ticket-1")
+
+    assert context["thread_ids"] == ["active-thread"]
+    assert context["conversation_history"][0]["thread_id"] == "active-thread"
+    assert context["errors"] == ["history:stale-thread"]
 
 
 @pytest.mark.asyncio

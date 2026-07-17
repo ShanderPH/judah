@@ -10,10 +10,13 @@ As credenciais vêm estritamente de variáveis de ambiente (sem Django ORM).
 
 from __future__ import annotations
 
+import html
 import os
+import re
 from typing import Any
 
 import structlog
+from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.tools import Toolkit
@@ -23,6 +26,91 @@ from pinecone import ServerlessSpec
 from apps.ai_agents.agents.base import BaseInChurchAgent
 
 logger = structlog.get_logger(__name__)
+
+
+def _clean_index_text(value: Any) -> str:
+    """Normalize HubSpot markup and irreversible replacement markers from indexed text."""
+    text = html.unescape(re.sub(r"<[^>]+>", "", str(value or "")))
+    text = text.replace("\ufffd", "")
+    text = re.sub(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Ý])", " ", text)
+    text = re.sub(r":(?=\S)", ": ", text)
+    return "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()).strip()
+
+
+class ScoredPineconeDb(PineconeDb):
+    """Pinecone adapter that preserves provider similarity scores on documents."""
+
+    def __init__(self, *args: Any, host: str | None = None, **kwargs: Any) -> None:
+        """Keep the data-plane host away from Pinecone's control-plane client."""
+        self._data_host = host
+        super().__init__(*args, host=None, **kwargs)
+
+    @property
+    def index(self) -> Any:
+        """Connect to the configured data host while control calls use the default API."""
+        if self._index is None:
+            self._index = self.client.Index(host=self._data_host) if self._data_host else self.client.Index(self.name)
+        return self._index
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        filters: Any = None,
+        namespace: str | None = None,
+        include_values: bool | None = None,
+    ) -> list[Document]:
+        """Search Pinecone while retaining each match score for filtering and audit."""
+        if isinstance(filters, list):
+            logger.warning("pinecone_filter_expressions_unsupported")
+            filters = None
+
+        dense_embedding = self.embedder.get_embedding(query)
+        if dense_embedding is None:
+            logger.error("pinecone_query_embedding_failed")
+            return []
+
+        query_kwargs: dict[str, Any] = {
+            "vector": dense_embedding,
+            "top_k": limit,
+            "namespace": namespace or self.namespace,
+            "filter": filters,
+            "include_values": include_values,
+            "include_metadata": True,
+        }
+        if self.use_hybrid_search:
+            sparse_embedding = self.sparse_encoder.encode_queries(query)
+            dense_embedding, sparse_embedding = self._hybrid_scale(
+                dense_embedding,
+                sparse_embedding,
+                alpha=self.hybrid_alpha,
+            )
+            query_kwargs["vector"] = dense_embedding
+            query_kwargs["sparse_vector"] = sparse_embedding
+
+        response = self.index.query(**query_kwargs)
+        documents: list[Document] = []
+        for match in response.matches:
+            metadata = dict(match.metadata or {})
+            metadata["text"] = _clean_index_text(metadata.get("text"))
+            if metadata.get("title"):
+                metadata["title"] = _clean_index_text(metadata["title"])
+            score = float(match.score) if match.score is not None else None
+            if score is not None:
+                metadata["_pinecone_score"] = score
+            documents.append(
+                Document(
+                    content=metadata["text"],
+                    id=match.id,
+                    embedding=match.values,
+                    meta_data=metadata,
+                    reranking_score=score,
+                )
+            )
+
+        if self.reranker:
+            documents = self.reranker.rerank(query=query, documents=documents)
+        return documents
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +133,7 @@ def _create_knowledge_base() -> Knowledge | None:
         PINECONE_CLOUD / PINECONE_REGION: usados no ServerlessSpec quando
             o host direto não estiver disponível.
         EMBEDDING_MODEL: ID do modelo de embedding OpenAI (default
-            `text-embedding-ada-002`). Troque via env quando o índice
-            Pinecone foi populado com outro modelo (ex: `text-embedding-3-small`).
+            `text-embedding-3-small`, usado na indexação atual).
         PINECONE_DIMENSION: Dimensão do embedding (default 1536 — serve
             para ada-002 e 3-small). Ajuste quando trocar para 3-large.
 
@@ -58,7 +145,7 @@ def _create_knowledge_base() -> Knowledge | None:
     host = os.getenv("PINECONE_HOST")
     cloud = os.getenv("PINECONE_CLOUD", "aws")
     region = os.getenv("PINECONE_REGION", "us-east-1")
-    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
+    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     namespace = os.getenv("PINECONE_NAMESPACE", "")
 
     try:
@@ -92,14 +179,14 @@ def _create_knowledge_base() -> Knowledge | None:
         "host": host,
         "namespace": namespace,
         "embedder": OpenAIEmbedder(**embedder_kwargs),
+        "spec": ServerlessSpec(cloud=cloud, region=region),
     }
 
     if not host:
         vector_db_kwargs.pop("host", None)
-        vector_db_kwargs["spec"] = ServerlessSpec(cloud=cloud, region=region)
 
     try:
-        vector_db = PineconeDb(**vector_db_kwargs)
+        vector_db = ScoredPineconeDb(**vector_db_kwargs)
     except TypeError as exc:
         # Versão do Agno que ainda não aceita `host` — tenta sem ele.
         logger.warning(
@@ -108,9 +195,8 @@ def _create_knowledge_base() -> Knowledge | None:
             falling_back_to_spec=True,
         )
         vector_db_kwargs.pop("host", None)
-        vector_db_kwargs["spec"] = ServerlessSpec(cloud=cloud, region=region)
         try:
-            vector_db = PineconeDb(**vector_db_kwargs)
+            vector_db = ScoredPineconeDb(**vector_db_kwargs)
         except Exception as e:
             logger.error("knowledge_base_init_failed", error=str(e))
             return None
@@ -150,7 +236,7 @@ class KnowledgeSearchTool(Toolkit):
         self,
         query: str,
         top_k: int = 5,
-        score_threshold: float = 0.72,
+        score_threshold: float = 0.6,
     ) -> list[dict[str, Any]] | dict[str, Any]:
         """Busca artigos na base de conhecimento InChurch.
 
@@ -185,27 +271,50 @@ class KnowledgeSearchTool(Toolkit):
                 max_results=top_k,
             )
 
+            try:
+                effective_threshold = float(os.getenv("PINECONE_SCORE_THRESHOLD", str(score_threshold)))
+            except ValueError:
+                effective_threshold = score_threshold
+
             filtered_results = []
+            raw_scores: list[float] = []
             for doc in results:
-                score = getattr(doc, "score", 0.0)
-                if score >= score_threshold:
-                    metadata = getattr(doc, "meta_data", {}) or {}
+                metadata = getattr(doc, "meta_data", {}) or {}
+                score = getattr(doc, "reranking_score", None)
+                if score is None:
+                    score = getattr(doc, "score", None)
+                if score is None:
+                    score = metadata.get("_pinecone_score")
+                if score is None:
+                    logger.warning("knowledge_search_result_missing_score", document_id=getattr(doc, "id", None))
+                    continue
+
+                score = float(score)
+                raw_scores.append(score)
+                if score >= effective_threshold:
+                    title = _clean_index_text(metadata.get("title") or "Sem título")
+                    article_id = metadata.get("article_id", "unknown")
+                    if isinstance(article_id, float) and article_id.is_integer():
+                        article_id = int(article_id)
                     filtered_results.append(
                         {
-                            "article_id": metadata.get("article_id", "unknown"),
-                            "title": metadata.get("title", "Sem título"),
+                            "article_id": article_id,
+                            "title": title,
                             "summary": metadata.get("summary", ""),
                             "content": getattr(doc, "content", "") or metadata.get("content", ""),
                             "score": round(score, 4),
-                            "source": metadata.get("source", "Base de Conhecimento InChurch"),
-                            "last_updated": metadata.get("last_updated", "N/A"),
+                            "source": metadata.get("url") or metadata.get("source", "Base de Conhecimento InChurch"),
+                            "last_updated": metadata.get("updated_date") or metadata.get("last_updated", "N/A"),
                         }
                     )
 
             logger.debug(
                 "knowledge_search_complete",
                 query=query,
+                raw_results_found=len(results),
                 results_found=len(filtered_results),
+                best_score=round(max(raw_scores), 4) if raw_scores else None,
+                score_threshold=effective_threshold,
             )
             return filtered_results
 
@@ -289,6 +398,9 @@ REGRAS DE FALLBACK:
 - Se a base de conhecimento estiver indisponível, informe isso ao usuário.
 - Neste caso, use apenas conhecimento geral que você tem certeza sobre produtos similares.
 - Se a base de conhecimento estiver indisponível ou você não achar a solução exata nos artigos, você DEVE encerrar sua resposta exatamente com a tag <REQUIRES_ESCALATION>.
+- Resultados podem ser trechos diferentes do mesmo artigo; combine-os antes de responder.
+- Se ao menos um documento relevante foi recuperado, NÃO alegue falha técnica e NÃO inclua <REQUIRES_ESCALATION>.
+- Caracteres ausentes por codificação não tornam o documento indisponível quando o procedimento continua compreensível.
 
 COMPORTAMENTO:
 - Responda em português brasileiro, de forma clara, objetiva e empática.
