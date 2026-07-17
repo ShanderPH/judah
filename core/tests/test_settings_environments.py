@@ -25,7 +25,8 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.DEBUG); "
         "print(settings.LOGGING['handlers']['console']['formatter']); "
         "print(settings.LOGGING['root']['level']); "
-        "print('debug_toolbar' in settings.INSTALLED_APPS)"
+        "print('debug_toolbar' in settings.INSTALLED_APPS); "
+        "print(settings.AGENT_STATUS_SYNC_ENABLED)"
     )
     return subprocess.run(
         [sys.executable, "-c", script],
@@ -41,14 +42,21 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
     result = _inspect_settings("staging")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["False", "json", "INFO", "False"]
+    assert result.stdout.splitlines() == ["False", "json", "INFO", "False", "False"]
 
 
 def test_production_keeps_stricter_root_logging() -> None:
     result = _inspect_settings("production")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["False", "json", "ERROR", "False"]
+    assert result.stdout.splitlines() == ["False", "json", "ERROR", "False", "True"]
+
+
+def test_celery_images_use_environment_settings_loader() -> None:
+    for dockerfile_name in ("Dockerfile.worker", "Dockerfile.beat"):
+        contents = (REPOSITORY_ROOT / dockerfile_name).read_text(encoding="utf-8")
+        assert "DJANGO_SETTINGS_MODULE=core.settings.production" not in contents
+        assert "DJANGO_SETTINGS_MODULE=core.settings" in contents
 
 
 def test_unknown_environment_fails_closed() -> None:

@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import structlog
+from django.conf import settings
 from django.db.models import Avg, Count, Max, Min
 from django.utils import timezone
 
@@ -355,6 +356,13 @@ def task_handle_availability_change(
         availability_value: HubSpot availability status string.
         payload: Full webhook payload.
     """
+    if not settings.AGENT_STATUS_SYNC_ENABLED:
+        logger.debug(
+            "task_availability_change_status_sync_disabled",
+            contact_id=hubspot_contact_id,
+        )
+        return
+
     try:
         new_status = "online" if availability_value == "available" else "away"
 

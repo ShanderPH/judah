@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
@@ -45,6 +46,16 @@ def sat_heartbeat() -> dict:
         Dict with ``agents_checked``, ``status_changes``, ``agents_came_online``,
         ``skipped_off_hours`` keys.
     """
+    if not settings.AGENT_STATUS_SYNC_ENABLED:
+        logger.debug("sat_heartbeat_status_sync_disabled")
+        return {
+            "agents_checked": 0,
+            "status_changes": 0,
+            "agents_came_online": 0,
+            "skipped_off_hours": False,
+            "skipped_status_sync_disabled": True,
+        }
+
     if not is_business_hours():
         return {
             "agents_checked": 0,

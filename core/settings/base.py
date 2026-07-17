@@ -185,6 +185,10 @@ CELERY_TASK_ROUTES = {
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
 AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
 
+# Controls automatic agent availability writes from HubSpot polling, SAT and
+# availability webhooks. Staging overrides this to False unconditionally.
+AGENT_STATUS_SYNC_ENABLED = config("AGENT_STATUS_SYNC_ENABLED", default=True, cast=bool)
+
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {

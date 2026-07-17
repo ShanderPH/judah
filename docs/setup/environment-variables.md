@@ -95,6 +95,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | `core/settings/base.py` | TTL do refresh token JWT (padrão: `7`). |
 | `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` e o fallback do código permanecem desabilitados por segurança. |
 | `AI_ROUTING_ROLLOUT_PERCENTAGE` | `apps/ai_agents/services/rollout.py` | Percentual determinístico de tickets habilitados para IA, de `0` a `100` (padrão: `100`). |
+| `AGENT_STATUS_SYNC_ENABLED` | `core/settings/base.py` | Permite que SAT, reconciliação e webhooks alterem automaticamente o status dos agentes (padrão: `true`). O perfil `staging` força `false`, independentemente do valor no ambiente. |
 
 ## Variáveis de observabilidade
 
@@ -195,6 +196,7 @@ JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
 
 AI_ROUTING_ENABLED=false
 AI_ROUTING_ROLLOUT_PERCENTAGE=100
+AGENT_STATUS_SYNC_ENABLED=true
 ```
 
 ## Arquivos relacionados
@@ -207,6 +209,7 @@ AI_ROUTING_ROLLOUT_PERCENTAGE=100
 - `HUBSPOT_APP_SECRET` deve estar preenchido em produção; em `DEBUG` vazio, a assinatura é bypassada.
 - `DJANGO_SECRET_KEY` é usada tanto pelo Django quanto pelo JWT; rotação invalida todas as sessões.
 - `AI_ROUTING_ENABLED=false` desmonta o router `/api/v1/ai/` por completo. O código usa `False` como padrão; `.env.example` foi ajustado para refletir isso.
+- Em `staging`, `AGENT_STATUS_SYNC_ENABLED` é sempre `false`: heartbeat, reconciliação e webhook não podem alterar `status_enum`. Alterações administrativas manuais continuam disponíveis.
 - `.env.example` foi atualizado com as variáveis documentadas acima. Verifique se o template local possui `HUBSPOT_N1_TEAM_ID`, `HUBSPOT_PORTAL_ID`, `JIRA_WEBHOOK_SECRET`, `PINECONE_HOST`, `PINECONE_CLOUD`, `PINECONE_REGION`, `PINECONE_DIMENSION`, `EMBEDDING_MODEL`, `DEFAULT_MODEL`, `DEFAULT_MINI_MODEL`, `USE_MOCK_HUBSPOT`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILES_SAMPLE_RATE` e `GIT_SHA`.
 
 ## Recomendações

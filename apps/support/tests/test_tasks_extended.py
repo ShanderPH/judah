@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.support.models import (
@@ -186,6 +187,29 @@ def test_availability_change_updates_agent_and_dispatches() -> None:
         )
         is None
     )
+
+
+@pytest.mark.django_db
+@override_settings(AGENT_STATUS_SYNC_ENABLED=False)
+def test_availability_change_does_not_update_status_when_sync_disabled() -> None:
+    agent = Agent.objects.create(
+        name="Ana",
+        agent_email="ana@example.com",
+        hubspot_owner_id=10,
+        status_enum=Agent.StatusEnum.AWAY,
+    )
+
+    with (
+        patch("apps.support.sat_service.sat_accumulate_time") as accumulate,
+        patch("apps.support.tasks.task_matchmaker_drain_queue.delay") as drain,
+    ):
+        task_handle_availability_change.run("contact", "available", {"email": "ana@example.com"})
+
+    agent.refresh_from_db()
+    assert agent.status_enum == Agent.StatusEnum.AWAY
+    assert not AgentStatusHistory.objects.filter(agent=agent).exists()
+    accumulate.assert_not_called()
+    drain.assert_not_called()
 
 
 def test_availability_change_fetches_contact_and_retries() -> None:
