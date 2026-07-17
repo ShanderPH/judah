@@ -32,7 +32,7 @@ class FakeQuery:
         self.message_count = message_count
 
     def aggregate(self, **_kwargs: Any) -> dict[str, int]:
-        return {"total": 0}
+        raise AssertionError("Lifetime token totals must not gate a customer turn.")
 
     def count(self) -> int:
         return self.message_count

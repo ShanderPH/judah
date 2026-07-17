@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.support.models import (
@@ -54,6 +55,19 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
 
 @pytest.mark.django_db
 class TestSATHeartbeat:
+    @override_settings(AGENT_STATUS_SYNC_ENABLED=False)
+    @patch("apps.support.sat_service.is_business_hours")
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_status_sync_disabled_skips_all_work(self, mock_client_fn, mock_bh):
+        from apps.support.sat_service import sat_heartbeat
+
+        result = sat_heartbeat()
+
+        assert result["skipped_status_sync_disabled"] is True
+        assert result["status_changes"] == 0
+        mock_bh.assert_not_called()
+        mock_client_fn.assert_not_called()
+
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     def test_skips_off_hours(self, mock_bh):
         from apps.support.sat_service import sat_heartbeat

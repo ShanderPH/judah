@@ -10,7 +10,11 @@ from asgiref.sync import sync_to_async
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
-from apps.ai_agents.services.execution import apply_supervisor_result, handle_resolution_confirmation
+from apps.ai_agents.services.execution import (
+    HUMAN_HANDOFF_CONFIRMATION,
+    apply_supervisor_result,
+    handle_resolution_confirmation,
+)
 from apps.support.models import NewConversation
 
 
@@ -114,12 +118,30 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
         ),
     )
 
+    effects: list[str] = []
+
+    async def route_handoff(*_args, **_kwargs):
+        effects.append("route")
+        return {"updated": True}
+
+    async def send_confirmation(_context, text):
+        effects.append("reply")
+        assert text == HUMAN_HANDOFF_CONFIRMATION
+        return {"sent": True, "message_id": "out-2"}
+
     with (
         patch(
             "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
-            new=AsyncMock(return_value={"sent": True, "message_id": "out-2"}),
+            new=AsyncMock(side_effect=send_confirmation),
         ),
-        patch("apps.support.tasks.task_matchmaker_drain_queue.delay") as drain,
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(side_effect=route_handoff),
+        ),
+        patch(
+            "apps.support.tasks.task_matchmaker_drain_queue.delay",
+            side_effect=RuntimeError("redis temporarily unavailable"),
+        ) as drain,
     ):
         await apply_supervisor_result(
             instance=instance,
@@ -132,7 +154,9 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
     assert "handoff_package" in instance.metadata
-    assert await sync_to_async(NewConversation.objects.filter(hubspot_ticket_id="ticket-1").exists)()
+    assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
+    queued = await NewConversation.objects.aget(hubspot_ticket_id="ticket-1")
+    assert queued.pipeline_id == "636459134"
     assert await sync_to_async(
         ToolCallAuditLog.objects.filter(
             instance=instance,
@@ -140,6 +164,52 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
         ).exists
     )()
     drain.assert_called_once()
+    assert effects == ["route", "reply"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_handoff_does_not_promise_transfer_when_hubspot_route_fails() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir seu atendimento.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Low confidence",
+        agent_trace=["supervisor: mandatory_human_handoff"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=3,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir seu atendimento.",
+            confidence=0.3,
+        ),
+    )
+    send_reply = AsyncMock(return_value={"sent": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(return_value={"updated": False, "reason": "provider rejected"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=send_reply,
+        ),
+        pytest.raises(RuntimeError, match="provider rejected"),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Não entendi",
+            result=result,
+        )
+
+    send_reply.assert_not_awaited()
+    assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
 
 
 @pytest.mark.django_db

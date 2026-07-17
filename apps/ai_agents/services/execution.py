@@ -10,7 +10,8 @@ from datetime import timedelta
 from typing import Any
 
 import structlog
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
+from django.conf import settings
 from django.utils import timezone
 
 from apps.ai_agents.agents.base import DEFAULT_MINI_MODEL_ID
@@ -22,6 +23,11 @@ from apps.ai_agents.services.lifecycle import LifecycleEngine
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
 
 logger = structlog.get_logger(__name__)
+
+HUMAN_HANDOFF_CONFIRMATION = (
+    "Entendi. Já encaminhei seu atendimento para o nosso time de suporte. "
+    "Um atendente continuará a conversa por aqui assim que estiver disponível."
+)
 
 
 def _text_fingerprint(text: str) -> dict[str, Any]:
@@ -241,7 +247,11 @@ def request_human_handoff(
     ai_summary: str,
     agent_run: AgentRun | None = None,
 ) -> dict[str, Any]:
-    """Persist a handoff package and enqueue the ticket through Matchmaker."""
+    """Move the ticket to human support and persist it in Matchmaker.
+
+    Return only after HubSpot accepted the human-support route and the local
+    queue row exists, so callers never promise a transfer before it happened.
+    """
     engine = LifecycleEngine()
     if instance.state != ConversationInstance.State.HUMAN_HANDOFF_REQUESTED:
         engine.transition(
@@ -275,15 +285,15 @@ def request_human_handoff(
             conversation_instance_id=str(instance.pk),
             allowed_actions=conversation_context.allowed_actions,
         )
-        return package
+        raise PermissionError("Human handoff is not allowed for this conversation context.")
 
     ticket_id = instance.hubspot_ticket_id or (
         conversation_context.ticket_id if conversation_context is not None else None
     )
     if not ticket_id:
-        return package
+        raise ValueError("Human handoff requires a HubSpot ticket ID.")
 
-    idempotency_key = f"handoff:{instance.pk}:{ticket_id}"
+    idempotency_key = f"handoff:v2:{instance.pk}:{ticket_id}"
     prepared = _prepare_tool_call(
         instance=instance,
         tool_name="assign_ticket_to_human_queue",
@@ -296,14 +306,28 @@ def request_human_handoff(
         },
         agent_run=agent_run,
     )
+    output = prepared.cached_output
     if prepared.should_execute:
         try:
+            from apps.ai_agents.services.hubspot import update_hubspot_ticket_route
             from apps.support.matchmaker_service import enqueue_handoff_ticket
             from apps.support.tasks import task_matchmaker_drain_queue
 
+            support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
+            support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
+            route_result = async_to_sync(update_hubspot_ticket_route)(
+                str(ticket_id),
+                support_stage_id,
+                pipeline_id=support_pipeline_id,
+            )
+            if not route_result.get("updated"):
+                raise RuntimeError(
+                    f"HubSpot rejected the human-support route: {route_result.get('reason') or 'unknown error'}"
+                )
+
             queue_row = enqueue_handoff_ticket(
                 str(ticket_id),
-                pipeline_id=instance.pipeline_id or "",
+                pipeline_id=support_pipeline_id,
                 priority=package.get("priority") or "",
                 subject=ai_summary[:255],
             )
@@ -311,9 +335,21 @@ def request_human_handoff(
                 "queued": True,
                 "queue_id": str(queue_row.pk),
                 "ticket_id": str(ticket_id),
+                "pipeline_id": support_pipeline_id,
+                "stage_id": support_stage_id,
+                "route_updated": True,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
-            task_matchmaker_drain_queue.delay()
+            try:
+                task_matchmaker_drain_queue.delay()
+            except Exception as exc:
+                # The durable queue row and HubSpot human route already exist;
+                # Beat will retry the drain if Redis dispatch is degraded.
+                logger.warning(
+                    "human_handoff_matchmaker_dispatch_deferred",
+                    ticket_id=str(ticket_id),
+                    error=str(exc),
+                )
         except Exception as exc:
             _finish_tool_call(
                 prepared.audit_id,
@@ -323,6 +359,11 @@ def request_human_handoff(
             )
             raise
 
+    if not output.get("queued") or not output.get("route_updated"):
+        raise RuntimeError("Human handoff did not complete its durable routing effects.")
+
+    engine.update_metadata(instance, human_handoff_dispatch=output)
+
     if instance.state != ConversationInstance.State.QUEUE_PENDING:
         engine.transition(
             instance,
@@ -330,7 +371,7 @@ def request_human_handoff(
             reason="Human handoff package enqueued for Matchmaker.",
             actor_type="system",
         )
-    return package
+    return {**package, "dispatch": output}
 
 
 def mark_retryable_failure(instance: ConversationInstance, error: Exception | str) -> None:
@@ -398,6 +439,31 @@ async def apply_supervisor_result(
     reply_tool_allowed = (
         not conversation_context.allowed_actions or "send_thread_reply" in conversation_context.allowed_actions
     )
+
+    if decision.outcome == "escalate_human":
+        await sync_to_async(request_human_handoff)(
+            instance=instance,
+            reason=result.handoff_reason or "Supervisor requested human handoff.",
+            conversation_context=conversation_context,
+            triage_decision=result.triage_decision,
+            ai_summary=decision.final_response,
+            agent_run=agent_run,
+        )
+
+        if can_reply and reply_tool_allowed:
+            reply_result = await send_reply_with_audit(
+                instance=instance,
+                context=context,
+                text=HUMAN_HANDOFF_CONFIRMATION,
+                agent_run=agent_run,
+                idempotency_key=(
+                    f"handoff-confirmation:v2:{instance.pk}:{instance.last_message_id or instance.last_event_id}"
+                ),
+            )
+            if not reply_result.get("sent"):
+                raise RuntimeError(reply_result.get("reason") or "HubSpot handoff confirmation failed.")
+        return
+
     if can_reply and decision.final_response and not reply_tool_allowed:
         await sync_to_async(request_human_handoff)(
             instance=instance,
@@ -428,17 +494,6 @@ async def apply_supervisor_result(
                 reply_result.get("reason") or "HubSpot reply failed.",
             )
             raise RuntimeError(reply_result.get("reason") or "HubSpot reply failed.")
-
-    if decision.outcome == "escalate_human":
-        await sync_to_async(request_human_handoff)(
-            instance=instance,
-            reason=result.handoff_reason or "Supervisor requested human handoff.",
-            conversation_context=conversation_context,
-            triage_decision=result.triage_decision,
-            ai_summary=decision.final_response,
-            agent_run=agent_run,
-        )
-        return
 
     await sync_to_async(_set_waiting_state)(instance, decision=decision)
 

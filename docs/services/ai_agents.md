@@ -55,7 +55,7 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 - Wrapper sobre `agno.team.Team` modo `coordinate`.
 - Orquestra o fluxo determinístico Heimdall -> SalomaoChat -> Salomão v1.
-- Implementa circuit breaker e greeting injection.
+- Implementa janela limitada de histórico e greeting injection.
 - Saída: `SalomaoResponse` com `SupervisorDecision` restrito a
   `waiting_customer`, `candidate_resolved`, `escalate_human` ou `failed`.
 
@@ -129,8 +129,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `build_salomao_prompt_from_hubspot_context(context)`: extrai a mensagem atual do cliente para eventos de conversa.
 - `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
-- `request_human_handoff(...)`: persiste `HandoffPackage` e encaminha o ticket
-  ao Matchmaker quando a ação está autorizada.
+- `request_human_handoff(...)`: primeiro move o ticket para o pipeline/estágio
+  humano e persiste a fila do Matchmaker; a confirmação ao cliente só é
+  enviada depois desses efeitos concluírem.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
@@ -155,7 +156,8 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Resolução por IA só fecha após confirmação explícita do cliente.
 - Tools externas exigem estado permitido, chave de idempotência e
   `ToolCallAuditLog`.
-- Circuit breaker: > 15k tokens por sessão → bloqueio.
+- `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma
+  conversa. O contexto enviado ao modelo é limitado às mensagens recentes.
 - Primeira mensagem: greeting obrigatório. Demais: não repetir.
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.

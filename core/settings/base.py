@@ -134,12 +134,18 @@ REDIS_URL = config(
     "REDIS_URL",
     default=config("REDIS_PRIVATE_URL", default="redis://localhost:6379/0"),
 )
+REDIS_CACHE_MAX_CONNECTIONS = config("REDIS_CACHE_MAX_CONNECTIONS", default=4, cast=int)
+REDIS_AGENT_MAX_CONNECTIONS = config("REDIS_AGENT_MAX_CONNECTIONS", default=4, cast=int)
+REDIS_LOCK_MAX_CONNECTIONS = config("REDIS_LOCK_MAX_CONNECTIONS", default=2, cast=int)
 
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
+            "pool_class": "redis.BlockingConnectionPool",
+            "max_connections": REDIS_CACHE_MAX_CONNECTIONS,
+            "timeout": 2,
             "socket_connect_timeout": 5,
             "socket_timeout": 5,
             "retry_on_timeout": True,
@@ -153,10 +159,16 @@ SESSION_CACHE_ALIAS = "default"
 # --- Celery ---
 
 CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_URL
+# No application code consumes AsyncResult objects. Do not open a second
+# Redis pool to persist results that are never read.
+CELERY_RESULT_BACKEND = None
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_STORE_ERRORS_EVEN_IF_IGNORED = False
+CELERY_BROKER_POOL_LIMIT = config("CELERY_BROKER_POOL_LIMIT", default=2, cast=int)
+CELERY_REDIS_MAX_CONNECTIONS = config("CELERY_REDIS_MAX_CONNECTIONS", default=4, cast=int)
 CELERY_TIMEZONE = "America/Sao_Paulo"
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ALWAYS_EAGER = False
@@ -184,6 +196,10 @@ CELERY_TASK_ROUTES = {
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
 AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
+
+# Controls automatic agent availability writes from HubSpot polling, SAT and
+# availability webhooks. Staging overrides this to False unconditionally.
+AGENT_STATUS_SYNC_ENABLED = config("AGENT_STATUS_SYNC_ENABLED", default=True, cast=bool)
 
 from celery.schedules import crontab  # noqa: E402
 

@@ -13,6 +13,7 @@ against duplicate execution when HubSpot retries the same webhook.
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 
 import redis
 import structlog
@@ -35,9 +36,23 @@ _THREAD_PENDING_KEY_PREFIX = "salomao:supervisor:thread-pending"
 _STAGE_TRIGGER_KEY_PREFIX = "salomao:supervisor:stage-trigger"
 
 
+@lru_cache(maxsize=4)
+def _shared_lock_client(redis_url: str, max_connections: int) -> redis.Redis:
+    """Reuse a bounded lock pool instead of creating one per Celery task."""
+    pool = redis.BlockingConnectionPool.from_url(
+        redis_url,
+        max_connections=max_connections,
+        timeout=2,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
+    return redis.Redis(connection_pool=pool)
+
+
 def _redis_client() -> redis.Redis:
     redis_url: str = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url)
+    max_connections = int(getattr(settings, "REDIS_LOCK_MAX_CONNECTIONS", 2))
+    return _shared_lock_client(redis_url, max_connections)
 
 
 @shared_task(
