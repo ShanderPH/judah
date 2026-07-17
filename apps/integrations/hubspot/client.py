@@ -443,11 +443,20 @@ class HubSpotClient:
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
+            properties = ",".join(
+                (
+                    "hs_email",
+                    "hs_availability_status",
+                    "hs_out_of_office_hours",
+                    "hs_working_hours",
+                    "hs_standard_time_zone",
+                )
+            )
             response = _circuit_breaker.call(
                 requests.get,
-                f"https://api.hubapi.com/crm/v3/objects/users/{user_id}",
+                f"https://api.hubapi.com/crm/objects/2026-03/users/{user_id}",
                 headers=headers,
-                params={"properties": "hs_email,hs_availability_status"},
+                params={"properties": properties},
                 timeout=10,
             )
             response.raise_for_status()
@@ -457,12 +466,15 @@ class HubSpotClient:
                 "id": data.get("id"),
                 "email": props.get("hs_email", ""),
                 "hs_availability_status": props.get("hs_availability_status", ""),
+                "hs_out_of_office_hours": props.get("hs_out_of_office_hours"),
+                "hs_working_hours": props.get("hs_working_hours"),
+                "hs_standard_time_zone": props.get("hs_standard_time_zone", ""),
             }
         except Exception as exc:
             logger.warning("hubspot_get_user_by_id_failed", user_id=user_id, error=str(exc))
             return {}
 
-    def get_all_owners_availability(self) -> list[dict[str, Any]]:
+    def get_all_owners_availability(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all HubSpot users with their current availability status.
 
         Uses the HubSpot CRM Users API (``GET /crm/v3/objects/users``) which
@@ -475,7 +487,11 @@ class HubSpotClient:
         agents on page 2+ without pagination.
 
         Results are cached in Redis for 15 seconds to avoid redundant API calls
-        when the SAT heartbeat and Matchmaker drain overlap.
+        when periodic SAT heartbeats overlap. Assignment-critical reconciliation
+        bypasses that cache so a ticket webhook never trusts an older snapshot.
+
+        Args:
+            force_refresh: Bypass the short-lived cache and read HubSpot now.
 
         Returns:
             List of dicts with ``user_id``, ``email``, ``availability_status``,
@@ -489,11 +505,12 @@ class HubSpotClient:
 
         # Check cache first — avoids redundant API calls within the same
         # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
-        cache_key = "hubspot_owners_availability"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
-            return cached
+        cache_key = "hubspot_users_availability_2026_03"
+        if not force_refresh:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
+                return cached
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -501,17 +518,27 @@ class HubSpotClient:
             after: str | None = None
             page = 0
 
+            properties = ",".join(
+                (
+                    "hs_email",
+                    "hs_availability_status",
+                    "hs_out_of_office_hours",
+                    "hs_working_hours",
+                    "hs_standard_time_zone",
+                )
+            )
+
             while True:
                 params: dict = {
                     "limit": 100,
-                    "properties": "hs_email,hs_availability_status",
+                    "properties": properties,
                 }
                 if after:
                     params["after"] = after
 
                 response = _circuit_breaker.call(
                     requests.get,
-                    "https://api.hubapi.com/crm/v3/objects/users",
+                    "https://api.hubapi.com/crm/objects/2026-03/users",
                     headers=headers,
                     params=params,
                     timeout=10,
@@ -522,12 +549,15 @@ class HubSpotClient:
 
                 for user in data.get("results", []):
                     props = user.get("properties") or {}
-                    availability = props.get("hs_availability_status") or "available"
+                    availability = str(props.get("hs_availability_status") or "").strip().lower()
                     result.append(
                         {
                             "user_id": user.get("id"),
                             "email": props.get("hs_email", ""),
                             "availability_status": availability,
+                            "out_of_office_hours": props.get("hs_out_of_office_hours"),
+                            "working_hours": props.get("hs_working_hours"),
+                            "timezone": props.get("hs_standard_time_zone", ""),
                             "status_enum": "online" if availability == "available" else "away",
                         }
                     )

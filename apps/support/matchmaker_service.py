@@ -15,11 +15,12 @@ The 4-rule priority algorithm in ``queue_service.py`` is reused as-is.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
@@ -37,7 +38,10 @@ from apps.support.queue_service import (
     increment_agent_chat_count,
     select_next_agent,
 )
-from apps.support.sat_service import sat_reconcile_agent_load
+from apps.support.sat_service import (
+    sat_reconcile_agent_load,
+    sat_verify_agent_assignment_eligibility,
+)
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
@@ -80,6 +84,15 @@ def matchmaker_assign_next() -> AssignmentOutcome:
     """
     from django.core.cache import cache
 
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("matchmaker_assign_next")
+        return AssignmentOutcome.NO_AGENT
+
     # Pick the oldest pending conversation using select_for_update
     with transaction.atomic():
         new_conv = _ready_queue().select_for_update(skip_locked=True).order_by("entered_queue_at").first()
@@ -97,6 +110,80 @@ def matchmaker_assign_next() -> AssignmentOutcome:
         return _do_assign(new_conv)
     finally:
         cache.delete(claim_key)
+
+
+def _reserve_agent_capacity_if_eligible(agent: Agent) -> Agent | None:
+    """Verify HubSpot, lock, re-evaluate locally, and reserve one slot."""
+    if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        return agent
+
+    from django.db import connection
+
+    from apps.support.eligibility_service import evaluate_persisted_agent
+
+    preliminary = evaluate_persisted_agent(agent, timezone.now())
+    if not preliminary.eligible:
+        logger.warning(
+            "assignment_preliminary_guard_rejected",
+            agent_id=str(agent.id),
+            eligibility_revision=agent.availability_revision,
+            reason=preliminary.reason.value,
+        )
+        return None
+
+    remote_decision = sat_verify_agent_assignment_eligibility(agent)
+    if not remote_decision.eligible:
+        logger.warning(
+            "assignment_remote_guard_rejected",
+            agent_id=str(agent.id),
+            eligibility_revision=agent.availability_revision,
+            reason=remote_decision.reason.value,
+        )
+        return None
+
+    with transaction.atomic():
+        locked = Agent.objects.select_for_update().get(pk=agent.pk)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT CURRENT_TIMESTAMP")
+            database_now = cursor.fetchone()[0]
+        if isinstance(database_now, str):
+            database_now = datetime.fromisoformat(database_now).replace(tzinfo=UTC)
+        decision = evaluate_persisted_agent(locked, database_now)
+        if not decision.eligible:
+            logger.warning(
+                "assignment_final_guard_rejected",
+                agent_id=str(locked.id),
+                eligibility_revision=locked.availability_revision,
+                reason=decision.reason.value,
+            )
+            return None
+        locked.current_simultaneous_chats += 1
+        locked.last_assignment_at = database_now
+        locked.updated_at = database_now
+        locked.save(
+            update_fields=[
+                "current_simultaneous_chats",
+                "last_assignment_at",
+                "updated_at",
+            ]
+        )
+        logger.info(
+            "assignment_capacity_reserved",
+            agent_id=str(locked.id),
+            eligibility_revision=locked.availability_revision,
+            current_chats=locked.current_simultaneous_chats,
+        )
+        return locked
+
+
+def _compensate_reserved_capacity(agent: Agent) -> None:
+    """Release a capacity slot after a failed external mutation."""
+    if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        return
+    from apps.support.queue_service import decrement_agent_chat_count
+
+    decrement_agent_chat_count(agent)
+    logger.warning("assignment_capacity_compensated", agent_id=str(agent.id))
 
 
 def _do_assign(new_conv: NewConversation) -> AssignmentOutcome:
@@ -169,14 +256,25 @@ def _do_assign(new_conv: NewConversation) -> AssignmentOutcome:
 
         agent = agent_retry
 
+    reserved_agent = _reserve_agent_capacity_if_eligible(agent)
+    if reserved_agent is None:
+        new_conv.queue_status = NewConversation.QueueStatus.QUEUED
+        new_conv.assignment_attempts += 1
+        new_conv.last_assignment_attempt_at = timezone.now()
+        new_conv.save(update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"])
+        return AssignmentOutcome.NO_AGENT
+    agent = reserved_agent
+
     # Assign via HubSpot API
     try:
         client = get_hubspot_client()
         client.assign_ticket_owner(new_conv.hubspot_ticket_id, agent.hubspot_owner_id)
     except HubSpotResourceNotFoundError:
+        _compensate_reserved_capacity(agent)
         _quarantine_stale_ticket(new_conv)
         return AssignmentOutcome.STALE_TICKET
     except HubSpotAPIError as exc:
+        _compensate_reserved_capacity(agent)
         _defer_external_failure(new_conv, exc)
         logger.error(
             "matchmaker_hubspot_assign_failed",
@@ -189,6 +287,7 @@ def _do_assign(new_conv: NewConversation) -> AssignmentOutcome:
             return AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR
         return AssignmentOutcome.NON_RETRYABLE_EXTERNAL_ERROR
     except ExternalServiceError:
+        _compensate_reserved_capacity(agent)
         _defer_external_failure(new_conv, None)
         logger.error(
             "matchmaker_hubspot_assign_failed",
@@ -239,8 +338,10 @@ def _do_assign(new_conv: NewConversation) -> AssignmentOutcome:
             queue_wait_seconds=wait_seconds,
         )
 
-        # Increment agent counters
-        increment_agent_chat_count(agent)
+        # Capacity was reserved before the external mutation when the strict
+        # eligibility protocol is enforced. Legacy mode retains the old path.
+        if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+            increment_agent_chat_count(agent)
         Agent.objects.filter(pk=agent.pk).update(
             total_assignments=F("total_assignments") + 1,
         )
@@ -415,6 +516,14 @@ def enqueue_new_ticket(
         NewConversation instance if enqueued, None if ineligible.
     """
     from apps.support.auto_assign_service import _is_ticket_eligible, _parse_hubspot_timestamp
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("enqueue_new_ticket")
+        return None
 
     logger.info("matchmaker_enqueue_ticket", ticket_id=hubspot_ticket_id)
 

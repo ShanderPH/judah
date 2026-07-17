@@ -154,14 +154,6 @@ def update_agent(request, agent_id: str, payload: UpdateAgentRequest) -> Agent:
     if payload.is_active is not None:
         agent.is_active = payload.is_active
         updated_fields.append("is_active")
-    if payload.status_enum is not None:
-        if payload.status_enum not in Agent.StatusEnum.values:
-            raise ValidationError(
-                f"Invalid status '{payload.status_enum}'. Allowed: {', '.join(Agent.StatusEnum.values)}."
-            )
-        agent.status_enum = payload.status_enum
-        updated_fields.append("status_enum")
-
     if updated_fields:
         agent.updated_at = timezone.now()
         agent.save(update_fields=[*updated_fields, "updated_at"])
@@ -189,9 +181,8 @@ def inactivate_agent(request, agent_id: str) -> Agent:
 
     agent.is_active = False
     agent.auto_assign_enabled = False
-    agent.status_enum = Agent.StatusEnum.OFFLINE
     agent.updated_at = timezone.now()
-    agent.save(update_fields=["is_active", "auto_assign_enabled", "status_enum", "updated_at"])
+    agent.save(update_fields=["is_active", "auto_assign_enabled", "updated_at"])
     logger.info("agent_inactivated", agent_id=str(agent.id))
     return agent
 
@@ -414,6 +405,22 @@ def _hubspot_assign(hubspot_ticket_id: str, owner_id: int) -> None:
         )
 
 
+def _ensure_agent_is_currently_eligible(agent: Agent) -> None:
+    """Reject manual assignment to an absent or stale agent."""
+    from django.conf import settings
+
+    if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        return
+    from apps.support.eligibility_service import evaluate_persisted_agent
+
+    decision = evaluate_persisted_agent(agent, timezone.now())
+    if not decision.eligible:
+        raise ValidationError(
+            f"Agent is not eligible for assignment ({decision.reason.value}). "
+            "Refresh availability from HubSpot before retrying."
+        )
+
+
 @router.post(
     "/queue/manual-assign/",
     response=AssignmentActionResponse,
@@ -428,6 +435,8 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
         agent = Agent.objects.get(pk=payload.agent_id)
     except Agent.DoesNotExist as err:
         raise NotFoundError(f"Agent with id={payload.agent_id} not found.") from err
+
+    _ensure_agent_is_currently_eligible(agent)
 
     new_conv = NewConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
     already_assigned = AssignedConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
@@ -499,6 +508,7 @@ def _force_reassign_internal(
     actor_email: str | None = None,
 ) -> dict:
     """Force-reassign a ticket already present in assigned_conversations."""
+    _ensure_agent_is_currently_eligible(target_agent)
     assigned = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if not assigned:
         raise NotFoundError(f"No assigned conversation for ticket {hubspot_ticket_id} — cannot force reassign.")

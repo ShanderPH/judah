@@ -177,6 +177,30 @@ CELERY_TASK_ROUTES = {
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
 
+# Availability and assignment authority. A non-authoritative environment may
+# read HubSpot for diagnostics, but it cannot mutate shared availability state
+# or assign production conversations.
+_RUNTIME_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development").strip().lower()
+AVAILABILITY_AUTHORITY_ENVIRONMENT = config(
+    "AVAILABILITY_AUTHORITY_ENVIRONMENT",
+    default="production",
+)
+AUTO_ASSIGNMENT_ENABLED = config("AUTO_ASSIGNMENT_ENABLED", default=True, cast=bool)
+ABSENCE_SAFE_ELIGIBILITY_SHADOW = config(
+    "ABSENCE_SAFE_ELIGIBILITY_SHADOW",
+    default=_RUNTIME_DJANGO_ENV == "production",
+    cast=bool,
+)
+ABSENCE_SAFE_ELIGIBILITY_ENFORCED = config(
+    "ABSENCE_SAFE_ELIGIBILITY_ENFORCED",
+    default=False,
+    cast=bool,
+)
+AVAILABILITY_FRESHNESS_SECONDS = config("AVAILABILITY_FRESHNESS_SECONDS", default=60, cast=int)
+AVAILABILITY_STABLE_SECONDS = config("AVAILABILITY_STABLE_SECONDS", default=30, cast=int)
+AVAILABILITY_REQUIRED_SAMPLES = config("AVAILABILITY_REQUIRED_SAMPLES", default=2, cast=int)
+AVAILABILITY_LEASE_TTL_SECONDS = config("AVAILABILITY_LEASE_TTL_SECONDS", default=25, cast=int)
+
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
@@ -194,6 +218,7 @@ CELERY_BEAT_SCHEDULE = {
     "sat-heartbeat": {
         "task": "support.task_sat_heartbeat",
         "schedule": 20,  # seconds
+        "options": {"expires": 20},
     },
     # SAT daily counter reset at midnight
     "sat-reset-daily-counters": {

@@ -40,6 +40,11 @@ class Agent(models.Model):
         OFFLINE = "offline", "Offline"
         BUSY = "busy", "Busy"
 
+    class EligibilityState(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        INELIGIBLE = "ineligible", "Ineligible"
+        ELIGIBLE = "eligible", "Eligible"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.TextField()
     agent_email = models.TextField(unique=True)
@@ -66,6 +71,24 @@ class Agent(models.Model):
     last_status_change_at = models.DateTimeField(null=True, blank=True)
     sat_last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     sat_last_count_sync_at = models.DateTimeField(null=True, blank=True)
+    hubspot_user_id = models.CharField(max_length=64, null=True, blank=True, unique=True)
+    remote_availability_status = models.CharField(max_length=32, blank=True, default="")
+    remote_out_of_office_hours = models.JSONField(null=True, blank=True)
+    remote_working_hours = models.JSONField(null=True, blank=True)
+    remote_timezone = models.TextField(blank=True, default="")
+    availability_observed_at = models.DateTimeField(null=True, blank=True)
+    availability_online_since = models.DateTimeField(null=True, blank=True)
+    availability_sample_count = models.PositiveIntegerField(default=0)
+    eligibility_state = models.CharField(
+        max_length=16,
+        choices=EligibilityState.choices,
+        default=EligibilityState.UNKNOWN,
+    )
+    eligibility_reason = models.CharField(max_length=64, default="never_observed")
+    eligibility_evaluated_at = models.DateTimeField(null=True, blank=True)
+    availability_writer_id = models.CharField(max_length=255, blank=True, default="")
+    availability_revision = models.PositiveBigIntegerField(default=0)
+    availability_fencing_token = models.PositiveBigIntegerField(default=0)
     updated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True)
 
@@ -75,6 +98,10 @@ class Agent(models.Model):
         indexes = [  # noqa: RUF012
             models.Index(fields=["status_enum", "auto_assign_enabled"], name="idx_agent_eligible"),
             models.Index(fields=["hubspot_owner_id"], name="idx_agent_hubspot_owner"),
+            models.Index(
+                fields=["eligibility_state", "availability_observed_at"],
+                name="idx_agent_safe_eligibility",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -130,6 +157,61 @@ class AgentStatusHistory(models.Model):
 
     def __str__(self) -> str:
         return f"{self.agent.name}: {self.old_status} → {self.new_status}"
+
+
+class AgentAvailabilityDecision(models.Model):
+    """Append-only evidence for an authoritative availability decision."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.CASCADE,
+        related_name="availability_decisions",
+        db_column="agent_id",
+    )
+    revision = models.PositiveBigIntegerField()
+    old_status = models.CharField(max_length=20, blank=True, default="")
+    new_status = models.CharField(max_length=20)
+    remote_status = models.CharField(max_length=32, blank=True, default="")
+    raw_state_hash = models.CharField(max_length=64)
+    observed_at = models.DateTimeField()
+    eligibility_state = models.CharField(max_length=16)
+    eligibility_reason = models.CharField(max_length=64)
+    task_id = models.CharField(max_length=255, blank=True, default="")
+    writer_id = models.CharField(max_length=255)
+    runtime_environment = models.CharField(max_length=64)
+    fencing_token = models.PositiveBigIntegerField()
+    metadata_schema_version = models.PositiveSmallIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agent_availability_decisions"
+        ordering = ["-created_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["agent", "revision"],
+                name="uniq_agent_availability_revision",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["agent", "-created_at"], name="idx_avail_decision_agent"),
+            models.Index(fields=["writer_id", "-created_at"], name="idx_avail_decision_writer"),
+        ]
+
+
+class AvailabilityReconciliationLease(models.Model):
+    """Database-backed singleton lease with owner-safe release and fencing."""
+
+    key = models.CharField(max_length=64, primary_key=True)
+    owner_token = models.CharField(max_length=64, blank=True, default="")
+    writer_id = models.CharField(max_length=255, blank=True, default="")
+    runtime_environment = models.CharField(max_length=64, blank=True, default="")
+    expires_at = models.DateTimeField(null=True, blank=True)
+    generation = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "availability_reconciliation_leases"
 
 
 class AgentMetrics(models.Model):

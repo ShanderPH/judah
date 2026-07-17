@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import UTC
 
 import structlog
+from django.conf import settings
 from django.utils import timezone
 
 from apps.support.models import Agent
@@ -41,12 +42,19 @@ def get_eligible_agents() -> list[Agent]:
     from django.db.models import F
     from django.db.models.functions import Coalesce
 
-    eligible = list(
-        Agent.objects.filter(
-            status_enum=Agent.StatusEnum.ONLINE,
-            auto_assign_enabled=True,
-            current_simultaneous_chats__lt=Coalesce(F("max_simultaneous_chats"), 5),
+    filters = {
+        "status_enum": Agent.StatusEnum.ONLINE,
+        "auto_assign_enabled": True,
+        "current_simultaneous_chats__lt": Coalesce(F("max_simultaneous_chats"), 5),
+    }
+    if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        filters["eligibility_state"] = Agent.EligibilityState.ELIGIBLE
+        filters["availability_observed_at__gte"] = timezone.now() - timezone.timedelta(
+            seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS)
         )
+
+    eligible = list(
+        Agent.objects.filter(**filters)
         .exclude(is_active=False)
         .only(
             "id",
@@ -58,6 +66,11 @@ def get_eligible_agents() -> list[Agent]:
             "last_assignment_at",
             "auto_assign_enabled",
             "is_active",
+            "hubspot_user_id",
+            "availability_observed_at",
+            "eligibility_state",
+            "eligibility_reason",
+            "availability_revision",
         )
     )
 

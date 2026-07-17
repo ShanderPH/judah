@@ -352,7 +352,6 @@ class UpdateAgentRequest(Schema):
     max_simultaneous_chats: int | None = Field(default=None, ge=0, le=50)
     auto_assign_enabled: bool | None = None
     is_active: bool | None = None
-    status_enum: str | None = None
 
 
 # ---------------------------------------------------------------------------

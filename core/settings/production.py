@@ -70,6 +70,13 @@ if "default" in DATABASES:
     DATABASES["default"]["CONN_MAX_AGE"] = 0 if _db_port == "6543" else 60
     DATABASES["default"].setdefault("OPTIONS", {})
     DATABASES["default"]["OPTIONS"].setdefault("connect_timeout", 10)
+    _runtime_environment = (
+        os.environ.get("RAILWAY_ENVIRONMENT_NAME") or os.environ.get("DJANGO_ENV") or "production"
+    ).strip()
+    _runtime_service = os.environ.get("RAILWAY_SERVICE_NAME", "unknown-service").strip()
+    DATABASES["default"]["OPTIONS"].update(
+        {"application_name": f"judah:{_runtime_environment}:{_runtime_service}"[:63]}
+    )
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 # --- Logging ---

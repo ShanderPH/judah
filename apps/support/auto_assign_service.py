@@ -119,6 +119,15 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
     Returns:
         True if the ticket was successfully assigned, False otherwise.
     """
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("process_new_ticket_event")
+        return False
+
     logger.info("auto_assign_new_ticket_event", ticket_id=hubspot_ticket_id)
 
     # Fetch ticket details from HubSpot
@@ -214,6 +223,13 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
+    # Matchmaker is the sole automatic assignment implementation. Keeping this
+    # compatibility entrypoint prevents legacy callers from bypassing the final
+    # eligibility guard and capacity reservation.
+    from apps.support.matchmaker_service import AssignmentOutcome, matchmaker_assign_next
+
+    return matchmaker_assign_next() == AssignmentOutcome.ASSIGNED
+
     # Agent status is kept fresh by the SAT heartbeat (20-second polling).
     # Load reconciliation is done per-agent by the Matchmaker before assignment.
     # No batch sync needed here.
@@ -493,7 +509,15 @@ def assign_pending_tickets() -> dict:
     Returns:
         Dict with ``assigned``, ``skipped``, ``total_pending`` counts.
     """
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
     from apps.support.matchmaker_service import matchmaker_drain_queue
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("assign_pending_tickets")
+        return {"assigned": 0, "skipped": 0, "total_pending": 0}
 
     result = matchmaker_drain_queue()
     return {
@@ -521,6 +545,15 @@ def sync_novo_stage_tickets() -> dict:
         Dict with ``created``, ``skipped``, ``already_assigned``,
         ``total_from_hubspot`` counts.
     """
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("sync_novo_stage_tickets")
+        return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0}
+
     logger.info("sync_novo_stage_tickets_start")
 
     try:
@@ -646,6 +679,15 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
     Returns:
         Number of new agents created.
     """
+    from apps.support.availability_runtime import (
+        is_authoritative_availability_runtime,
+        log_runtime_rejection,
+    )
+
+    if not is_authoritative_availability_runtime():
+        log_runtime_rejection("sync_hubspot_team_to_agents")
+        return 0
+
     try:
         client = get_hubspot_client()
         members = client.get_team_members(team_id)

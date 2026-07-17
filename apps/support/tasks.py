@@ -13,7 +13,7 @@ Tasks are organized into three groups:
 **Lifecycle:**
   - ``task_handle_ticket_closed`` — record closure and compute handle time
   - ``task_handle_owner_change`` — process ticket owner reassignment
-  - ``task_handle_availability_change`` — process agent availability webhook
+  - ticket webhooks trigger a fresh Users API reconciliation before assignment
 
 **Aggregation (unchanged):**
   - ``task_sync_hubspot_team_members`` — daily team sync
@@ -40,8 +40,14 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@shared_task(name="support.task_sat_heartbeat")
-def task_sat_heartbeat() -> dict:
+@shared_task(
+    bind=True,
+    acks_late=True,
+    soft_time_limit=12,
+    time_limit=17,
+    name="support.task_sat_heartbeat",
+)
+def task_sat_heartbeat(self) -> dict:
     """SAT heartbeat — sync agent availability from HubSpot every 20 seconds.
 
     Skips execution during off-hours (returns immediately with no API calls).
@@ -49,7 +55,7 @@ def task_sat_heartbeat() -> dict:
     """
     from apps.support.sat_service import sat_heartbeat
 
-    return sat_heartbeat()
+    return sat_heartbeat(task_id=str(self.request.id or ""))
 
 
 @shared_task(name="support.task_sat_reset_daily_counters")
@@ -95,7 +101,15 @@ def task_matchmaker_assign_single(
     """
     from django.core.cache import cache
 
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
     from apps.support.matchmaker_service import enqueue_new_ticket, matchmaker_assign_next
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("task_matchmaker_assign_single")
+        return False
 
     # Redis dedup lock — prevent duplicate processing from webhook retries
     lock_key = f"matchmaker_assign:{hubspot_ticket_id}"
@@ -109,6 +123,36 @@ def task_matchmaker_assign_single(
     try:
         new_conv = enqueue_new_ticket(hubspot_ticket_id, entered_at_ms)
         if new_conv is None:
+            return False
+
+        # HubSpot does not publish user availability-change webhooks. A real
+        # ticket webhook therefore triggers an authoritative Users API read.
+        # Never assign from the webhook payload or the short-lived SAT cache.
+        from apps.support.sat_service import sat_heartbeat
+
+        reconciliation = sat_heartbeat(
+            task_id=f"ticket-webhook:{self.request.id or hubspot_ticket_id}",
+            force_refresh=True,
+        )
+        blocked_reason = next(
+            (
+                reason
+                for reason in (
+                    "error",
+                    "skipped_non_authoritative_runtime",
+                    "skipped_off_hours",
+                    "skipped_locked",
+                )
+                if reconciliation.get(reason)
+            ),
+            "",
+        )
+        if blocked_reason:
+            logger.warning(
+                "task_matchmaker_assignment_blocked_by_availability_reconciliation",
+                ticket_id=hubspot_ticket_id,
+                reason=blocked_reason,
+            )
             return False
 
         outcome = matchmaker_assign_next()
@@ -143,7 +187,15 @@ def task_matchmaker_drain_queue() -> dict:
     from django.core.cache import cache
 
     from apps.support.agent_sync_service import is_business_hours
+    from apps.support.availability_runtime import (
+        is_auto_assignment_runtime_allowed,
+        log_runtime_rejection,
+    )
     from apps.support.matchmaker_service import matchmaker_drain_queue
+
+    if not is_auto_assignment_runtime_allowed():
+        log_runtime_rejection("task_matchmaker_drain_queue")
+        return {"skipped_non_authoritative_runtime": True}
 
     if not is_business_hours():
         return {"skipped_off_hours": True}
@@ -336,101 +388,6 @@ def _do_handle_owner_change(
         from_agent=from_agent.name if from_agent else str(prev_owner_int),
         to_agent=to_agent.name if to_agent else str(new_owner_int),
     )
-
-
-@shared_task(bind=True, max_retries=3, default_retry_delay=15, name="support.task_handle_availability_change")
-def task_handle_availability_change(
-    self,
-    hubspot_contact_id: str,
-    availability_value: str,
-    payload: dict,
-) -> None:
-    """Process agent availability change from webhook asynchronously.
-
-    Resolves agent email from contact ID, updates status, and dispatches
-    Matchmaker drain if agent came online.
-
-    Args:
-        hubspot_contact_id: HubSpot contact ID.
-        availability_value: HubSpot availability status string.
-        payload: Full webhook payload.
-    """
-    try:
-        new_status = "online" if availability_value == "available" else "away"
-
-        # Try to get email from payload first
-        email = (payload.get("email") or "").lower().strip()
-
-        if not email:
-            from apps.integrations.hubspot.client import get_hubspot_client
-
-            client = get_hubspot_client()
-            contact_details = client.get_contact_by_id(hubspot_contact_id)
-            email = (contact_details.get("email") or "").lower().strip()
-
-        if not email:
-            logger.warning(
-                "task_availability_change_no_email",
-                contact_id=hubspot_contact_id,
-            )
-            return
-
-        from apps.support.models import Agent, AgentStatusHistory
-
-        agent = Agent.objects.filter(agent_email__iexact=email).exclude(is_active=False).first()
-        if agent is None:
-            logger.debug("task_availability_change_agent_not_found", email=email)
-            return
-
-        old_status = agent.status_enum
-        if old_status == new_status:
-            return
-
-        now = timezone.now()
-
-        # Accumulate time before switching
-        from apps.support.sat_service import sat_accumulate_time
-
-        sat_accumulate_time(agent, old_status, new_status, now)
-
-        agent.status_enum = new_status
-        agent.last_status_change_at = now
-        agent.updated_at = now
-        agent.save(
-            update_fields=[
-                "status_enum",
-                "last_status_change_at",
-                "online_time_seconds_today",
-                "away_time_seconds_today",
-                "updated_at",
-            ]
-        )
-
-        AgentStatusHistory.objects.create(
-            agent=agent,
-            old_status=old_status,
-            new_status=new_status,
-            sync_source="hubspot_webhook",
-        )
-
-        logger.info(
-            "task_availability_change_done",
-            agent=agent.name,
-            old_status=old_status,
-            new_status=new_status,
-        )
-
-        # If agent came online, trigger Matchmaker
-        if new_status == "online":
-            task_matchmaker_drain_queue.delay()
-
-    except Exception as exc:
-        logger.warning(
-            "task_handle_availability_change_retry",
-            contact_id=hubspot_contact_id,
-            error=str(exc),
-        )
-        raise self.retry(exc=exc) from exc
 
 
 # ---------------------------------------------------------------------------
