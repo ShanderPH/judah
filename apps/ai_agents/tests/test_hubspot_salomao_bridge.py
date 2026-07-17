@@ -549,11 +549,32 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
     response.json.return_value = {"id": "reply-1"}
     client = MagicMock()
     client.post = AsyncMock(return_value=response)
+    reply = (
+        "## Como fazer\n\n"
+        "1. Acesse **Financeiro**.\n"
+        "2. Localize a transação.\n\n"
+        "## Atenção\n\n- O estorno depende do gateway."
+    )
     with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
-        result = await send_salomao_reply_to_hubspot_thread(context, "Olá")
+        result = await send_salomao_reply_to_hubspot_thread(context, reply)
     assert result["sent"] is True
     assert result["message_id"] == "reply-1"
     response.raise_for_status.assert_called_once()
+    payload = client.post.await_args.kwargs["json"]
+    assert payload["text"] == reply
+    assert "<h4>Como fazer</h4>" in payload["richText"]
+    assert "<ol><li>Acesse <strong>Financeiro</strong>.</li>" in payload["richText"]
+    assert "<ul><li>O estorno depende do gateway.</li></ul>" in payload["richText"]
+    assert "##" not in payload["richText"]
+
+
+def test_markdown_to_hubspot_rich_text_escapes_raw_html() -> None:
+    rendered = hubspot.markdown_to_hubspot_rich_text("Texto <script>alert('x')</script> com `código` e *ênfase*.")
+
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert "<code>código</code>" in rendered
+    assert "<em>ênfase</em>" in rendered
 
 
 @pytest.mark.asyncio

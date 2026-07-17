@@ -585,6 +585,7 @@ async def _run_supervisor_for_hubspot_context(
             "conversation_context": conversation_context.model_dump(mode="json"),
             "image_base64": safe_context.get("image_base64"),
             "image_mime_type": safe_context.get("image_mime_type"),
+            "image_name": safe_context.get("image_name"),
         },
     )
 

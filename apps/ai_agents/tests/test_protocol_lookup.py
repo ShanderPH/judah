@@ -380,6 +380,7 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
         ],
         "image_base64": "aW1hZ2U=",
         "image_mime_type": "image/png",
+        "image_name": "captura.png",
     }
 
     await webhooks._run_supervisor_for_hubspot_context(
@@ -392,4 +393,5 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
     metadata = supervisor_factory.call_args.kwargs["user_metadata"]
     assert metadata["image_base64"] == "aW1hZ2U="
     assert metadata["image_mime_type"] == "image/png"
+    assert metadata["image_name"] == "captura.png"
     assert "aW1hZ2U=" not in supervisor_instance.run_pipeline_async.await_args.args[0]
