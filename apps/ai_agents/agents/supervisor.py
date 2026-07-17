@@ -154,24 +154,16 @@ _SUPERVISOR_INSTRUCTIONS = [
     "FLUXO OBRIGATÓRIO: SEMPRE acione o Heimdall PRIMEIRO para obter a "
     "classificação estruturada da mensagem (campos rota, prioridade, tags, "
     "dados_faltantes, sentimento).",
-    "Depois, faça o HAND-OFF para o agente correto usando o campo `rota` do "
-    "Heimdall — não decida sozinho e não responda diretamente ao usuário "
-    "antes da delegação:",
-    "  • rota ∈ {DUVIDAS_PLATAFORMA, ATENDIMENTO_IA} → delegar ao "
-    "KnowledgeRagAgent para consulta à base de conhecimento (Pinecone).",
-    "  • rota ∈ {BOLETO, MEIOS_DE_PAGAMENTO, FINANCEIRO, SUPORTE_TECNICO_N1, "
-    "EVENTOS, CUSTOMER_SUCCESS} → delegar ao HelpdeskAction para ações no "
-    "HubSpot, Jira, n8n e Central de Ajuda (criar/atualizar ticket, "
-    "registrar issue, disparar workflow).",
+    "Depois do Heimdall, SEMPRE delegue a geração da resposta ao SalomaoChat, "
+    "que é o adaptador oficial do Salomão v1. Não produza uma resposta "
+    "paralela com KnowledgeRagAgent ou HelpdeskActionAgent.",
+    "O Salomão v1 recebe rota, prioridade, tags, dados_faltantes, sentimento e "
+    "contexto da conversa; somente ele decide a resposta e se precisa de humano.",
     "  • rota == ESCALAR_IMEDIATAMENTE → NÃO tente resolver. Sinalize "
     "transbordo humano imediato incluindo 'requires_human_handoff: true' e "
     "'transbordo para atendimento humano' na resposta final.",
-    "Se prioridade == CRITICA, destaque a urgência na resposta final e "
-    "sinalize transbordo humano mesmo que a rota não seja ESCALAR_IMEDIATAMENTE.",
-    "Repasse tags, dados_faltantes e sentimento como contexto estruturado ao "
-    "agente delegado — não descarte o output do Heimdall.",
     "Sintetize a resposta final em português brasileiro, cordial e objetivo "
-    "(máx 3 parágrafos). Cite as fontes quando o KnowledgeRagAgent as retornar.",
+    "(máx 3 parágrafos), preservando o conteúdo devolvido pelo Salomão v1.",
     "Não repita a saudação ou a apresentação do Salomão na mesma resposta.",
     "Não acrescente a pergunta 'Isso resolveu sua solicitação?'.",
 ]
@@ -223,15 +215,19 @@ class SalomaoSupervisorAgent:
             extra_mcp_configs=extra_mcp_configs,
             db=db,
         )
+        # The adapter is part of the deterministic production flow whenever
+        # Salomao v1 is configured. SALOMAO_V1_AS_TEAM_AGENT controls only its
+        # exposure to the exploratory Agno Team, never the production bridge.
         self._salomao_chat = (
             SalomaoChatAgent(
                 session_id=session_id,
                 user_metadata=user_metadata,
                 db=db,
             )
-            if self._should_enable_salomao_chat_agent()
+            if is_salomao_v1_configured()
             else None
         )
+        team_salomao_chat = self._salomao_chat if self._should_enable_salomao_chat_agent() else None
 
         # --- Montagem do Team Agno ---
         # TeamMode.coordinate: o model do Team atua como maestro — decide quais
@@ -251,7 +247,7 @@ class SalomaoSupervisorAgent:
             ]
 
         salomao_chat_routing = []
-        if self._salomao_chat is not None:
+        if team_salomao_chat is not None:
             salomao_chat_routing = [
                 "CAPACIDADE INTERNA: O membro SalomaoChat encapsula o Salomao v1 como adapter agent.",
                 "Depois do Heimdall e antes da resposta final, acione o SalomaoChat para gerar um SalomaoChatDraft quando houver pergunta do cliente.",
@@ -278,7 +274,7 @@ class SalomaoSupervisorAgent:
             model=build_primary_model(),
             fallback_config=_build_fallback_config(),
             db=db or _build_redis_db(session_id),
-            members=[member for member in [self._triage, self._rag, self._action, self._salomao_chat] if member],
+            members=[member for member in [self._triage, self._rag, self._action, team_salomao_chat] if member],
             instructions=instructions,
             session_id=session_id,
             # Propaga o histórico do Team para os membros, permitindo
@@ -558,52 +554,26 @@ class SalomaoSupervisorAgent:
             trace.append("supervisor: greeting_clarification")
             return self._greeting_clarification_response(triage=triage, agent_trace=trace)
 
-        if triage.dados_faltantes:
-            trace.append("supervisor: waiting_for_missing_data")
-            return self._missing_data_response(triage=triage, agent_trace=trace)
-
         if self._requires_mandatory_handoff(triage):
             trace.append("supervisor: mandatory_human_handoff")
             return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
 
         context = self._build_conversation_context(message)
-        if context.missing_context:
-            trace.append("supervisor: waiting_for_context")
-            return self._missing_data_response(
-                triage=triage,
-                agent_trace=trace,
-                missing_data=context.missing_context,
-            )
-
-        if triage.rota in {"DUVIDAS_PLATAFORMA", "ATENDIMENTO_IA"}:
-            rag = self._build_rag_agent()
-            if rag is not None:
-                try:
-                    rag_response = rag.run(message)
-                    content = self._extract_content(rag_response)
-                    requires_handoff, handoff_reason = self._check_handoff(rag_response)
-                    trace.append("knowledge_rag: OK")
-                    return self._response_from_specialized_service(
-                        content=content,
-                        triage=triage,
-                        agent_trace=trace,
-                        requires_handoff=requires_handoff,
-                        handoff_reason=handoff_reason,
-                        sources=self._extract_sources(rag_response),
-                        model_name=self._extract_response_model_name(rag_response) or "knowledge_rag",
-                    )
-                except Exception as exc:
-                    self._logger.error("knowledge_rag_failed", error=str(exc))
-                    trace.append("knowledge_rag: failed")
-
         if self._salomao_chat is None:
-            return None
+            trace.append("salomao_chat: unavailable")
+            return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
 
-        draft = self._salomao_chat.create_chat_draft(
-            message=message,
-            triage_decision=triage,
-            conversation_context=context,
-        )
+        try:
+            trace.append("salomao_chat: call_started")
+            draft = self._salomao_chat.create_chat_draft(
+                message=message,
+                triage_decision=triage,
+                conversation_context=context,
+            )
+        except Exception as exc:
+            self._logger.error("salomao_chat_failed", error=str(exc))
+            trace.append("salomao_chat: failed")
+            return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
 
         trace.append("salomao_chat: OK")
         if draft.recommended_actions:
@@ -615,12 +585,7 @@ class SalomaoSupervisorAgent:
         """Return True when the triage contract forbids an automated answer."""
         if triage is None:
             return False
-        return (
-            triage.rota == "ESCALAR_IMEDIATAMENTE"
-            or triage.prioridade in {"ALTA", "CRITICA"}
-            or triage.sentimento == "negativo"
-            or triage.confidence < 0.6
-        )
+        return triage.rota == "ESCALAR_IMEDIATAMENTE"
 
     def _mandatory_handoff_response(
         self,
@@ -630,12 +595,6 @@ class SalomaoSupervisorAgent:
     ) -> SalomaoResponse:
         """Build the fixed response for triage decisions that require escalation."""
         reason = "Heimdall classified the ticket as requiring immediate human handoff."
-        if triage and triage.prioridade in {"ALTA", "CRITICA"}:
-            reason = f"Heimdall classified the ticket as {triage.prioridade}."
-        elif triage and triage.sentimento == "negativo":
-            reason = "Heimdall detected customer frustration."
-        elif triage and triage.confidence < 0.6:
-            reason = f"Heimdall confidence {triage.confidence:.2f} is below policy threshold."
 
         frustrated = bool(triage and triage.sentimento == "negativo")
         message = (
@@ -672,6 +631,45 @@ class SalomaoSupervisorAgent:
                 trace_summary=agent_trace,
                 risk_flags=self._risk_flags(triage),
                 confidence=triage.confidence if triage else 0.0,
+            ),
+        )
+
+    def _salomao_unavailable_response(
+        self,
+        *,
+        triage: TriageDecision,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Fail safely when the official Salomao v1 answer service is unavailable."""
+        reason = "Salomao v1 is unavailable; no alternative answer was generated."
+        message = (
+            "Não consegui consultar o Salomão agora. Para não fornecer uma resposta "
+            "incorreta, vou encaminhar a conversa para uma pessoa do nosso time."
+        )
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=True,
+            handoff_reason=reason,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            model_name="salomao_v1",
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="escalate_human",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="assign_ticket_to_human_queue",
+                    payload={"reason": reason},
+                    idempotency_key=f"{self.session_id}:salomao-v1-unavailable",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=[*self._risk_flags(triage), "salomao_v1_unavailable"],
+                confidence=0.0,
             ),
         )
 
@@ -855,10 +853,10 @@ class SalomaoSupervisorAgent:
                 missing_data=draft.missing_data,
             )
 
-        if draft.requires_human_handoff or draft.confidence < 0.6:
+        if draft.requires_human_handoff:
             outcome = "escalate_human"
             requires_handoff = True
-            handoff_reason = draft.handoff_reason or "Specialized service confidence is below threshold."
+            handoff_reason = draft.handoff_reason or "Salomao v1 requested human handoff."
             message = draft.response_text
         elif draft.resolved:
             outcome = "candidate_resolved"
