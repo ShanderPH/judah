@@ -109,6 +109,27 @@ class RaisingSalomaoChat:
         raise AssertionError("Salomao v1 must not be called for mandatory handoff")
 
 
+class RecordingSalomaoChat:
+    def __init__(self, response_text: str = "Resposta oficial do Salomão v1.") -> None:
+        self.response_text = response_text
+        self.calls: list[dict[str, Any]] = []
+
+    def create_chat_draft(self, **kwargs: Any) -> SalomaoChatDraft:
+        self.calls.append(kwargs)
+        return SalomaoChatDraft(
+            response_text=self.response_text,
+            confidence=0.86,
+            resolved=True,
+            requires_human_handoff=False,
+            model_name="salomao_v1",
+        )
+
+
+class RaisingRag:
+    def run(self, _message: str) -> None:
+        raise AssertionError("local RAG must not generate the customer response")
+
+
 class FailingTriageRunner:
     def run(self, _message: str) -> TriageDecision:
         raise RuntimeError("triage unavailable")
@@ -152,9 +173,9 @@ def _set_message_count(monkeypatch: Any, message_count: int) -> None:
     )
 
 
-def _critical_triage() -> TriageDecision:
+def _explicit_handoff_triage() -> TriageDecision:
     return TriageDecision(
-        rota="DUVIDAS_PLATAFORMA",
+        rota="ESCALAR_IMEDIATAMENTE",
         prioridade="CRITICA",
         tags=[],
         dados_faltantes=[],
@@ -272,6 +293,23 @@ def test_salomao_v1_team_agent_is_disabled_without_base_url() -> None:
     assert supervisor._should_enable_salomao_chat_agent() is False
 
 
+@override_settings(SALOMAO_V1_BASE_URL="http://salomao.local", SALOMAO_V1_AS_TEAM_AGENT=False)
+def test_salomao_v1_adapter_stays_enabled_outside_the_exploratory_team(monkeypatch: Any) -> None:
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.Team", FakeConstructedTeam)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.HeimdallTriageAgent", FakeTriageAgent)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.KnowledgeRagAgent", FakeRagAgent)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.HelpdeskActionAgent", FakeActionAgent)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.SalomaoChatAgent", FakeSalomaoChatAgent)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor.build_primary_model", lambda: object())
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor._build_fallback_config", lambda: None)
+    monkeypatch.setattr("apps.ai_agents.agents.supervisor._build_redis_db", lambda _session_id: object())
+
+    supervisor = SalomaoSupervisorAgent(session_id="session-1", user_metadata={})
+
+    assert isinstance(supervisor._salomao_chat, FakeSalomaoChatAgent)
+    assert not any(isinstance(member, FakeSalomaoChatAgent) for member in FakeTeam.last_members)
+
+
 @override_settings(SALOMAO_V1_BASE_URL="", SALOMAO_V1_AS_TEAM_AGENT=True)
 def test_fallback_team_keeps_knowledge_rag_member(monkeypatch: Any) -> None:
     monkeypatch.setattr("apps.ai_agents.agents.supervisor.Team", FakeConstructedTeam)
@@ -287,25 +325,25 @@ def test_fallback_team_keeps_knowledge_rag_member(monkeypatch: Any) -> None:
     assert any(isinstance(member, FakeRagAgent) for member in FakeTeam.last_members)
 
 
-def test_integrated_chain_forces_handoff_for_critical_triage() -> None:
+def test_integrated_chain_forces_handoff_for_explicit_handoff_route() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
     supervisor._logger = FakeLogger()
-    supervisor._triage = FakeTriageRunner(_critical_triage())
+    supervisor._triage = FakeTriageRunner(_explicit_handoff_triage())
     supervisor._salomao_chat = RaisingSalomaoChat()
 
     response = supervisor._run_integrated_chain("Sistema fora do ar")
 
     assert response is not None
     assert response.requires_human_handoff is True
-    assert response.handoff_reason == "Heimdall classified the ticket as CRITICA."
+    assert response.handoff_reason == "Heimdall classified the ticket as requiring immediate human handoff."
     assert "supervisor: mandatory_human_handoff" in response.agent_trace
     assert "sinto muito pelo transtorno" in response.message
     assert "pessoa do nosso time" in response.message
 
 
-def test_integrated_chain_forces_handoff_for_high_priority() -> None:
+def test_integrated_chain_uses_salomao_v1_for_high_priority() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -319,21 +357,24 @@ def test_integrated_chain_forces_handoff_for_high_priority() -> None:
             sentimento="neutro",
         )
     )
-    supervisor._salomao_chat = RaisingSalomaoChat()
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
 
     response = supervisor._run_integrated_chain("Meu evento está indisponível")
 
     assert response is not None
-    assert response.requires_human_handoff is True
-    assert response.handoff_reason == "Heimdall classified the ticket as ALTA."
-    assert response.message.startswith("Sinto muito pelo transtorno.")
+    assert response.requires_human_handoff is False
+    assert response.message == "Resposta oficial do Salomão v1."
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"].prioridade == "ALTA"
 
 
-def test_integrated_chain_forces_handoff_for_customer_frustration() -> None:
+def test_integrated_chain_uses_salomao_v1_for_customer_frustration() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
     supervisor._logger = FakeLogger()
+    supervisor._rag = RaisingRag()
     supervisor._triage = FakeTriageRunner(
         TriageDecision(
             rota="DUVIDAS_PLATAFORMA",
@@ -343,17 +384,21 @@ def test_integrated_chain_forces_handoff_for_customer_frustration() -> None:
             sentimento="negativo",
         )
     )
-    supervisor._salomao_chat = RaisingSalomaoChat()
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
 
     response = supervisor._run_integrated_chain("Já tentei várias vezes e não funciona")
 
     assert response is not None
-    assert response.requires_human_handoff is True
-    assert response.handoff_reason == "Heimdall detected customer frustration."
-    assert response.message.startswith("Entendo como essa situação é frustrante")
+    assert response.requires_human_handoff is False
+    assert response.message == "Resposta oficial do Salomão v1."
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"].sentimento == "negativo"
+    assert "knowledge_rag: OK" not in response.agent_trace
+    assert "knowledge_rag: failed" not in response.agent_trace
 
 
-def test_integrated_chain_asks_for_missing_data_before_calling_salomao() -> None:
+def test_integrated_chain_passes_missing_data_to_salomao_v1() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -368,15 +413,17 @@ def test_integrated_chain_asks_for_missing_data_before_calling_salomao() -> None
             confidence=0.91,
         )
     )
-    supervisor._salomao_chat = RaisingSalomaoChat()
+    salomao = RecordingSalomaoChat("Informe o ID da igreja para eu continuar.")
+    supervisor._salomao_chat = salomao
 
     response = supervisor._run_integrated_chain("Não aparece o campo telefone")
 
     assert response is not None
-    assert response.outcome == "waiting_customer"
+    assert response.outcome == "candidate_resolved"
     assert response.requires_human_handoff is False
-    assert response.missing_data == ["id_da_igreja"]
-    assert "ID da igreja" in response.message
+    assert response.message == "Informe o ID da igreja para eu continuar."
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"].dados_faltantes == ["id_da_igreja"]
 
 
 def test_greeting_only_messages_are_detected_without_swallowing_requests() -> None:
@@ -473,8 +520,31 @@ def test_integrated_chain_hands_off_when_heimdall_fails() -> None:
     assert response.requires_human_handoff is True
 
 
+def test_integrated_chain_never_generates_an_alternative_answer_when_v1_is_unavailable() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="DUVIDAS_PLATAFORMA",
+            prioridade="MEDIA",
+            sentimento="neutro",
+        )
+    )
+    supervisor._salomao_chat = None
+
+    response = supervisor._run_integrated_chain("Como criar cupom de desconto?")
+
+    assert response is not None
+    assert response.requires_human_handoff is True
+    assert response.handoff_reason == "Salomao v1 is unavailable; no alternative answer was generated."
+    assert "salomao_chat: unavailable" in response.agent_trace
+    assert response.model_name == "salomao_v1"
+
+
 @override_settings(HEIMDALL_MIN_CONFIDENCE=0.65)
-def test_integrated_chain_hands_off_low_confidence_triage() -> None:
+def test_integrated_chain_uses_salomao_v1_for_low_confidence_triage() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -487,13 +557,16 @@ def test_integrated_chain_hands_off_low_confidence_triage() -> None:
             confidence=0.4,
         )
     )
-    supervisor._salomao_chat = RaisingSalomaoChat()
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
 
     response = supervisor._run_integrated_chain("Não sei explicar o que aconteceu")
 
     assert response is not None
-    assert response.outcome == "escalate_human"
-    assert response.handoff_reason == "Heimdall confidence 0.40 is below policy threshold."
+    assert response.outcome == "candidate_resolved"
+    assert response.requires_human_handoff is False
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"].confidence == 0.4
 
 
 def test_salomao_draft_tokens_are_propagated_to_response() -> None:
@@ -516,6 +589,23 @@ def test_salomao_draft_tokens_are_propagated_to_response() -> None:
     assert response.completion_tokens == 13
     assert response.tokens_used == 24
     assert response.model_name == "gpt-4o-mini"
+
+
+def test_salomao_v1_low_confidence_does_not_force_handoff_without_v1_request() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    draft = SalomaoChatDraft(
+        response_text="Resposta do v1 com ressalva.",
+        confidence=0.4,
+        resolved=True,
+        requires_human_handoff=False,
+        model_name="salomao_v1",
+    )
+
+    response = supervisor._response_from_salomao_draft(draft, ["salomao_chat: OK"])
+
+    assert response.requires_human_handoff is False
+    assert response.outcome == "candidate_resolved"
     assert response.decision is not None
     assert response.decision.outcome == "candidate_resolved"
 
