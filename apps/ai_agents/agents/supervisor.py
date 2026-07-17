@@ -341,47 +341,19 @@ class SalomaoSupervisorAgent:
         """
         import time
 
-        from django.db.models import Sum
-
         from apps.ai_agents.models import TokenTrackingLog
 
         start = time.perf_counter()
         self._logger.info("pipeline_start", message_preview=message[:80])
         is_first_message = False
 
-        # 1. Circuit Breaker e Verificação de Primeira Mensagem
+        # TokenTrackingLog is a cost/observability ledger, not a context
+        # window. Accumulated usage must never block a later customer turn.
+        # Recent context is bounded separately before it reaches the model.
         try:
             query = TokenTrackingLog.objects.filter(session_id=self.session_id)
-            aggr = query.aggregate(total=Sum("prompt_tokens") + Sum("completion_tokens"))
-            total_acumulado = aggr["total"] or 0
             message_count = query.count()
             is_first_message = message_count == 0
-
-            if total_acumulado > 15000:
-                self._logger.warning("circuit_breaker_triggered", session_id=self.session_id, tokens=total_acumulado)
-                return SalomaoResponse(
-                    session_id=self.session_id,
-                    message="Limite técnico da sessão atingido. Por favor, transfira para um atendente ou inicie um novo chat.",
-                    sources=[],
-                    requires_human_handoff=True,
-                    handoff_reason="Token budget exceeded",
-                    agent_trace=["circuit_breaker: BLOCKED"],
-                    tokens_used=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    model_name="circuit_breaker",
-                    latency_ms=0,
-                    decision=SupervisorDecision(
-                        outcome="escalate_human",
-                        final_response=(
-                            "Limite técnico da sessão atingido. "
-                            "Vou encaminhar o atendimento para uma pessoa do nosso time."
-                        ),
-                        trace_summary=["circuit_breaker: BLOCKED"],
-                        risk_flags=["token_budget_exceeded"],
-                        confidence=1.0,
-                    ),
-                )
 
             # Dinâmica da Primeira Mensagem (Greeting)
             if is_first_message:
@@ -400,7 +372,7 @@ class SalomaoSupervisorAgent:
             self._team.instructions.append(greeting_rule)
 
         except Exception as e:
-            self._logger.error("circuit_breaker_failed", error=str(e))
+            self._logger.error("session_greeting_detection_failed", error=str(e))
 
         try:
             deterministic_response = self._run_integrated_chain(message)

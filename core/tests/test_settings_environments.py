@@ -26,7 +26,10 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.LOGGING['handlers']['console']['formatter']); "
         "print(settings.LOGGING['root']['level']); "
         "print('debug_toolbar' in settings.INSTALLED_APPS); "
-        "print(settings.AGENT_STATUS_SYNC_ENABLED)"
+        "print(settings.AGENT_STATUS_SYNC_ENABLED); "
+        "print(settings.CELERY_RESULT_BACKEND); "
+        "print(settings.CELERY_TASK_IGNORE_RESULT); "
+        "print(settings.CACHES['default']['OPTIONS']['pool_class'])"
     )
     return subprocess.run(
         [sys.executable, "-c", script],
@@ -42,14 +45,32 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
     result = _inspect_settings("staging")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["False", "json", "INFO", "False", "False"]
+    assert result.stdout.splitlines() == [
+        "False",
+        "json",
+        "INFO",
+        "False",
+        "False",
+        "None",
+        "True",
+        "redis.BlockingConnectionPool",
+    ]
 
 
 def test_production_keeps_stricter_root_logging() -> None:
     result = _inspect_settings("production")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["False", "json", "ERROR", "False", "True"]
+    assert result.stdout.splitlines() == [
+        "False",
+        "json",
+        "ERROR",
+        "False",
+        "True",
+        "None",
+        "True",
+        "redis.BlockingConnectionPool",
+    ]
 
 
 def test_celery_images_use_environment_settings_loader() -> None:

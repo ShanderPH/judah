@@ -9,8 +9,10 @@ mínimo que injeta Redis, fallback e logging antes de repassar ao `Agent.__init_
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Any
 
+import redis
 import structlog
 from agno.agent import Agent
 from agno.db.redis import RedisDb
@@ -53,6 +55,20 @@ def build_mini_model() -> OpenAIChat:
     return OpenAIChat(id=DEFAULT_MINI_MODEL_ID, **_get_openai_kwargs())
 
 
+@lru_cache(maxsize=4)
+def _shared_redis_client(redis_url: str, max_connections: int) -> redis.Redis:
+    """Reuse one bounded Redis pool per process for all Agno agents."""
+    pool = redis.BlockingConnectionPool.from_url(
+        redis_url,
+        max_connections=max_connections,
+        timeout=2,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        decode_responses=True,
+    )
+    return redis.Redis(connection_pool=pool)
+
+
 def _build_redis_db(session_id: str) -> RedisDb:
     """Instancia o RedisDb para persistência de sessão.
 
@@ -60,8 +76,9 @@ def _build_redis_db(session_id: str) -> RedisDb:
     seja centralizada e não duplicada nos agents.
     """
     redis_url: str = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
+    max_connections = int(getattr(settings, "REDIS_AGENT_MAX_CONNECTIONS", 4))
     return RedisDb(
-        db_url=redis_url,
+        redis_client=_shared_redis_client(redis_url, max_connections),
         # Prefixo por session_id garante isolamento total entre conversas.
         db_prefix=f"inchurch:agent:{session_id}",
     )

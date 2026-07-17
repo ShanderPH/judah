@@ -21,6 +21,9 @@ TOOL_PERMISSIONS_BY_STATE: dict[str, set[str]] = {
         "move_ticket",
         "enqueue_assignment",
     },
+    # The handoff is already durable at this point; this permission exists
+    # solely for its idempotent confirmation message.
+    ConversationInstance.State.QUEUE_PENDING: {"send_message"},
 }
 
 TOOL_ALIASES: dict[str, str] = {

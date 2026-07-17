@@ -16,6 +16,18 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `DATABASE_URL` | `core/settings/base.py` | URL de conexão com PostgreSQL. |
 | `REDIS_URL` | `core/settings/base.py` | URL do Redis (cache, broker Celery, session store). |
 
+### Limites de conexão Redis
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `REDIS_CACHE_MAX_CONNECTIONS` | `4` | Máximo de conexões do pool compartilhado do cache Django por processo. |
+| `REDIS_AGENT_MAX_CONNECTIONS` | `4` | Máximo de conexões do pool compartilhado pelas sessões Agno por processo. |
+| `REDIS_LOCK_MAX_CONNECTIONS` | `2` | Máximo de conexões do pool de locks do Supervisor por processo Celery. |
+| `CELERY_BROKER_POOL_LIMIT` | `2` | Máximo de conexões persistentes do Celery com o broker por processo. |
+| `CELERY_REDIS_MAX_CONNECTIONS` | `4` | Limite defensivo do transporte Redis do Celery. |
+
+O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult`; isso evita um segundo pool Redis sem utilidade.
+
 ## Variáveis de IA
 
 | Variável | Onde é usada | Descrição |
@@ -139,6 +151,11 @@ SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_KEY=your-service-key
 
 REDIS_URL=redis://localhost:6379/0
+REDIS_CACHE_MAX_CONNECTIONS=4
+REDIS_AGENT_MAX_CONNECTIONS=4
+REDIS_LOCK_MAX_CONNECTIONS=2
+CELERY_BROKER_POOL_LIMIT=2
+CELERY_REDIS_MAX_CONNECTIONS=4
 
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...

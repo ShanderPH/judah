@@ -540,6 +540,20 @@ async def hydrate_ticket_context(
             try:
                 thread = await _fetch_thread(client, thread_id)
                 thread_history = await _fetch_conversation_history(client, thread_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    # HubSpot may retain an obsolete restored-thread ID after
+                    # the underlying conversation was removed. It is not a
+                    # pipeline failure when another associated thread is valid.
+                    logger.info("hubspot_stale_thread_skipped", thread_id=thread_id)
+                    continue
+                logger.warning(
+                    "hubspot_history_fetch_failed",
+                    thread_id=thread_id,
+                    status=exc.response.status_code,
+                )
+                errors.append(f"history:{thread_id}")
+                continue
             except httpx.HTTPError as exc:
                 logger.warning(
                     "hubspot_history_fetch_error",

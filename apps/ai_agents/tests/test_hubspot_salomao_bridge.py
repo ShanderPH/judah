@@ -467,7 +467,7 @@ async def test_hydrate_ticket_context_skips_stale_thread_and_uses_active_one(mon
 
     assert context["thread_ids"] == ["active-thread"]
     assert context["conversation_history"][0]["thread_id"] == "active-thread"
-    assert context["errors"] == ["history:stale-thread"]
+    assert context["errors"] == []
 
 
 @pytest.mark.asyncio
