@@ -2,7 +2,7 @@
 
 ## Resumo
 
-Módulo do ecossistema **Salomão**: agentes de IA para atendimento ao cliente, composto por triagem (Heimdall), respostas baseadas em conhecimento (RAG) e ações externas (HelpdeskAction via MCP).
+Módulo do ecossistema **Salomão**: agentes de IA para atendimento ao cliente, composto por triagem (Heimdall), respostas oficiais do Salomão v1 e ações externas auditadas.
 
 ## Contexto
 
@@ -12,11 +12,11 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 
 - Orquestrar o Supervisor multi-agente.
 - Classificar mensagens (Heimdall).
-- Responder dúvidas via RAG (Pinecone).
+- Delegar todas as respostas ao Salomão v1 após a triagem.
 - Executar ações no HubSpot/Jira via MCP.
 - Persistir sessões, memórias, traces e custos.
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
-- Expor o Salomao v1 externo como membro interno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado.
+- Usar o Salomão v1 externo no fluxo determinístico sempre que `SALOMAO_V1_BASE_URL` estiver configurado.
 
 Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes, agent runs e auditoria de tools. O backend controla estado e idempotencia; agentes retornam saidas estruturadas, mas nao alteram lifecycle diretamente.
 
@@ -24,14 +24,14 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 ### `HeimdallTriageAgent`
 
-- Modelo: `DEFAULT_MINI_MODEL` (gpt-4o-mini).
+- Modelo: `DEFAULT_MINI_MODEL` (gpt-5.5).
 - Saída estruturada: `TriageResult` (rota, prioridade, tags, dados faltantes,
   sentimento, confiança, evidências e versão da política).
 - Sem histórico.
 
 ### `KnowledgeRagAgent`
 
-- Modelo: `DEFAULT_MODEL` (gpt-4o).
+- Modelo: `DEFAULT_MODEL` (gpt-5.5).
 - Conectado ao Pinecone via `Knowledge` do Agno.
 - Busca automática habilitada.
 - Encerra com `<REQUIRES_ESCALATION>` quando não encontra resposta.
@@ -47,14 +47,14 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 - Modelo: `DEFAULT_MINI_MODEL`.
 - Adapter interno para o servico standalone Salomao v1.
-- Disponivel somente quando `SALOMAO_V1_BASE_URL` e `SALOMAO_V1_AS_TEAM_AGENT=true`.
+- Usado na produção quando `SALOMAO_V1_BASE_URL` está configurado; `SALOMAO_V1_AS_TEAM_AGENT` controla apenas a exposição no Team exploratório.
 - Saida normalizada: `SalomaoChatDraft`.
 - Em erro de provider, devolve draft seguro com handoff humano sem vazar tokens, chaves ou stack traces.
 
 ### `SalomaoSupervisorAgent`
 
 - Wrapper sobre `agno.team.Team` modo `coordinate`.
-- Orquestra Heimdall -> RAG/Action/SalomaoChat.
+- Orquestra o fluxo determinístico Heimdall -> SalomaoChat -> Salomão v1.
 - Implementa circuit breaker e greeting injection.
 - Saída: `SalomaoResponse` com `SupervisorDecision` restrito a
   `waiting_customer`, `candidate_resolved`, `escalate_human` ou `failed`.

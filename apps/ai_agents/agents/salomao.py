@@ -8,7 +8,7 @@ from apps.ai_agents.agents.tools.knowledge_tools import SearchKnowledgeBase
 
 salomao_agent = Agent(
     name="Salomão",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.5"),
     description="Assistente virtual da InChurch especializado em suporte ao cliente.",
     instructions=[
         "Você é Salomão, o assistente virtual da InChurch.",

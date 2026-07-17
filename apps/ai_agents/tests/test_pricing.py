@@ -8,6 +8,10 @@ from apps.ai_agents.utils.pricing import PRICING_PER_MILLION_TOKENS, calculate_c
 
 
 class TestCalculateCost:
+    def test_gpt55_baseline(self) -> None:
+        cost = calculate_cost("gpt-5.5", 1_000_000, 1_000_000)
+        assert cost == 35.0
+
     def test_gpt4o_mini_baseline(self) -> None:
         # 1M input + 1M output = $0.15 + $0.60 = $0.75.
         cost = calculate_cost("gpt-4o-mini", 1_000_000, 1_000_000)
@@ -51,6 +55,7 @@ class TestCalculateCost:
 
 class TestPricingTable:
     def test_has_canonical_models(self) -> None:
+        assert "gpt-5.5" in PRICING_PER_MILLION_TOKENS
         assert "gpt-4o" in PRICING_PER_MILLION_TOKENS
         assert "gpt-4o-mini" in PRICING_PER_MILLION_TOKENS
 

@@ -57,7 +57,7 @@ Usuário autenticado ──► /api/v1/ai/salomao/chat ──► SalomaoSupervis
                     ┌─────────────────────────────────────┼─────────────────────────────────────┐
                     ▼                                     ▼                                     ▼
          HeimdallTriageAgent                 KnowledgeRagAgent                      HelpdeskActionAgent
-         (gpt-4o-mini, output_schema)        (Pinecone RAG)                       (MCP tools)
+         (gpt-5.5, output_schema)            (Pinecone RAG)                       (MCP tools)
                                                                                          │
                                                                                          ▼
                                                                                HubSpot MCP server

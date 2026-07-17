@@ -479,7 +479,10 @@ class SalomaoSupervisorAgent:
 
     def _finalize_response(self, response: SalomaoResponse, *, is_first_message: bool) -> SalomaoResponse:
         """Enforce response invariants that must not depend on model compliance."""
-        guarded_output = apply_output_guardrails(response.message)
+        # Preserve complete Salomao v1 answers. The default guardrail limit is
+        # intentionally smaller for other call sites, while HubSpot supports
+        # the richer procedural answers returned by the official service.
+        guarded_output = apply_output_guardrails(response.message, max_chars=12_000)
         response.risk_flags = list(
             dict.fromkeys(
                 [

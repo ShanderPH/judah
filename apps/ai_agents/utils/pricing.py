@@ -16,6 +16,10 @@ from decimal import Decimal
 _ONE_MILLION = Decimal("1000000")
 
 PRICING_PER_MILLION_TOKENS: dict[str, dict[str, Decimal]] = {
+    "gpt-5.5": {
+        "input": Decimal("5.00"),
+        "output": Decimal("30.00"),
+    },
     "gpt-4o-mini": {
         "input": Decimal("0.15"),
         "output": Decimal("0.60"),
@@ -35,6 +39,8 @@ def _normalize_model_name(model_name: str) -> str:
     release do mesmo modelo.
     """
     lowered = (model_name or "").lower().strip()
+    if lowered.startswith("gpt-5.5"):
+        return "gpt-5.5"
     if lowered.startswith("gpt-4o-mini"):
         return "gpt-4o-mini"
     if lowered.startswith("gpt-4o"):
@@ -46,7 +52,7 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> fl
     """Calcula o custo em USD de uma execução com base nos tokens consumidos.
 
     Args:
-        model_name: Nome do modelo (ex.: "gpt-4o", "gpt-4o-mini" ou variantes
+        model_name: Nome do modelo (ex.: "gpt-5.5", "gpt-4o" ou variantes
             datadas como "gpt-4o-2024-08-06").
         input_tokens: Tokens de entrada (prompt).
         output_tokens: Tokens de saída (completion).

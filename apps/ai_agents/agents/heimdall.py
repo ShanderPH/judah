@@ -8,7 +8,7 @@ from apps.ai_agents.agents.tools.jira_tools import SearchJiraIssues
 
 heimdall_agent = Agent(
     name="Heimdall",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.5"),
     description="Agente de triagem inteligente para o suporte InChurch.",
     instructions=[
         "Você é Heimdall, o agente de triagem do suporte InChurch.",
