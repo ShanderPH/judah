@@ -13,6 +13,7 @@ import structlog
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.ai_agents.agents.base import DEFAULT_MINI_MODEL_ID
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
@@ -158,7 +159,7 @@ def record_supervisor_runs(
         engine.record_agent_run(
             instance=instance,
             agent_name="Heimdall",
-            model_name="gpt-4o-mini",
+            model_name=DEFAULT_MINI_MODEL_ID,
             prompt_version="heimdall-v1",
             policy_version=triage.policy_version,
             input_snapshot={"message": _text_fingerprint(message)},

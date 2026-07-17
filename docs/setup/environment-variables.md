@@ -20,10 +20,10 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
-| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI para GPT-4o / GPT-4o-mini. |
+| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI para GPT-5.5. |
 | `ANTHROPIC_API_KEY` | `apps/ai_agents/agents/base.py` | Fallback opcional para modelos Anthropic. |
-| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-4o`). |
-| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo compacto (padrão: `gpt-4o-mini`). |
+| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-5.5`). |
+| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo de triagem/fallback (padrão: `gpt-5.5`). |
 | `PINECONE_API_KEY` | `apps/integrations/pinecone_client/client.py` | Chave da API Pinecone. |
 | `PINECONE_INDEX_NAME` | `apps/integrations/pinecone_client/client.py` | Nome do índice Pinecone (padrão: `inchurch-knowledge`). |
 | `PINECONE_HOST` | `apps/ai_agents/agents/rag.py` | URL do data-plane do Pinecone (evita adivinhar cloud/region). |
@@ -33,7 +33,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding lido pelo agente RAG (padrão: `text-embedding-ada-002`). **Nota:** o cliente Pinecone em `apps/integrations/pinecone_client/client.py` hard-codes `text-embedding-3-small`; `EMBEDDING_MODEL` não é usado por ele. |
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
 | `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py`, `apps/ai_agents/agents/salomao_chat.py` | URL base do servico standalone Salomao v1. Quando preenchida, o Supervisor pode expor o Salomao v1 como membro interno `SalomaoChat`. |
-| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
+| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (mínimo: `120`). |
 | `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
 | `SALOMAO_V1_MAX_ATTEMPTS` | `apps/integrations/salomao_v1/client.py` | Tentativas para timeout, HTTP 429 e HTTP 5xx (padrão: `3`). |
@@ -132,7 +132,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 PINECONE_API_KEY=your-pinecone-key
 PINECONE_INDEX_NAME=inchurch-knowledge
 SALOMAO_V1_BASE_URL=http://localhost:8001
-SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_TIMEOUT_SECONDS=120
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS=180
 SALOMAO_V1_AS_TEAM_AGENT=true
 SALOMAO_V1_MAX_ATTEMPTS=3

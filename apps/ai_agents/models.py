@@ -85,8 +85,8 @@ class TokenTrackingLog(models.Model):
 
     Alimentado ao fim de cada `run_pipeline_async()` do Supervisor para que o
     time de FinOps consiga agregar custo por ticket/sessão/modelo. Decimal
-    com 6 casas é suficiente para representar frações de centavo em modelos
-    pequenos (gpt-4o-mini: $0.15 / 1M tokens ≈ $1.5e-7 por token).
+    com 6 casas é suficiente para representar frações de centavo no custo
+    por token dos modelos configurados.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

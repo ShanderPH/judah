@@ -187,8 +187,7 @@ class HeimdallTriageAgent(BaseInChurchAgent):
     Usa `output_schema=TriageResult` + `structured_outputs=True` para que o
     Agno valide a resposta do LLM via Pydantic antes de retornar ao chamador.
 
-    Roda em modelo mini (`DEFAULT_MINI_MODEL`) porque triagem é de alta
-    frequência e baixo custo cognitivo. O Supervisor (`gpt-4o`) assume o
+    Roda no modelo configurado em `DEFAULT_MINI_MODEL`. O Supervisor (`gpt-5.5`) assume o
     raciocínio mais complexo só depois de receber a rota.
     """
 

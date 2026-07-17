@@ -21,13 +21,12 @@ from django.conf import settings
 # ---------------------------------------------------------------------------
 # Configuração de modelos via variáveis de ambiente.
 # - DEFAULT_MODEL: modelo principal para raciocínio complexo (supervisor, RAG).
-# - DEFAULT_MINI_MODEL: modelo rápido/barato para tarefas de alta frequência
-#   e baixo custo cognitivo (triagem). Também usado como fallback.
+# - DEFAULT_MINI_MODEL: modelo usado em tarefas de alta frequência e fallback.
 # Mantê-los como módulo-level constants permite trocar o provedor/modelo
 # em um só lugar sem tocar no corpo dos agentes.
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL_ID: str = os.getenv("DEFAULT_MODEL", "gpt-4o")
-DEFAULT_MINI_MODEL_ID: str = os.getenv("DEFAULT_MINI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL_ID: str = os.getenv("DEFAULT_MODEL", "gpt-5.5")
+DEFAULT_MINI_MODEL_ID: str = os.getenv("DEFAULT_MINI_MODEL", "gpt-5.5")
 
 
 def _get_openai_kwargs() -> dict[str, Any]:
@@ -86,7 +85,7 @@ class BaseInChurchAgent(Agent):
     """Agente base para todos os agentes InChurch.
 
     Responsabilidades:
-    - Injetar o modelo primário (GPT-4o) com fallback automático para GPT-4o-mini.
+    - Injetar GPT-5.5 como modelo primário e fallback padrão.
     - Conectar o armazenamento de sessão ao Redis usando o `session_id` do usuário Django.
     - Expor `user_metadata` para que sub-agentes possam personalizar respostas
       sem acessar o ORM diretamente (desacoplamento crítico em agentes assíncronos).

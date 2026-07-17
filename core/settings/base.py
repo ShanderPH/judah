@@ -304,7 +304,10 @@ PINECONE_INDEX_NAME = config("PINECONE_INDEX_NAME", default="inchurch-knowledge"
 PINECONE_HOST = config("PINECONE_HOST", default="")
 
 SALOMAO_V1_BASE_URL = config("SALOMAO_V1_BASE_URL", default="")
-SALOMAO_V1_TIMEOUT_SECONDS = config("SALOMAO_V1_TIMEOUT_SECONDS", default=45.0, cast=float)
+SALOMAO_V1_TIMEOUT_SECONDS = max(
+    120.0,
+    config("SALOMAO_V1_TIMEOUT_SECONDS", default=120.0, cast=float),
+)
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS = config("SALOMAO_V1_IMAGE_TIMEOUT_SECONDS", default=180.0, cast=float)
 SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast=bool)
 SALOMAO_V1_MAX_ATTEMPTS = config("SALOMAO_V1_MAX_ATTEMPTS", default=3, cast=int)

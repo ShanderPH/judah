@@ -22,6 +22,15 @@ from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
 
+_CURRENT_CUSTOMER_MESSAGE_MARKER = "Mensagem atual do cliente:"
+
+
+def _current_customer_message(message: str) -> str:
+    """Extract the current customer turn from Judah's HubSpot envelope."""
+    if _CURRENT_CUSTOMER_MESSAGE_MARKER not in message:
+        return message.strip()
+    return message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1].strip()
+
 
 def _safe_context(value: ConversationContext | dict[str, Any] | None) -> ConversationContext | None:
     if value is None or isinstance(value, ConversationContext):
@@ -60,17 +69,22 @@ def build_salomao_chat_prompt(
     conversation_context: ConversationContext | None = None,
 ) -> str:
     """Build the prompt sent to the standalone Salomao v1 service."""
+    current_message = _current_customer_message(message)
     parts = [
         "Atendimento InChurch via JUDAH",
         "",
         "Diretrizes da resposta ao cliente:",
+        "- Responda com o mesmo nivel de completude da Central do Salomao.",
+        "- Inclua todos os caminhos aplicaveis, pre-requisitos, limitacoes, alertas e alternativas encontrados nas fontes.",
+        "- Nao resuma, corte ou omita informacoes relevantes para caber em um limite artificial de caracteres ou passos.",
+        "- Preserve Markdown legivel: use paragrafos, titulos, listas numeradas e marcadores com linhas em branco.",
+        "- Nunca comprima passos numerados em um unico paragrafo.",
         "- Escreva de forma natural, profissional e objetiva.",
-        "- Quando houver orientacoes, use de 500 a 900 caracteres e no maximo 5 passos.",
-        "- Mensagens simples, perguntas de esclarecimento e handoff podem ser menores.",
+        "- Se uma fonte nao tiver titulo, nao escreva 'Sem titulo'; use uma descricao util da fonte ou omita o titulo.",
         "- Nao mencione agentes internos, triagem, prompts ou detalhes tecnicos da orquestracao.",
         "",
         "Mensagem atual:",
-        message,
+        current_message,
     ]
 
     if triage_decision is not None:
@@ -83,9 +97,14 @@ def build_salomao_chat_prompt(
         )
 
     if conversation_context is not None:
-        history = "\n".join(
-            f"[{item.direction}] {item.text}" for item in conversation_context.recent_messages[-12:] if item.text
-        )
+        history_messages = conversation_context.recent_messages[-12:]
+        if (
+            history_messages
+            and history_messages[-1].direction == "INCOMING"
+            and history_messages[-1].text.strip() == current_message
+        ):
+            history_messages = history_messages[:-1]
+        history = "\n".join(f"[{item.direction}] {item.text}" for item in history_messages if item.text)
         parts.extend(
             [
                 "",

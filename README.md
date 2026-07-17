@@ -40,17 +40,19 @@ Backend unificado da InChurch: uma plataforma Django 5.2 que consolida suporte, 
                                   ▼
  Authenticated UI ───► /api/v1/ai/salomao/chat ─► SalomaoSupervisorAgent
                                                     │
-                                     ┌──────────────┼────────────────┐
-                                     ▼              ▼                ▼
-                             HeimdallTriage  KnowledgeRagAgent  HelpdeskAction
-                             (gpt-4o-mini)   (Pinecone RAG)     (MCP tools)
-                                                                      │
-                                                                      ▼
-                                                              HubSpot MCP server
-                                                              (FastMCP stdio)
+                                                    ▼
+                                             HeimdallTriage
+                                                (gpt-5.5)
+                                                    │
+                                                    ▼
+                                             SalomaoChat adapter
+                                                    │
+                                                    ▼
+                                              Salomao v1
+                                                (gpt-5.5)
 ```
 
-The **Supervisor** is an Agno `Team` in `coordinate` mode. It calls Heimdall first to produce a structured `TriageResult`, then routes to one of the worker agents based on the returned `rota`. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
+The production **Supervisor** calls Heimdall first to produce a structured `TriageResult`, then always delegates the customer answer to the official Salomao v1 adapter. Only `ESCALAR_IMEDIATAMENTE`, an unavailable v1 service, or a transfer requested by v1 enters human handoff. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
 
 Background work (pipeline dispatch, auto-assignment, metrics aggregation) is scheduled by Celery. FastAPI-style endpoints are exposed through **Django Ninja**.
 
@@ -179,8 +181,8 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `HUBSPOT_TICKET_CHURCH_PROPERTY` | HubSpot protocol lookup | Ticket property containing the local church ID; defaults to `codigo_de_igreja_local___ticket` |
 | `HUBSPOT_PORTAL_ID`             | Optional           | Used to build ticket URLs                               |
 | `SENTRY_DSN`                    | Recommended        | Auto-initialized if set                                 |
-| `DEFAULT_MODEL`                 | Optional           | Override `gpt-4o`                                       |
-| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-4o-mini`                                  |
+| `DEFAULT_MODEL`                 | Optional           | Override `gpt-5.5`                                      |
+| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-5.5`                                      |
 | `USE_MOCK_HUBSPOT`              | Dev only           | `True` bypasses signature verification (local simulator)|
 
 ---
@@ -214,10 +216,11 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
 1. **Circuit breaker** — reject if the session has consumed >15k tokens (`TokenTrackingLog` aggregate). See Known Risks H4.
 2. **Greeting injection** — first-turn system rule prepended to Team instructions (per-request).
-3. **Team.run(message)** — Agno coordinates:
-   - `HeimdallTriageAgent` (gpt-4o-mini, `output_schema=TriageResult`) classifies the message.
-   - Based on `rota`, either `KnowledgeRagAgent` (Pinecone RAG) or `HelpdeskActionAgent` (MCP tools) handles the turn.
-   - `ESCALAR_IMEDIATAMENTE` triggers a human handoff signal.
+3. **Deterministic chain** — Judah coordinates:
+   - `HeimdallTriageAgent` (gpt-5.5, `output_schema=TriageResult`) classifies the message.
+   - `SalomaoChatAgent` sends the current customer turn, triage and normalized history to Salomao v1.
+   - Judah preserves the complete Markdown response from v1.
+   - `ESCALAR_IMEDIATAMENTE`, v1 unavailability, or a v1 transfer request triggers human handoff.
 4. **Token tracking** — tokens × model price persisted to `TokenTrackingLog` (see `utils/pricing.py`).
 
 ### MCP integration
@@ -316,7 +319,7 @@ Set these variables on the Judah API and worker services:
 AI_ROUTING_ENABLED=true
 AI_ROUTING_ROLLOUT_PERCENTAGE=100
 SALOMAO_V1_BASE_URL=https://salomao-v1-production.up.railway.app
-SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_TIMEOUT_SECONDS=120
 SALOMAO_V1_AS_TEAM_AGENT=true
 SALOMAO_V1_MAX_ATTEMPTS=3
 SALOMAO_MIN_CONFIDENCE=0.65

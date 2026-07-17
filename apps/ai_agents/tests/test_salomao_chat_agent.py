@@ -21,14 +21,23 @@ class FakeSalomaoClient:
         timeout_seconds: float | None = None,
     ) -> SalomaoV1ChatResult:
         assert "Mensagem atual:\nComo fazer um cupom?" in message
-        assert "500 a 900 caracteres" in message
-        assert "no maximo 5 passos" in message
+        assert message.count("Como fazer um cupom?") == 1
+        assert "Atendimento HubSpot\nTicket:" not in message
+        assert "500 a 900 caracteres" not in message
+        assert "no maximo 5 passos" not in message
+        assert "Nao resuma, corte ou omita informacoes relevantes" in message
+        assert "Preserve Markdown legivel" in message
         assert session_id == "hubspot-thread-123"
         return SalomaoV1ChatResult(
-            response="Para criar um cupom, acesse Eventos e configure o desconto.",
+            response=(
+                "## Como criar um cupom\n\n"
+                "1. Acesse **Eventos**.\n"
+                "2. Abra **Ingressos**.\n\n"
+                "## Atenção\n\n- Revise a validade antes de salvar."
+            ),
             session_id=session_id,
             transfer_requested=False,
-            model_used="gpt-4o-mini",
+            model_used="gpt-5.5",
             tokens=SalomaoV1TokenUsage(prompt=10, completion=20, total=30),
         )
 
@@ -75,11 +84,15 @@ async def test_salomao_chat_tool_returns_structured_draft() -> None:
     )
 
     draft = await tool.create_chat_draft_async(
-        message="Como fazer um cupom?",
+        message=(
+            "Atendimento HubSpot\nTicket: 456\nHistorico recente:\n[INCOMING] Como fazer um cupom?\n\n"
+            "Mensagem atual do cliente:\nComo fazer um cupom?"
+        ),
         conversation_context=_conversation_context(),
     )
 
-    assert draft.response_text.startswith("Para criar um cupom")
+    assert draft.response_text.startswith("## Como criar um cupom\n\n1.")
+    assert "\n\n## Atenção\n\n- " in draft.response_text
     assert draft.resolved is True
     assert draft.requires_human_handoff is False
     assert draft.recommended_actions[0].name == "send_thread_reply"
@@ -87,7 +100,7 @@ async def test_salomao_chat_tool_returns_structured_draft() -> None:
     assert draft.prompt_tokens == 10
     assert draft.completion_tokens == 20
     assert draft.total_tokens == 30
-    assert draft.model_name == "gpt-4o-mini"
+    assert draft.model_name == "gpt-5.5"
 
 
 @override_settings(SALOMAO_V1_BASE_URL="http://salomao.local")

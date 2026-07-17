@@ -610,6 +610,19 @@ def test_salomao_v1_low_confidence_does_not_force_handoff_without_v1_request() -
     assert response.decision.outcome == "candidate_resolved"
 
 
+def test_complete_salomao_v1_markdown_is_preserved() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    markdown = "## Opção 1\n\n" + ("1. Passo detalhado do estorno.\n\n" * 160) + "## Atenção\n\n- Limitação final."
+    response = _response(markdown)
+
+    finalized = supervisor._finalize_response(response, is_first_message=False)
+
+    assert finalized.message == markdown
+    assert "content_truncated" not in finalized.risk_flags
+    assert "\n\n## Atenção\n\n- " in finalized.message
+
+
 def test_missing_triage_data_produces_waiting_decision() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-missing"
