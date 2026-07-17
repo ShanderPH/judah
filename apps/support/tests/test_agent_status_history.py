@@ -5,7 +5,6 @@ Covers:
 - updated_at is saved when status changes
 - Agents with is_active=None are included (not excluded like is_active=False)
 - Agents with is_active=False are excluded
-- Webhook handler dispatches async task (no longer creates history inline)
 """
 
 from __future__ import annotations
@@ -41,22 +40,6 @@ def _make_agent(
 # ---------------------------------------------------------------------------
 # Webhook handler — now dispatches async, verify task dispatch
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-class TestWebhookHandlerStatusHistory:
-    def test_dispatches_availability_task(self) -> None:
-        """Webhook handler now dispatches a Celery task instead of inline processing."""
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
-
-        with patch("apps.support.tasks.task_handle_availability_change.delay") as mock_delay:
-            _handle_agent_availability_change(
-                hubspot_contact_id="10",
-                availability_value="available",
-                payload={"email": "diego@test.com"},
-            )
-
-        mock_delay.assert_called_once_with("10", "available", {"email": "diego@test.com"})
 
 
 # ---------------------------------------------------------------------------

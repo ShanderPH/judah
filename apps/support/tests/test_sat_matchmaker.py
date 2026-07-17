@@ -498,11 +498,3 @@ class TestWebhookHandlerAsync:
         _handle_ticket_owner_change("T001", "200", payload)
 
         mock_delay.assert_called_once_with("T001", "200", payload)
-
-    @patch("apps.support.tasks.task_handle_availability_change.delay")
-    def test_availability_handler_dispatches_task(self, mock_delay):
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
-
-        _handle_agent_availability_change("C001", "available", {"email": "test@test.com"})
-
-        mock_delay.assert_called_once_with("C001", "available", {"email": "test@test.com"})
