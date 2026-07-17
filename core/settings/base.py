@@ -391,7 +391,7 @@ if SENTRY_DSN:
 #   stdlib/third-party records → foreign_pre_chain (same chain)  →  formatter
 #   Both paths converge in ProcessorFormatter which applies the final renderer.
 #
-# In production:  JSONRenderer  → machine-readable, aggregator-friendly
+# In staging/production: JSONRenderer → machine-readable, aggregator-friendly
 # In development: ConsoleRenderer → human-readable coloured output (see development.py)
 # ---------------------------------------------------------------------------
 
@@ -412,8 +412,8 @@ _STRUCTLOG_PRE_CHAIN: list = [
 
 # Determine active log format from environment (base.py is loaded before
 # production.py overrides DEBUG, so we read DJANGO_ENV directly).
-_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development")
-_IS_PRODUCTION = _DJANGO_ENV == "production"
+_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development").strip().lower()
+_IS_DEPLOYED = _DJANGO_ENV in {"staging", "production"}
 
 LOGGING: dict = {
     "version": 1,
@@ -459,8 +459,8 @@ LOGGING: dict = {
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            # Production uses JSON; development.py switches this to "console"
-            "formatter": "json" if _IS_PRODUCTION else "console",
+            # Deployed environments use JSON; local development uses console.
+            "formatter": "json" if _IS_DEPLOYED else "console",
             "filters": ["suppress_health_checks"],
         },
     },
