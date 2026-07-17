@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import json
 import os
 import re
@@ -752,6 +753,90 @@ def _recipient_from_sender(sender: dict[str, Any]) -> dict[str, Any]:
     return recipient
 
 
+def _format_inline_markdown(value: str) -> str:
+    """Render the small, safe Markdown subset used in Salomao replies."""
+    escaped = html.escape(value, quote=True)
+    placeholders: dict[str, str] = {}
+
+    def preserve_code(match: re.Match[str]) -> str:
+        key = f"\x00CODE{len(placeholders)}\x00"
+        placeholders[key] = f"<code>{match.group(1)}</code>"
+        return key
+
+    escaped = re.sub(r"`([^`]+)`", preserve_code, escaped)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    for key, rendered in placeholders.items():
+        escaped = escaped.replace(key, rendered)
+    return escaped
+
+
+def markdown_to_hubspot_rich_text(markdown: str) -> str:
+    """Convert Salomao Markdown to safe HTML accepted by HubSpot richText.
+
+    Raw HTML is always escaped. The converter intentionally supports only the
+    response primitives used by Salomao so model output cannot inject arbitrary
+    tags or attributes into the agent inbox.
+    """
+    rendered: list[str] = []
+    paragraph: list[str] = []
+    list_kind: str | None = None
+
+    def close_paragraph() -> None:
+        if paragraph:
+            rendered.append(f"<p>{'<br>'.join(paragraph)}</p>")
+            paragraph.clear()
+
+    def close_list() -> None:
+        nonlocal list_kind
+        if list_kind:
+            rendered.append(f"</{list_kind}>")
+            list_kind = None
+
+    for raw_line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            close_paragraph()
+            close_list()
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        unordered = re.match(r"^[-*]\s+(.+)$", line)
+        ordered = re.match(r"^\d+[.)]\s+(.+)$", line)
+
+        if heading:
+            close_paragraph()
+            close_list()
+            # Compact headings render better in the HubSpot chat timeline.
+            level = min(len(heading.group(1)) + 2, 5)
+            rendered.append(f"<h{level}>{_format_inline_markdown(heading.group(2))}</h{level}>")
+        elif re.fullmatch(r"-{3,}", line):
+            close_paragraph()
+            close_list()
+            rendered.append("<hr>")
+        elif line.startswith(">"):
+            close_paragraph()
+            close_list()
+            rendered.append(f"<blockquote>{_format_inline_markdown(line.lstrip('> ').strip())}</blockquote>")
+        elif unordered or ordered:
+            close_paragraph()
+            target_kind = "ul" if unordered else "ol"
+            if list_kind != target_kind:
+                close_list()
+                rendered.append(f"<{target_kind}>")
+                list_kind = target_kind
+            match = unordered or ordered
+            assert match is not None
+            rendered.append(f"<li>{_format_inline_markdown(match.group(1))}</li>")
+        else:
+            close_list()
+            paragraph.append(_format_inline_markdown(line))
+
+    close_paragraph()
+    close_list()
+    return "".join(rendered)
+
+
 async def send_salomao_reply_to_hubspot_thread(
     context: dict[str, Any],
     text: str,
@@ -808,7 +893,7 @@ async def send_salomao_reply_to_hubspot_thread(
         "senderActorId": sender_actor_id,
         "text": text,
         "type": "MESSAGE",
-        "richText": text,
+        "richText": markdown_to_hubspot_rich_text(text),
     }
 
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
@@ -844,6 +929,7 @@ __all__ = [
     "build_salomao_prompt_from_hubspot_context",
     "hydrate_thread_context",
     "hydrate_ticket_context",
+    "markdown_to_hubspot_rich_text",
     "send_salomao_reply_to_hubspot_thread",
     "update_hubspot_ticket_route",
     "update_hubspot_ticket_stage",

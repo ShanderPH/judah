@@ -67,6 +67,9 @@ def build_salomao_chat_prompt(
     message: str,
     triage_decision: TriageDecision | None = None,
     conversation_context: ConversationContext | None = None,
+    image_attached: bool = False,
+    image_mime_type: str | None = None,
+    image_name: str | None = None,
 ) -> str:
     """Build the prompt sent to the standalone Salomao v1 service."""
     current_message = _current_customer_message(message)
@@ -77,15 +80,35 @@ def build_salomao_chat_prompt(
         "- Responda com o mesmo nivel de completude da Central do Salomao.",
         "- Inclua todos os caminhos aplicaveis, pre-requisitos, limitacoes, alertas e alternativas encontrados nas fontes.",
         "- Nao resuma, corte ou omita informacoes relevantes para caber em um limite artificial de caracteres ou passos.",
-        "- Preserve Markdown legivel: use paragrafos, titulos, listas numeradas e marcadores com linhas em branco.",
+        "- Preserve Markdown legivel: use paragrafos curtos, subtitulos, listas numeradas e marcadores com linhas em branco.",
         "- Nunca comprima passos numerados em um unico paragrafo.",
-        "- Escreva de forma natural, profissional e objetiva.",
+        "- Fale como uma pessoa experiente e acolhedora da equipe InChurch: natural, proxima, clara e respeitosa.",
+        "- Reconheca brevemente o contexto ou a dificuldade quando isso fizer sentido, sem frases prontas ou entusiasmo artificial.",
+        "- Varie a abertura e nao comece toda resposta com 'Claro!'. Nao repita saudacoes durante a mesma conversa.",
+        "- Adapte o tamanho da resposta a pergunta. Use detalhes quando forem necessarios, mas evite secoes e separadores em excesso.",
+        "- Use no maximo um emoji discreto quando combinar com o momento; nao use emoji em assuntos financeiros, de seguranca ou delicados.",
+        "- Termine com uma unica pergunta util somente quando ela realmente ajudar o cliente a avancar.",
         "- Se uma fonte nao tiver titulo, nao escreva 'Sem titulo'; use uma descricao util da fonte ou omita o titulo.",
         "- Nao mencione agentes internos, triagem, prompts ou detalhes tecnicos da orquestracao.",
         "",
         "Mensagem atual:",
         current_message,
     ]
+
+    if image_attached:
+        parts.extend(
+            [
+                "",
+                "Imagem anexada pelo cliente:",
+                f"- Arquivo: {image_name or 'nome nao informado'}",
+                f"- Tipo: {image_mime_type or 'tipo nao informado'}",
+                "- Analise a imagem em conjunto com a mensagem e use apenas o que estiver realmente visivel.",
+                "- Quando ajudar, descreva brevemente o elemento visual que fundamenta a orientacao.",
+                "- Nao invente texto, botoes, erros ou dados que nao estejam legiveis.",
+                "- Se a imagem estiver cortada, desfocada ou insuficiente, diga exatamente o que nao foi possivel ler e peca uma imagem melhor ou o dado necessario.",
+                "- Proteja a privacidade: nao repita senhas, tokens, documentos, dados bancarios ou identificadores completos vistos na imagem.",
+            ]
+        )
 
     if triage_decision is not None:
         parts.extend(
@@ -234,12 +257,14 @@ class SalomaoChatTool(Toolkit):
         client_factory: Callable[[], SalomaoV1Client] | None = None,
         image_base64: str | None = None,
         image_mime_type: str | None = None,
+        image_name: str | None = None,
     ) -> None:
         super().__init__(name="salomao_chat")
         self.session_id = session_id
         self.client_factory = client_factory or SalomaoV1Client
         self.image_base64 = image_base64
         self.image_mime_type = image_mime_type
+        self.image_name = image_name
         create_chat_draft = Function.from_callable(self.create_chat_draft)
         create_chat_draft.show_result = True
         create_chat_draft.stop_after_tool_call = True
@@ -280,6 +305,9 @@ class SalomaoChatTool(Toolkit):
             message=message,
             triage_decision=triage,
             conversation_context=context,
+            image_attached=bool(self.image_base64),
+            image_mime_type=self.image_mime_type,
+            image_name=self.image_name,
         )
         session_id = context.session_id if context else self.session_id
 
@@ -332,6 +360,7 @@ class SalomaoChatAgent(BaseInChurchAgent):
             client_factory=client_factory,
             image_base64=user_metadata.get("image_base64"),
             image_mime_type=user_metadata.get("image_mime_type"),
+            image_name=user_metadata.get("image_name"),
         )
         super().__init__(
             session_id=session_id,

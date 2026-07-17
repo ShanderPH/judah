@@ -27,6 +27,8 @@ class FakeSalomaoClient:
         assert "no maximo 5 passos" not in message
         assert "Nao resuma, corte ou omita informacoes relevantes" in message
         assert "Preserve Markdown legivel" in message
+        assert "experiente e acolhedora" in message
+        assert "Nao repita saudacoes" in message
         assert session_id == "hubspot-thread-123"
         return SalomaoV1ChatResult(
             response=(
@@ -61,6 +63,11 @@ class ImageSalomaoClient:
         assert image_base64 == "aW1hZ2U="
         assert image_mime_type == "image/png"
         assert timeout_seconds == 180.0
+        assert "Imagem anexada pelo cliente:" in message
+        assert "Arquivo: erro-financeiro.png" in message
+        assert "Tipo: image/png" in message
+        assert "Nao invente texto, botoes, erros ou dados" in message
+        assert "nao repita senhas, tokens" in message
         return SalomaoV1ChatResult(response="A imagem mostra a tela de eventos.", session_id=session_id)
 
 
@@ -128,6 +135,7 @@ async def test_salomao_chat_tool_forwards_image_outside_prompt() -> None:
         client_factory=ImageSalomaoClient,
         image_base64="aW1hZ2U=",
         image_mime_type="image/png",
+        image_name="erro-financeiro.png",
     )
 
     draft = await tool.create_chat_draft_async(
