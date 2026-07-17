@@ -13,8 +13,9 @@ _REQUIRED_ENV: tuple[str, ...] = (
 )
 _missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
 if _missing:
+    _active_env = os.environ.get("DJANGO_ENV", "production")
     sys.stderr.write(
-        f"FATAL: missing required production env vars: {', '.join(_missing)}\n",
+        f"FATAL: missing required {_active_env} env vars: {', '.join(_missing)}\n",
     )
     raise SystemExit(78)  # EX_CONFIG
 
@@ -73,7 +74,7 @@ if "default" in DATABASES:
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 # --- Logging ---
-# JSON format is already selected in base.py when DJANGO_ENV=production.
+# JSON format is already selected in base.py for staging and production.
 # Tighten root level to ERROR in production; app loggers keep DEBUG/INFO.
 
 LOGGING["root"]["level"] = "ERROR"  # type: ignore[index]

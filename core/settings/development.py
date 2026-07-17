@@ -25,7 +25,7 @@ CELERY_TASK_EAGER_PROPAGATES = True
 # ---------------------------------------------------------------------------
 # Logging overrides for development
 # ---------------------------------------------------------------------------
-# base.py already selected "console" formatter when DJANGO_ENV != "production",
+# base.py already selected "console" formatter for local development,
 # so no formatter override is needed here.
 #
 # Enable slow-query capture: log all queries that take ≥ 50 ms so you can

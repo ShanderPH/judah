@@ -87,7 +87,7 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
-| `DJANGO_ENV` | `core/settings/base.py`, `core/settings/production.py` | Ambiente: `development`, `staging`, `production`, `test`. |
+| `DJANGO_ENV` | `core/settings/__init__.py` | Ambiente: `development`, `staging`, `production`, `test`. Valores desconhecidos interrompem o boot para evitar fallback inseguro. |
 | `DJANGO_DEBUG` | `core/settings/base.py` | Ativa modo debug (padrão: `False`). |
 | `DJANGO_ALLOWED_HOSTS` | `core/settings/base.py` | Hosts permitidos (separados por vírgula). |
 | `CORS_ALLOWED_ORIGINS` | `core/settings/base.py` | Origens permitidas para CORS. |
@@ -111,7 +111,19 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 |----------|--------------|-----------|
 | `INRADAR_AUTH_TOKEN` | `apps/ai_agents/tools/inchurch_tools.py` | Token para API interna InRadar (diagnóstico de eventos). |
 | `REDIS_PRIVATE_URL` | `core/settings/base.py` | Fallback para `REDIS_URL` (usado pelo Railway). |
-| `RAILWAY_PUBLIC_DOMAIN` | `core/settings/production.py` | Injetado pelo Railway em `ALLOWED_HOSTS`. |
+| `RAILWAY_PUBLIC_DOMAIN` | `core/settings/production.py` | Injetado pelo Railway em `ALLOWED_HOSTS`; também é usado por `staging`, que herda a configuração segura de produção. |
+
+### Configuração de staging
+
+No ambiente de staging da Railway, use `DJANGO_ENV=staging`. Esse perfil mantém
+`DEBUG=False`, cookies seguros, tratamento correto do proxy TLS, logs JSON e as
+demais proteções de produção, mas conserva logs de aplicação mais detalhados
+para diagnóstico.
+
+`DJANGO_ENV` escolhe apenas o perfil do Django. A separação real de dados e
+integrações depende de configurar no ambiente de staging seus próprios valores
+para `DATABASE_URL`, `REDIS_URL`, HubSpot, Pinecone, Salomão-V1, OpenAI e Sentry.
+Não reutilize credenciais ou bancos de produção no serviço de staging.
 
 ## Exemplo de `.env` para desenvolvimento
 
