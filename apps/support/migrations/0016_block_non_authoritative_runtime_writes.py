@@ -18,7 +18,7 @@ def create_runtime_guards(apps, schema_editor) -> None:
         BEGIN
             IF runtime_name ~ '(^|:)judah:(staging|development|test|preview)(:|$)' THEN
                 RAISE EXCEPTION
-                    'non-authoritative JUDAH runtime cannot mutate routing state: %',
+                    'non-authoritative JUDAH runtime cannot mutate routing state: %%',
                     runtime_name
                     USING ERRCODE = '42501';
             END IF;
