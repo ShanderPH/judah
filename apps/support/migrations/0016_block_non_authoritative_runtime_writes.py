@@ -33,9 +33,9 @@ def create_runtime_guards(apps, schema_editor) -> None:
             runtime_name text := lower(current_setting('application_name', true));
             writer_role text := lower(current_user);
             is_local_test_migration boolean :=
-                current_database() ~ '^(test_)?judah_test($|_)'
-                AND lower(current_user) = 'postgres'
-                AND lower(session_user) = 'postgres'
+                current_database() ~ '^(test_)?judah_(test($|_)|ci_[0-9]+_[0-9]+$)'
+                AND lower(current_user) IN ('postgres', 'judah')
+                AND lower(session_user) IN ('postgres', 'judah')
                 AND runtime_name = 'judah:local-test:pytest';
         BEGIN
             IF NOT (

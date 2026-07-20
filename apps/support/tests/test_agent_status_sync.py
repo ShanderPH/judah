@@ -117,7 +117,7 @@ class TestTicketWebhookAvailabilityReconciliation:
 
         mock_reconcile.assert_called_once()
         assert mock_reconcile.call_args.kwargs["force_refresh"] is True
-        mock_assign.assert_called_once_with()
+        mock_assign.assert_called_once_with("T001")
 
     @patch("apps.support.sat_service.sat_heartbeat")
     @patch("apps.support.matchmaker_service.matchmaker_assign_next")

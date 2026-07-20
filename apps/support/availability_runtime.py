@@ -29,6 +29,8 @@ ROUTING_WRITER_CAPABILITIES: dict[str, RoutingCapability] = {
     "sync_novo_stage_tickets": RoutingCapability.RECONCILE_QUEUE,
     "task_matchmaker_assign_single": RoutingCapability.INGEST_QUEUE,
     "task_matchmaker_drain_queue": RoutingCapability.ASSIGN,
+    "task_repair_assignment_attempts": RoutingCapability.ASSIGN,
+    "task_purge_assignment_attempts": RoutingCapability.WRITE_ROUTING_STATE,
     "matchmaker_assign_next": RoutingCapability.ASSIGN,
     "matchmaker_drain_queue": RoutingCapability.ASSIGN,
     "assign_pending_tickets": RoutingCapability.ASSIGN,

@@ -204,6 +204,8 @@ AVAILABILITY_FRESHNESS_SECONDS = config("AVAILABILITY_FRESHNESS_SECONDS", defaul
 AVAILABILITY_STABLE_SECONDS = config("AVAILABILITY_STABLE_SECONDS", default=30, cast=int)
 AVAILABILITY_REQUIRED_SAMPLES = config("AVAILABILITY_REQUIRED_SAMPLES", default=2, cast=int)
 AVAILABILITY_LEASE_TTL_SECONDS = config("AVAILABILITY_LEASE_TTL_SECONDS", default=25, cast=int)
+ASSIGNMENT_CLAIM_TTL_SECONDS = config("ASSIGNMENT_CLAIM_TTL_SECONDS", default=90, cast=int)
+ASSIGNMENT_STUCK_AFTER_SECONDS = config("ASSIGNMENT_STUCK_AFTER_SECONDS", default=120, cast=int)
 
 from celery.schedules import crontab  # noqa: E402
 
@@ -233,6 +235,14 @@ CELERY_BEAT_SCHEDULE = {
     "matchmaker-drain-queue": {
         "task": "support.task_matchmaker_drain_queue",
         "schedule": 60,  # seconds
+    },
+    "repair-assignment-attempts": {
+        "task": "support.task_repair_assignment_attempts",
+        "schedule": 60,
+    },
+    "purge-assignment-attempts-daily": {
+        "task": "support.task_purge_assignment_attempts",
+        "schedule": crontab(hour=0, minute=20),
     },
     # Sync NOVO-stage tickets from HubSpot daily at 08:00 AM (São Paulo)
     "sync-novo-stage-tickets-daily": {

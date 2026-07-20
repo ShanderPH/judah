@@ -95,6 +95,12 @@ class Agent(models.Model):
     class Meta:
         db_table = "agents"
         ordering = ["name"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(current_simultaneous_chats__gte=0),
+                name="agent_current_chats_nonnegative",
+            ),
+        ]
         indexes = [  # noqa: RUF012
             models.Index(fields=["status_enum", "auto_assign_enabled"], name="idx_agent_eligible"),
             models.Index(fields=["hubspot_owner_id"], name="idx_agent_hubspot_owner"),
@@ -301,6 +307,9 @@ class NewConversation(models.Model):
     next_assignment_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
     failure_code = models.CharField(max_length=50, blank=True, default="")
     failure_message = models.TextField(blank=True, default="")
+    claim_owner_token = models.CharField(max_length=64, blank=True, default="")
+    claim_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -374,6 +383,96 @@ class AssignedConversation(models.Model):
 
     def __str__(self) -> str:
         return f"AssignedConversation {self.hubspot_ticket_id} → {self.agent_name}"
+
+
+class AssignmentAttempt(models.Model):
+    """Durable protocol record for one HubSpot owner assignment."""
+
+    class State(models.TextChoices):
+        RESERVED = "reserved", "Reserved"
+        EXTERNAL_APPLIED = "external_applied", "External Applied"
+        COMPLETED = "completed", "Completed"
+        COMPENSATING = "compensating", "Compensating"
+        COMPENSATED = "compensated", "Compensated"
+        RETRYABLE = "retryable", "Retryable"
+        REPAIR_REQUIRED = "repair_required", "Repair Required"
+
+    class AssignmentType(models.TextChoices):
+        AUTOMATIC = "automatic", "Automatic"
+        MANUAL = "manual", "Manual"
+        FORCED = "forced", "Forced"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.UUIDField(unique=True, editable=False)
+    ticket_id = models.TextField(db_index=True)
+    queue_row = models.ForeignKey(
+        NewConversation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="durable_attempts",
+    )
+    selected_agent = models.ForeignKey(
+        Agent,
+        on_delete=models.PROTECT,
+        related_name="assignment_attempts",
+    )
+    eligibility_revision = models.PositiveBigIntegerField()
+    desired_hubspot_owner_id = models.BigIntegerField()
+    prior_observed_owner_id = models.BigIntegerField(null=True, blank=True)
+    decision_snapshot = models.JSONField(default=dict)
+    decision_reason = models.CharField(max_length=64)
+    state = models.CharField(max_length=24, choices=State.choices, default=State.RESERVED)
+    assignment_type = models.CharField(
+        max_length=16,
+        choices=AssignmentType.choices,
+        default=AssignmentType.AUTOMATIC,
+    )
+    requested_by = models.CharField(max_length=255, blank=True, default="")
+    override_reason = models.CharField(max_length=255, blank=True, default="")
+    provider_request_classification = models.CharField(max_length=64, blank=True, default="")
+    provider_result_classification = models.CharField(max_length=64, blank=True, default="")
+    reserved_at = models.DateTimeField()
+    external_applied_at = models.DateTimeField(null=True, blank=True)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+    compensation_started_at = models.DateTimeField(null=True, blank=True)
+    compensated_at = models.DateTimeField(null=True, blank=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "assignment_attempts"
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["ticket_id"],
+                condition=models.Q(
+                    state__in=[
+                        "reserved",
+                        "external_applied",
+                        "compensating",
+                        "retryable",
+                        "repair_required",
+                    ]
+                ),
+                name="uniq_live_assignment_attempt_ticket",
+            ),
+            models.UniqueConstraint(
+                fields=["ticket_id"],
+                condition=models.Q(state="completed"),
+                name="uniq_completed_assignment_ticket",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["state", "next_retry_at"], name="idx_attempt_retry_scan"),
+            models.Index(fields=["ticket_id", "state"], name="idx_attempt_ticket_state"),
+            models.Index(fields=["reserved_at"], name="idx_attempt_stuck_scan"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AssignmentAttempt ticket={self.ticket_id} state={self.state}"
 
 
 class ClosedConversation(models.Model):
@@ -463,6 +562,13 @@ class AssignmentLog(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    assignment_attempt = models.OneToOneField(
+        AssignmentAttempt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assignment_log",
+    )
     ticket_id = models.TextField(db_index=True)
     agent = models.ForeignKey(
         Agent,

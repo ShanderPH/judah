@@ -135,6 +135,7 @@ def get_queue_health(request) -> dict:
     """
     from django.utils import timezone
 
+    from apps.support.assignment_readiness import evaluate_assignment_readiness
     from apps.support.models import Agent, AssignmentLog, NewConversation
     from apps.support.queue_service import get_eligible_agents, get_last_assigned_owner_id
 
@@ -235,6 +236,7 @@ def get_queue_health(request) -> dict:
         "eligible_agents": [_build_agent(a) for a in eligible_objs],
         "pending_tickets": pending_tickets,
         "last_assignments": last_assignments,
+        "readiness": evaluate_assignment_readiness(),
     }
 
 

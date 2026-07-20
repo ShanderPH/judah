@@ -107,14 +107,13 @@ def task_matchmaker_assign_single(
     Returns:
         True if assigned, False otherwise.
     """
-    from django.core.cache import cache
-
     from apps.support.availability_runtime import (
         log_runtime_rejection,
         may_assign,
         may_ingest_queue,
     )
     from apps.support.matchmaker_service import enqueue_new_ticket, matchmaker_assign_next
+    from apps.support.owned_cache_lock import OwnedCacheLock
 
     if not may_ingest_queue():
         log_runtime_rejection("task_matchmaker_assign_single")
@@ -122,7 +121,8 @@ def task_matchmaker_assign_single(
 
     # Redis dedup lock — prevent duplicate processing from webhook retries
     lock_key = f"matchmaker_assign:{hubspot_ticket_id}"
-    if not cache.add(lock_key, "1", timeout=30):
+    lock = OwnedCacheLock(lock_key, timeout=30)
+    if not lock.acquire():
         logger.info(
             "task_matchmaker_assign_single_dedup",
             ticket_id=hubspot_ticket_id,
@@ -170,7 +170,7 @@ def task_matchmaker_assign_single(
             )
             return False
 
-        outcome = matchmaker_assign_next()
+        outcome = matchmaker_assign_next(hubspot_ticket_id)
         assigned = outcome.value == "assigned"
         logger.info(
             "task_matchmaker_assign_single_done",
@@ -187,6 +187,8 @@ def task_matchmaker_assign_single(
             retry=self.request.retries,
         )
         raise self.retry(exc=exc) from exc
+    finally:
+        lock.release()
 
 
 @shared_task(name="support.task_matchmaker_drain_queue")
@@ -199,17 +201,17 @@ def task_matchmaker_drain_queue() -> dict:
 
     Uses a Redis lock to prevent overlapping drains.
     """
-    from django.core.cache import cache
-
     from apps.support.agent_sync_service import is_business_hours
     from apps.support.matchmaker_service import matchmaker_drain_queue
+    from apps.support.owned_cache_lock import OwnedCacheLock
 
     if not is_business_hours():
         return {"skipped_off_hours": True}
 
     # Redis lock — prevent overlapping drains
     lock_key = "matchmaker_drain_lock"
-    if not cache.add(lock_key, "1", timeout=60):
+    lock = OwnedCacheLock(lock_key, timeout=60)
+    if not lock.acquire():
         logger.debug("task_matchmaker_drain_queue_locked")
         return {"skipped_locked": True}
 
@@ -218,7 +220,41 @@ def task_matchmaker_drain_queue() -> dict:
         logger.info("task_matchmaker_drain_queue_done", **result)
         return result
     finally:
-        cache.delete(lock_key)
+        lock.release()
+
+
+@shared_task(name="support.task_repair_assignment_attempts")
+def task_repair_assignment_attempts() -> dict[str, int]:
+    """Converge a bounded batch of crashed or ambiguous assignment attempts."""
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+    from apps.support.durable_assignment_service import repair_assignment_attempts
+
+    if not may_write_routing_state():
+        log_runtime_rejection("task_repair_assignment_attempts")
+        return {"scanned": 0, "assigned": 0, "retryable": 0, "repair_required": 0}
+    result = repair_assignment_attempts(limit=100)
+    logger.info("assignment_attempt_repair_done", **result)
+    return result
+
+
+@shared_task(name="support.task_purge_assignment_attempts")
+def task_purge_assignment_attempts() -> dict[str, int]:
+    """Apply the 30-day terminal-attempt retention policy in bounded batches."""
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+    from apps.support.durable_assignment_service import purge_terminal_assignment_attempts
+
+    if not may_write_routing_state():
+        log_runtime_rejection("task_purge_assignment_attempts")
+        return {"deleted": 0}
+    deleted = purge_terminal_assignment_attempts(days=30, limit=500)
+    logger.info("assignment_attempt_retention_done", deleted=deleted)
+    return {"deleted": deleted}
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +318,12 @@ def task_handle_owner_change(
         new_owner_id: New hubspot_owner_id value.
         payload: Full webhook payload containing previousValue.
     """
-    from django.core.cache import cache
-
     from apps.support.auto_assign_service import _safe_parse_owner_id
     from apps.support.availability_runtime import (
         log_runtime_rejection,
         may_write_routing_state,
     )
+    from apps.support.owned_cache_lock import OwnedCacheLock
 
     if not may_write_routing_state():
         log_runtime_rejection("task_handle_owner_change")
@@ -311,7 +346,8 @@ def task_handle_owner_change(
         # Redis dedup lock — prevents double count adjustments when HubSpot retries
         # the webhook or when Celery retries this task after a partial failure.
         lock_key = f"owner_change:{hubspot_ticket_id}:{prev_owner_int}:{new_owner_int}"
-        if not cache.add(lock_key, "1", timeout=120):
+        lock = OwnedCacheLock(lock_key, timeout=120)
+        if not lock.acquire():
             logger.info(
                 "task_owner_change_dedup_skip",
                 ticket_id=hubspot_ticket_id,
@@ -327,7 +363,7 @@ def task_handle_owner_change(
                 new_owner_int=new_owner_int,
             )
         finally:
-            cache.delete(lock_key)
+            lock.release()
 
     except Exception as exc:
         logger.warning(

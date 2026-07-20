@@ -14,7 +14,8 @@ def test_accepts_local_sqlite_database() -> None:
     assert identity.host == "local-file"
 
 
-def test_accepts_named_local_postgresql_test_database() -> None:
+def test_accepts_named_local_postgresql_test_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     identity = assert_safe_test_database("postgresql://postgres:secret@127.0.0.1:5432/judah_test")
 
     assert identity.backend == "postgresql"

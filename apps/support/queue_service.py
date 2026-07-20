@@ -86,6 +86,32 @@ def get_eligible_agents() -> list[Agent]:
     return eligible
 
 
+def get_ranked_eligible_agents(
+    last_assigned_hubspot_owner_id: int | None = None,
+) -> list[Agent]:
+    """Return all eligible agents in deterministic assignment order."""
+    eligible = get_eligible_agents()
+    if not eligible:
+        return []
+
+    candidates = eligible
+    if last_assigned_hubspot_owner_id is not None and len(eligible) > 1:
+        candidates = [agent for agent in eligible if agent.hubspot_owner_id != last_assigned_hubspot_owner_id]
+        if not candidates:
+            candidates = eligible
+
+    epoch = timezone.datetime(2000, 1, 1, tzinfo=UTC)
+
+    def sort_key(agent: Agent) -> tuple:
+        last = agent.last_assignment_at or epoch
+        if timezone.is_naive(last):
+            last = timezone.make_aware(last, UTC)
+        return (last, agent.current_simultaneous_chats, str(agent.pk))
+
+    candidates.sort(key=sort_key)
+    return candidates
+
+
 def select_next_agent(last_assigned_hubspot_owner_id: int | None = None) -> Agent | None:
     """Select the best agent for the next ticket using the 4-rule priority.
 

@@ -233,8 +233,8 @@ class TestAssignmentFinalGuard:
         assert get_eligible_agents() == []
 
     @override_settings(ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True)
-    @patch("apps.support.matchmaker_service.select_next_agent")
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0)
+    @patch("apps.support.queue_service.get_ranked_eligible_agents")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0, create=True)
     @patch("apps.support.matchmaker_service.get_hubspot_client")
     def test_final_guard_rejects_agent_changed_after_selection(
         self,
@@ -248,7 +248,7 @@ class TestAssignmentFinalGuard:
         agent.eligibility_state = "ineligible"
         agent.eligibility_reason = "active_out_of_office"
         agent.save()
-        mock_select.return_value = agent
+        mock_select.return_value = [agent]
         NewConversation.objects.create(
             hubspot_ticket_id="ABSENCE-RACE",
             entered_queue_at=timezone.now(),
@@ -263,10 +263,10 @@ class TestAssignmentFinalGuard:
         assert NewConversation.objects.filter(hubspot_ticket_id="ABSENCE-RACE").exists()
 
     @override_settings(ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True)
-    @patch("apps.support.matchmaker_service.select_next_agent")
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0)
-    @patch("apps.support.matchmaker_service.sat_verify_agent_assignment_eligibility")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.queue_service.get_ranked_eligible_agents")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0, create=True)
+    @patch("apps.support.sat_service.sat_verify_agent_assignment_eligibility")
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_remote_away_vetoes_assignment_after_candidate_selection(
         self,
         mock_client_fn: MagicMock,
@@ -285,7 +285,7 @@ class TestAssignmentFinalGuard:
         agent.eligibility_state = "eligible"
         agent.eligibility_reason = "eligible"
         agent.save()
-        mock_select.return_value = agent
+        mock_select.return_value = [agent]
         mock_remote_verify.return_value = EligibilityDecision(
             False,
             EligibilityReason.REMOTE_AWAY,
@@ -300,7 +300,8 @@ class TestAssignmentFinalGuard:
         outcome = matchmaker_assign_next()
 
         assert outcome.value == "no_agent"
-        mock_remote_verify.assert_called_once_with(agent)
+        mock_remote_verify.assert_called_once()
+        assert mock_remote_verify.call_args.args == (agent,)
         mock_client_fn.return_value.assign_ticket_owner.assert_not_called()
         assert NewConversation.objects.filter(hubspot_ticket_id="REMOTE-AWAY-RACE").exists()
 

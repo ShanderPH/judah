@@ -27,16 +27,10 @@ from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_cl
 from apps.support.models import (
     Agent,
     AssignedConversation,
-    AssignmentLog,
     ClosedConversation,
     NewConversation,
 )
-from apps.support.queue_service import (
-    decrement_agent_chat_count,
-    get_last_assigned_owner_id,
-    increment_agent_chat_count,
-    select_next_agent,
-)
+from apps.support.queue_service import decrement_agent_chat_count
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
@@ -239,119 +233,6 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     from apps.support.matchmaker_service import AssignmentOutcome, matchmaker_assign_next
 
     return matchmaker_assign_next() == AssignmentOutcome.ASSIGNED
-
-    # Agent status is kept fresh by the SAT heartbeat (20-second polling).
-    # Load reconciliation is done per-agent by the Matchmaker before assignment.
-    # No batch sync needed here.
-
-    # Select next agent (Rule 1-4)
-    last_owner_id = get_last_assigned_owner_id()
-    agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
-
-    if agent is None:
-        # No agent available — mark as queued for later assignment
-        new_conv.queue_status = NewConversation.QueueStatus.QUEUED
-        new_conv.assignment_attempts += 1
-        new_conv.last_assignment_attempt_at = timezone.now()
-        new_conv.save(update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"])
-        logger.warning(
-            "auto_assign_no_agent_available",
-            ticket_id=new_conv.hubspot_ticket_id,
-            queue_position=new_conv.queue_position,
-            assignment_attempts=new_conv.assignment_attempts,
-        )
-        return False
-
-    # Verify selected agent is still available (double-check after sync)
-    agent.refresh_from_db()
-    if agent.status_enum != Agent.StatusEnum.ONLINE:
-        logger.warning(
-            "auto_assign_agent_no_longer_available",
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent=agent.name,
-            status=agent.status_enum,
-        )
-        # Re-select agent with updated data
-        agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
-        if agent is None:
-            new_conv.queue_status = NewConversation.QueueStatus.QUEUED
-            new_conv.assignment_attempts += 1
-            new_conv.last_assignment_attempt_at = timezone.now()
-            new_conv.save(
-                update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
-            )
-            return False
-
-    # Assign via HubSpot API
-    try:
-        client = get_hubspot_client()
-        client.assign_ticket_owner(new_conv.hubspot_ticket_id, agent.hubspot_owner_id)
-    except ExternalServiceError:
-        logger.error(
-            "auto_assign_hubspot_update_failed",
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent_id=str(agent.id),
-        )
-        return False
-
-    # Persist changes atomically in local DB
-    now = timezone.now()
-    wait_seconds: Decimal | None = None
-    if new_conv.entered_queue_at:
-        delta = now - new_conv.entered_queue_at
-        wait_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
-    with transaction.atomic():
-        # Remove from pending queue — the record moves to assigned_conversations
-        new_conv.delete()
-
-        # Create or update assigned_conversation record
-        AssignedConversation.objects.update_or_create(
-            hubspot_ticket_id=new_conv.hubspot_ticket_id,
-            defaults={
-                "agent": agent,
-                "hubspot_owner_id": agent.hubspot_owner_id,
-                "agent_name": agent.name,
-                "pipeline_id": new_conv.pipeline_id,
-                "entered_queue_at": new_conv.entered_queue_at,
-                "assigned_at": now,
-                "queue_wait_seconds": wait_seconds,
-                "contact_name": new_conv.contact_name,
-                "contact_email": new_conv.contact_email,
-                "priority": new_conv.priority,
-                "subject": new_conv.subject,
-            },
-        )
-
-        # Write to assignment_logs
-        AssignmentLog.objects.create(
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent=agent,
-            agent_name=agent.name,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            assignment_type="automatic",
-            pipeline_id=new_conv.pipeline_id,
-            entered_queue_at=new_conv.entered_queue_at,
-            queue_wait_seconds=wait_seconds,
-        )
-
-        # Update agent chat counter
-        increment_agent_chat_count(agent)
-
-    _transition_lifecycle_best_effort(
-        new_conv.hubspot_ticket_id,
-        ["HUMAN_ASSIGNED"],
-        reason="Matchmaker assigned the ticket to a human agent.",
-    )
-
-    logger.info(
-        "auto_assign_success",
-        ticket_id=new_conv.hubspot_ticket_id,
-        agent_name=agent.name,
-        hubspot_owner_id=agent.hubspot_owner_id,
-        queue_wait_seconds=float(wait_seconds) if wait_seconds is not None else None,
-    )
-    return True
 
 
 def handle_ticket_closed(

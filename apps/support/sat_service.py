@@ -103,209 +103,6 @@ def _legacy_sat_heartbeat() -> dict:
     """Compatibility alias that cannot bypass authoritative reconciliation."""
     return sat_heartbeat()
 
-    """Execute a single SAT heartbeat cycle.
-
-    Steps:
-      1. Early-exit if outside business hours (no API calls).
-      2. Fetch all users' availability status from HubSpot (1 API call).
-      3. For each active agent, compare remote status with local ``status_enum``.
-      4. On status change: update agent, log history, accumulate time.
-      5. If any agent transitioned to ONLINE, dispatch Matchmaker drain.
-
-    Returns:
-        Dict with ``agents_checked``, ``status_changes``, ``agents_came_online``,
-        ``skipped_off_hours`` keys.
-    """
-    if not is_business_hours():
-        return {
-            "agents_checked": 0,
-            "status_changes": 0,
-            "agents_came_online": 0,
-            "skipped_off_hours": True,
-        }
-
-    from apps.integrations.hubspot.client import get_hubspot_client
-    from apps.support.models import Agent, AgentStatusHistory
-
-    client = get_hubspot_client()
-
-    # Single API call for all availability
-    try:
-        availability_data = client.get_all_owners_availability()
-    except Exception as exc:
-        logger.warning("sat_heartbeat_availability_fetch_failed", error=str(exc))
-        return {
-            "agents_checked": 0,
-            "status_changes": 0,
-            "agents_came_online": 0,
-            "skipped_off_hours": False,
-            "error": str(exc),
-        }
-
-    availability_map: dict[str, str] = {
-        item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
-    }
-
-    # Get all active agents — only fetch fields needed for heartbeat logic
-    agents = list(
-        Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
-        .exclude(hubspot_owner_id__isnull=True)
-        .only(
-            "id",
-            "name",
-            "agent_email",
-            "status_enum",
-            "sat_last_heartbeat_at",
-            "last_status_change_at",
-            "online_time_seconds_today",
-            "away_time_seconds_today",
-            "updated_at",
-        )
-        .order_by("id")
-    )
-
-    now = timezone.now()
-    status_changes = 0
-    agents_came_online = 0
-
-    # Diagnostic: identify agents whose emails are NOT in the HubSpot Users API.
-    # These agents rely exclusively on contact.propertyChange webhooks for status
-    # updates. If their webhook email doesn't match agent_email in the DB, their
-    # status can get stuck.
-    unmatched_emails = [
-        (a.agent_email or "N/A") for a in agents if (a.agent_email or "").lower() not in availability_map
-    ]
-    if unmatched_emails:
-        logger.warning(
-            "sat_heartbeat_agents_not_in_users_api",
-            count=len(unmatched_emails),
-            emails=unmatched_emails,
-            users_api_emails=list(availability_map.keys()),
-            hint=(
-                "These agents are invisible to the SAT heartbeat. "
-                "Verify their hs_email in HubSpot matches agent_email in the DB, "
-                "and that they appear in GET /crm/v3/objects/users."
-            ),
-        )
-
-    # Separate agents into heartbeat-only (no status change) and status-changed
-    # so we can bulk_update the common case and individual-save only the exceptions.
-    heartbeat_only_agents: list[Agent] = []
-    status_history_rows: list[AgentStatusHistory] = []
-
-    for agent in agents:
-        email_lower = (agent.agent_email or "").lower()
-        if email_lower not in availability_map:
-            continue
-
-        new_status = availability_map[email_lower]
-        old_status = agent.status_enum
-
-        # Always update heartbeat timestamp
-        agent.sat_last_heartbeat_at = now
-        agent.updated_at = now
-
-        if old_status != new_status:
-            # Accumulate time in the old status before switching
-            sat_accumulate_time(agent, old_status, new_status, now)
-
-            agent.status_enum = new_status
-            agent.last_status_change_at = now
-
-            status_history_rows.append(
-                AgentStatusHistory(
-                    agent=agent,
-                    old_status=old_status,
-                    new_status=new_status,
-                    sync_source="sat_heartbeat",
-                )
-            )
-
-            # Status-changed agents need extra fields saved
-            agent.save(
-                update_fields=[
-                    "sat_last_heartbeat_at",
-                    "updated_at",
-                    "status_enum",
-                    "last_status_change_at",
-                    "online_time_seconds_today",
-                    "away_time_seconds_today",
-                ]
-            )
-
-            status_changes += 1
-            if new_status == "online":
-                agents_came_online += 1
-
-            logger.info(
-                "sat_agent_status_changed",
-                agent=agent.name,
-                old_status=old_status,
-                new_status=new_status,
-            )
-        else:
-            heartbeat_only_agents.append(agent)
-
-    # Bulk update heartbeat-only agents in a single query instead of N individual saves
-    if heartbeat_only_agents:
-        Agent.objects.bulk_update(
-            heartbeat_only_agents,
-            ["sat_last_heartbeat_at", "updated_at"],
-            batch_size=50,
-        )
-
-    # Bulk create status history rows
-    if status_history_rows:
-        AgentStatusHistory.objects.bulk_create(status_history_rows)
-
-    # If any agent came online, trigger Matchmaker to drain pending queue
-    # Use a Redis guard to avoid thundering herd when multiple agents come
-    # online in the same heartbeat cycle.
-    if agents_came_online > 0:
-        try:
-            from django.core.cache import cache
-
-            from apps.support.tasks import task_matchmaker_drain_queue
-
-            drain_guard = "sat_drain_guard"
-            if cache.add(drain_guard, "1", timeout=10):
-                task_matchmaker_drain_queue.delay()
-                logger.info("sat_triggered_matchmaker_drain", agents_came_online=agents_came_online)
-            else:
-                logger.debug("sat_drain_already_dispatched", agents_came_online=agents_came_online)
-        except Exception as exc:
-            logger.warning("sat_matchmaker_dispatch_failed", error=str(exc))
-
-    # Log a concise heartbeat summary — only query pending count when
-    # there were status changes (avoids a DB round-trip every 20 seconds).
-    online_count = sum(1 for a in agents if a.status_enum == "online")
-
-    if status_changes > 0:
-        from apps.support.models import NewConversation
-
-        pending_count = NewConversation.objects.exclude(queue_status=NewConversation.QueueStatus.FAILED).count()
-        logger.info(
-            "sat_heartbeat_done",
-            agents_checked=len(agents),
-            agents_online=online_count,
-            status_changes=status_changes,
-            agents_came_online=agents_came_online,
-            pending_queue=pending_count,
-        )
-    else:
-        logger.debug(
-            "sat_heartbeat_done",
-            agents_checked=len(agents),
-            agents_online=online_count,
-        )
-
-    return {
-        "agents_checked": len(agents),
-        "status_changes": status_changes,
-        "agents_came_online": agents_came_online,
-        "skipped_off_hours": False,
-    }
-
 
 def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     """Reconcile authoritative HubSpot availability into fail-closed state.
@@ -565,7 +362,11 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     }
 
 
-def sat_verify_agent_assignment_eligibility(agent) -> EligibilityDecision:
+def sat_verify_agent_assignment_eligibility(
+    agent,
+    *,
+    now=None,
+) -> EligibilityDecision:
     """Read one HubSpot user immediately before assignment and fail closed.
 
     This verification is intentionally read-only and deterministic: repeated
@@ -587,7 +388,20 @@ def sat_verify_agent_assignment_eligibility(agent) -> EligibilityDecision:
     if not user_id:
         return EligibilityDecision(False, EligibilityReason.MISSING_IDENTITY)
 
-    remote = get_hubspot_client().get_user_by_id(user_id)
+    from apps.integrations.hubspot.exceptions import HubSpotAPIError
+
+    captured_now = now or timezone.now()
+    try:
+        remote = get_hubspot_client().get_user_by_id(user_id)
+    except HubSpotAPIError as exc:
+        logger.warning(
+            "sat_assignment_veto_provider_failure",
+            agent_id=str(agent.pk),
+            error_code=exc.error_code,
+            external_status=exc.external_status,
+            retryable=exc.retryable,
+        )
+        return EligibilityDecision(False, EligibilityReason.MISSING_OBSERVATION)
     if not remote:
         return EligibilityDecision(False, EligibilityReason.MISSING_OBSERVATION)
 
@@ -600,10 +414,10 @@ def sat_verify_agent_assignment_eligibility(agent) -> EligibilityDecision:
         "timezone": remote.get("hs_standard_time_zone"),
     }
     try:
-        observation = normalize_availability_item(item, timezone.now())
+        observation = normalize_availability_item(item, captured_now)
     except AvailabilityParseError:
         return EligibilityDecision(False, EligibilityReason.MALFORMED_REMOTE_DATA)
-    return evaluate_observation_signals(observation, timezone.now())
+    return evaluate_observation_signals(observation, captured_now)
 
 
 def sat_reconcile_agent_load(agent) -> int:

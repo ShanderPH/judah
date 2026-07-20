@@ -50,6 +50,7 @@ def isolate_db(db):
         AgentMetrics,
         AgentStatusHistory,
         AssignedConversation,
+        AssignmentAttempt,
         AssignmentLog,
         ClosedConversation,
         ConversationReassignment,
@@ -60,6 +61,7 @@ def isolate_db(db):
     # agent_metrics has a DB-level FK on agents.hubspot_owner_id, so it must
     # be cleared before agents. agent_status_history has FK on agents too.
     ConversationReassignment.objects.all().delete()
+    AssignmentAttempt.objects.all().delete()
     AssignedConversation.objects.all().delete()
     ClosedConversation.objects.all().delete()
     NewConversation.objects.all().delete()

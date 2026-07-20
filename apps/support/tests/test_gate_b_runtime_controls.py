@@ -86,8 +86,8 @@ class TestQueueSafeControls:
         ABSENCE_SAFE_ELIGIBILITY_SHADOW=False,
         ABSENCE_SAFE_ELIGIBILITY_ENFORCED=False,
     )
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0)
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", return_value=0, create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_enabling_assignment_drains_preserved_backlog(
         self,
         mock_client_fn: MagicMock,

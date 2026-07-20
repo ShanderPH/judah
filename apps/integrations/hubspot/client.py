@@ -11,7 +11,11 @@ from hubspot.crm.tickets import SimplePublicObjectInput as TicketUpdateInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
 from hubspot.crm.tickets.exceptions import ApiException, NotFoundException
 
-from apps.integrations.hubspot.exceptions import HubSpotAPIError, HubSpotResourceNotFoundError
+from apps.integrations.hubspot.exceptions import (
+    HubSpotAPIError,
+    HubSpotFailureKind,
+    HubSpotResourceNotFoundError,
+)
 from common.circuit_breaker import CircuitBreaker
 from common.exceptions import ExternalServiceError
 
@@ -264,6 +268,17 @@ class HubSpotClient:
                 "HubSpot rejected the ticket owner update.",
                 external_status=external_status,
                 retryable=retryable,
+                error_code=(
+                    HubSpotFailureKind.RATE_LIMITED
+                    if external_status == 429
+                    else HubSpotFailureKind.SERVER_ERROR
+                    if external_status is not None and external_status >= 500
+                    else HubSpotFailureKind.UNAUTHORIZED
+                    if external_status == 401
+                    else HubSpotFailureKind.FORBIDDEN
+                    if external_status == 403
+                    else HubSpotFailureKind.UNKNOWN
+                ),
             ) from exc
         except Exception as exc:
             logger.error(
@@ -273,7 +288,11 @@ class HubSpotClient:
                 error_type=type(exc).__name__,
                 retryable=True,
             )
-            raise HubSpotAPIError("HubSpot ticket owner update failed.", retryable=True) from exc
+            raise HubSpotAPIError(
+                "HubSpot ticket owner update failed.",
+                retryable=True,
+                error_code=HubSpotFailureKind.UNKNOWN,
+            ) from exc
 
     def get_owner_details(self, owner_id: int) -> dict[str, Any]:
         """Fetch owner details by owner ID.
@@ -439,29 +458,93 @@ class HubSpotClient:
             Dict with ``id``, ``email``, ``hs_availability_status`` keys,
             or an empty dict if the user is not found.
         """
+        import random
+        import time
+
         import requests
 
-        try:
-            headers = {"Authorization": f"Bearer {self._access_token}"}
-            properties = ",".join(
-                (
-                    "hs_email",
-                    "hs_availability_status",
-                    "hs_out_of_office_hours",
-                    "hs_working_hours",
-                    "hs_standard_time_zone",
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        properties = ",".join(
+            (
+                "hs_email",
+                "hs_availability_status",
+                "hs_out_of_office_hours",
+                "hs_working_hours",
+                "hs_standard_time_zone",
+            )
+        )
+        for attempt in range(3):
+            try:
+                response = _circuit_breaker.call(
+                    requests.get,
+                    f"https://api.hubapi.com/crm/objects/2026-03/users/{user_id}",
+                    headers=headers,
+                    params={"properties": properties},
+                    timeout=10,
                 )
+            except requests.Timeout as exc:
+                if attempt < 2:
+                    time.sleep((0.1 * (2**attempt)) + random.uniform(0, 0.1))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot user lookup timed out.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.TIMEOUT,
+                ) from exc
+            except requests.RequestException as exc:
+                raise HubSpotAPIError(
+                    "HubSpot user lookup failed.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.UNKNOWN,
+                ) from exc
+
+            status = response.status_code
+            retry_after_raw = response.headers.get("Retry-After")
+            retry_after = (
+                float(retry_after_raw) if retry_after_raw and retry_after_raw.replace(".", "", 1).isdigit() else None
             )
-            response = _circuit_breaker.call(
-                requests.get,
-                f"https://api.hubapi.com/crm/objects/2026-03/users/{user_id}",
-                headers=headers,
-                params={"properties": properties},
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-            props = data.get("properties") or {}
+            if status == 404:
+                raise HubSpotResourceNotFoundError("user", user_id)
+            if status in (401, 403):
+                kind = HubSpotFailureKind.UNAUTHORIZED if status == 401 else HubSpotFailureKind.FORBIDDEN
+                raise HubSpotAPIError(
+                    "HubSpot rejected the user lookup.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=kind,
+                )
+            if status == 429 or status >= 500:
+                kind = HubSpotFailureKind.RATE_LIMITED if status == 429 else HubSpotFailureKind.SERVER_ERROR
+                if attempt < 2:
+                    delay = retry_after if retry_after is not None else 0.1 * (2**attempt)
+                    time.sleep(min(delay, 2.0) + random.uniform(0, 0.1))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot user lookup is temporarily unavailable.",
+                    external_status=status,
+                    retryable=True,
+                    error_code=kind,
+                    retry_after_seconds=retry_after,
+                )
+            if not 200 <= status < 300:
+                raise HubSpotAPIError(
+                    "HubSpot rejected the user lookup.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=HubSpotFailureKind.UNKNOWN,
+                )
+            try:
+                data = response.json()
+                props = data["properties"]
+                if not isinstance(props, dict) or not data.get("id"):
+                    raise ValueError("missing user properties")
+            except (TypeError, ValueError, KeyError) as exc:
+                raise HubSpotAPIError(
+                    "HubSpot returned a malformed user response.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=HubSpotFailureKind.MALFORMED_RESPONSE,
+                ) from exc
             return {
                 "id": data.get("id"),
                 "email": props.get("hs_email", ""),
@@ -470,9 +553,7 @@ class HubSpotClient:
                 "hs_working_hours": props.get("hs_working_hours"),
                 "hs_standard_time_zone": props.get("hs_standard_time_zone", ""),
             }
-        except Exception as exc:
-            logger.warning("hubspot_get_user_by_id_failed", user_id=user_id, error=str(exc))
-            return {}
+        raise AssertionError("bounded HubSpot retry loop exhausted unexpectedly")
 
     def get_all_owners_availability(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all HubSpot users with their current availability status.
