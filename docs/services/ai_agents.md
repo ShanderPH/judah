@@ -152,6 +152,14 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   - `BOLETO`, `MEIOS_DE_PAGAMENTO`, `FINANCEIRO`, `SUPORTE_TECNICO_N1`, `EVENTOS`, `CUSTOMER_SUCCESS` → Action.
   - `ESCALAR_IMEDIATAMENTE` → handoff humano.
 - Prioridade `CRITICA` → handoff humano mesmo sem rota de escalation.
+- Pedido explícito de atendimento humano é detectado por política
+  determinística antes dos modelos e sempre interrompe a resposta automática.
+- Agressividade severa, ameaça ou insultos claros também produzem handoff
+  imediato; frustração comum continua sendo atendida pela IA.
+- No handoff, o cliente recebe primeiro uma mensagem curta informando o
+  encaminhamento. Em seguida, o ticket é movido para
+  `HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`) e persistido na fila do Matchmaker;
+  retries são idempotentes e não duplicam a confirmação.
 - Dados faltantes ou resposta candidata → `WAITING_FOR_CUSTOMER`.
 - Resolução por IA só fecha após confirmação explícita do cliente.
 - Tools externas exigem estado permitido, chave de idempotência e

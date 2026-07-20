@@ -164,12 +164,12 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
         ).exists
     )()
     drain.assert_called_once()
-    assert effects == ["route", "reply"]
+    assert effects == ["reply", "route"]
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_handoff_does_not_promise_transfer_when_hubspot_route_fails() -> None:
+async def test_handoff_notifies_before_hubspot_route_and_leaves_retryable_failure() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -193,7 +193,7 @@ async def test_handoff_does_not_promise_transfer_when_hubspot_route_fails() -> N
         patch(
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
             new=AsyncMock(return_value={"updated": False, "reason": "provider rejected"}),
-        ),
+        ) as route_handoff,
         patch(
             "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
             new=send_reply,
@@ -208,7 +208,82 @@ async def test_handoff_does_not_promise_transfer_when_hubspot_route_fails() -> N
             result=result,
         )
 
-    send_reply.assert_not_awaited()
+    send_reply.assert_awaited_once()
+    assert send_reply.await_args.args[1] == HUMAN_HANDOFF_CONFIRMATION
+    route_handoff.assert_awaited_once()
+    assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.HUMAN_HANDOFF_REQUESTED
+    successful_retry = AsyncMock(return_value={"updated": True})
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=send_reply,
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=successful_retry,
+        ),
+        patch("apps.support.tasks.task_matchmaker_drain_queue.delay"),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Não entendi",
+            result=result,
+        )
+
+    send_reply.assert_awaited_once()
+    successful_retry.assert_awaited_once()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_handoff_does_not_route_before_customer_notification_succeeds() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir seu atendimento.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=["handoff_policy: explicit_human_request"],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir seu atendimento.",
+            confidence=1.0,
+        ),
+    )
+    route_handoff = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": False, "reason": "reply rejected"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=route_handoff,
+        ),
+        pytest.raises(RuntimeError, match="reply rejected"),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Quero falar com um humano",
+            result=result,
+        )
+
+    route_handoff.assert_not_awaited()
     assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
 
 

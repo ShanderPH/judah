@@ -148,6 +148,12 @@ ou três tentativas fracassadas mencionadas pelo usuário → rota =
 ESCALAR_IMEDIATAMENTE e prioridade = CRITICA. Nesses casos, `sentimento`
 deve ser "negativo".
 
+PEDIDO EXPLÍCITO DE ATENDIMENTO HUMANO → ESCALAR_IMEDIATAMENTE
+Se o cliente pedir para falar, conversar ou ser atendido por uma pessoa,
+humano, atendente ou equipe de suporte, respeite imediatamente o pedido:
+rota = ESCALAR_IMEDIATAMENTE. Não classifique isso como dúvida sobre os
+canais de atendimento e não tente responder com documentação.
+
 SENTIMENTO
 - positivo: elogios, agradecimentos, tom amigável.
 - neutro: perguntas objetivas sem carga emocional.

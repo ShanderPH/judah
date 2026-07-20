@@ -81,13 +81,91 @@ _GREETING_ONLY_MESSAGES = {
     "tudo bem",
 }
 
+_EXPLICIT_HUMAN_REQUEST_PATTERNS = (
+    re.compile(
+        r"\b(?:quero|preciso|gostaria|prefiro|posso|poderia|tem como|como faco para|como posso)\b.{0,45}"
+        r"\b(?:falar|conversar|ser atendid[oa])\b.{0,30}"
+        r"\b(?:humano|atendente|pessoa|alguem|equipe|suporte)\b"
+    ),
+    re.compile(
+        r"\b(?:me\s+)?(?:passe|passa|encaminhe|encaminha|transfira|transfere|chame|chama)\b.{0,35}"
+        r"\b(?:humano|atendente|pessoa|alguem|equipe|suporte)\b"
+    ),
+    re.compile(
+        r"\b(?:quero|preciso|gostaria|prefiro)\s+(?:de\s+)?(?:um\s+)?"
+        r"(?:humano|atendente|atendimento humano)\b"
+    ),
+    re.compile(r"\bnao quero (?:mais )?falar com (?:um )?(?:robo|bot|ia)\b"),
+    re.compile(r"^(?:falar|conversar) com (?:um )?(?:humano|atendente|alguem)(?: por favor)?[!?]*$"),
+    re.compile(r"^(?:um )?(?:humano|atendente)(?: por favor)?[!?]*$"),
+)
+_SEVERE_AGGRESSION_TERMS = {
+    "bosta",
+    "burro",
+    "caralho",
+    "desgraca",
+    "fdp",
+    "filho da puta",
+    "idiota",
+    "incompetente",
+    "lixo",
+    "merda",
+    "palhaco",
+    "palhacos",
+    "porra",
+}
+_SEVERE_THREAT_PATTERNS = (
+    re.compile(r"\b(?:vou|iremos)\s+(?:processar|denunciar|expor)\b"),
+    re.compile(r"\b(?:vou|quero)\s+cancelar\s+(?:o\s+)?(?:contrato|plano|assinatura|servico)\b"),
+    re.compile(r"\b(?:procon|reclame aqui|imprensa|meu advogado|minha advogada)\b"),
+)
+
+
+def _current_customer_message(message: str) -> str:
+    """Extract only the current customer turn from a provider envelope."""
+    if _CURRENT_CUSTOMER_MESSAGE_MARKER in message:
+        return message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1].strip()
+    return message.strip()
+
+
+def _normalize_policy_text(message: str) -> str:
+    """Normalize the current turn for deterministic routing rules."""
+    customer_message = _current_customer_message(message)
+    normalized = unicodedata.normalize("NFKD", customer_message).encode("ascii", "ignore").decode("ascii").lower()
+    normalized = re.sub(r"[^a-z0-9!?\s]", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _deterministic_handoff_trigger(message: str) -> Literal["explicit_human_request", "severe_aggression"] | None:
+    """Detect handoff cases that must not depend on an LLM classification."""
+    normalized = _normalize_policy_text(message)
+    if any(pattern.search(normalized) for pattern in _EXPLICIT_HUMAN_REQUEST_PATTERNS):
+        return "explicit_human_request"
+
+    if any(pattern.search(normalized) for pattern in _SEVERE_THREAT_PATTERNS):
+        return "severe_aggression"
+
+    aggression_hits = sum(1 for term in _SEVERE_AGGRESSION_TERMS if re.search(rf"\b{re.escape(term)}\b", normalized))
+    if aggression_hits >= 2:
+        return "severe_aggression"
+    if aggression_hits >= 1 and normalized.count("!") >= 3:
+        return "severe_aggression"
+
+    letters = [character for character in _current_customer_message(message) if character.isalpha()]
+    uppercase_ratio = sum(character.isupper() for character in letters) / len(letters) if letters else 0.0
+    if aggression_hits >= 1 and len(letters) >= 20 and uppercase_ratio >= 0.75:
+        return "severe_aggression"
+    return None
+
 
 def _is_greeting_only(message: str) -> bool:
     """Return whether the customer greeted without describing a request."""
-    customer_message = message
-    if _CURRENT_CUSTOMER_MESSAGE_MARKER in message:
-        customer_message = message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1]
-    normalized = unicodedata.normalize("NFKD", customer_message).encode("ascii", "ignore").decode("ascii").lower()
+    normalized = (
+        unicodedata.normalize("NFKD", _current_customer_message(message))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
     normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
     normalized = " ".join(normalized.split())
     return normalized in _GREETING_ONLY_MESSAGES
@@ -512,6 +590,30 @@ class SalomaoSupervisorAgent:
         member/tool. Heimdall and the Salomao v1 adapter are therefore called
         explicitly when the adapter is enabled.
         """
+        handoff_trigger = _deterministic_handoff_trigger(message)
+        if handoff_trigger is not None:
+            trace = [f"handoff_policy: {handoff_trigger}"]
+            severe_aggression = handoff_trigger == "severe_aggression"
+            triage = TriageDecision(
+                rota="ESCALAR_IMEDIATAMENTE",
+                prioridade="CRITICA" if severe_aggression else "MEDIA",
+                tags=[handoff_trigger],
+                dados_faltantes=[],
+                sentimento="negativo" if severe_aggression else "neutro",
+                confidence=1.0,
+                evidence=[_current_customer_message(message)[:160]],
+                policy_version="deterministic-handoff-v1",
+            )
+            return self._mandatory_handoff_response(
+                triage=triage,
+                agent_trace=trace,
+                reason=(
+                    "Severe customer aggression requires immediate human handoff."
+                    if severe_aggression
+                    else "Customer explicitly requested human assistance."
+                ),
+            )
+
         trace = []
         try:
             triage_response = self._triage.run(message)
@@ -567,20 +669,27 @@ class SalomaoSupervisorAgent:
         *,
         triage: TriageDecision | None,
         agent_trace: list[str],
+        reason: str = "Heimdall classified the ticket as requiring immediate human handoff.",
     ) -> SalomaoResponse:
         """Build the fixed response for triage decisions that require escalation."""
-        reason = "Heimdall classified the ticket as requiring immediate human handoff."
-
-        frustrated = bool(triage and triage.sentimento == "negativo")
-        message = (
-            "Entendo como essa situação é frustrante e sinto muito pelo transtorno. "
-            "Para que você receba a atenção necessária, vou encaminhar seu atendimento "
-            "para uma pessoa do nosso time, que continuará por aqui com o contexto que você já enviou."
-            if frustrated
-            else "Sinto muito pelo transtorno. Como este caso precisa de uma atenção mais cuidadosa, "
-            "vou encaminhar seu atendimento para uma pessoa do nosso time, que continuará por aqui "
-            "com o contexto que você já enviou."
-        )
+        tags = set(triage.tags) if triage else set()
+        if "explicit_human_request" in tags:
+            message = (
+                "Entendi. Vou encaminhar seu atendimento para uma pessoa do nosso time agora. "
+                "Ela continuará a conversa por aqui com o contexto que você já enviou."
+            )
+        elif triage and triage.sentimento == "negativo":
+            message = (
+                "Entendo como essa situação é frustrante e sinto muito pelo transtorno. "
+                "Para que você receba a atenção necessária, vou encaminhar seu atendimento "
+                "para uma pessoa do nosso time, que continuará por aqui com o contexto que você já enviou."
+            )
+        else:
+            message = (
+                "Sinto muito pelo transtorno. Como este caso precisa de uma atenção mais cuidadosa, "
+                "vou encaminhar seu atendimento para uma pessoa do nosso time, que continuará por aqui "
+                "com o contexto que você já enviou."
+            )
 
         return SalomaoResponse(
             session_id=self.session_id,
@@ -592,7 +701,11 @@ class SalomaoSupervisorAgent:
             tokens_used=0,
             prompt_tokens=0,
             completion_tokens=0,
-            model_name="heimdall_triage",
+            model_name=(
+                "handoff_policy"
+                if triage and triage.policy_version == "deterministic-handoff-v1"
+                else "heimdall_triage"
+            ),
             latency_ms=0,
             triage_decision=triage,
             decision=SupervisorDecision(
