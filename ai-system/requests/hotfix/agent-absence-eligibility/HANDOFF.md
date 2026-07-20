@@ -7,6 +7,9 @@
 - HubSpot Users API com falhas tipadas, retry limitado e fail-closed.
 - Caminhos legados inalcançáveis removidos; Matchmaker é o entrypoint canônico.
 - Readiness, retenção, comando de reparo e suíte PostgreSQL completa adicionados.
+- Gate E aprovado no SHA de implementação
+  `3bbc0649ed7249a163de7a11ad498cc25ec552fe`: 427 testes locais e hospedados,
+  checks GitHub verdes e concorrência/crash repetidos três vezes.
 
 ## Arquivos modificados
 
@@ -52,7 +55,8 @@ git diff --check
   bloqueados por OPS-09 e exigem aprovação separada.
 - Tentativas `repair_required` impedem sucesso presumido e exigem convergência
   pelo worker/comando antes de intervenção operacional.
-- O Gate E hospedado só pode fechar após commit/push e checks verdes do novo SHA.
+- A PR permanece bloqueada somente por revisão obrigatória; o Gate F e qualquer
+  rollout continuam fora do escopo até aprovação explícita do Felipe.
 
 ## Pontos de integração críticos
 

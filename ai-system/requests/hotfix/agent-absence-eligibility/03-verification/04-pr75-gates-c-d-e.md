@@ -2,9 +2,9 @@
 
 ## Resultado
 
-Os Gates C e D foram implementados e o Gate E local está aprovado. O fechamento
-do Gate E hospedado depende de publicar este diff na PR 75 e observar os checks
-do novo SHA.
+Os Gates C e D foram implementados e o Gate E está aprovado localmente e no
+GitHub para o SHA de implementação
+`3bbc0649ed7249a163de7a11ad498cc25ec552fe`.
 
 ## Gate C — protocolo durável
 
@@ -36,12 +36,19 @@ do novo SHA.
   postura de flags, migration, frescor SAT, identidade do writer e tentativas
   travadas.
 
-## Gate E — evidência
+## Gate E — evidência local
 
-Ambiente: Python 3.14.4, PostgreSQL local descartável `judah-db-1`.
+Ambiente revalidado em 2026-07-20: Python 3.14.4, PostgreSQL 16 local
+descartável `judah-db-1`, banco `judah_test`, Redis 7 `judah-redis-1`.
 
 ```text
-pytest: 427 passed in 45.48s
+common.database_safety:
+  Safe test database: backend=postgresql host=localhost name=judah_test
+migrate --run-syncdb:
+  support.0015 ... OK
+  support.0016 ... OK
+  support.0017 ... OK
+pytest: 427 passed in 33.01s
 ruff check .: All checks passed
 ruff format --check .: 253 files already formatted
 mypy .: Success: no issues found in 250 source files
@@ -50,15 +57,55 @@ makemigrations --check --dry-run: No changes detected
 git diff --check: clean
 ```
 
-Testes específicos do protocolo no PostgreSQL:
+Testes específicos de concorrência e crash-boundary no PostgreSQL foram
+repetidos três vezes:
 
 ```text
-16 passed
+run 1: 4 passed
+run 2: 4 passed
+run 3: 4 passed
 ```
 
-Incluem dois workers/um ticket, dois workers/último slot, corrida de revisão,
-redelivery idempotente, compensate repetido, 404, crash após sucesso externo e
-antes do finalize, além da matriz de resultados da Users API.
+Incluem dois workers/um ticket, dois workers/último slot, redelivery idempotente
+e crash após sucesso externo antes do finalize. A suíte completa também cobre
+corrida de revisão, compensate repetido, 404 e a matriz de resultados da Users
+API.
+
+## Gate E — evidência hospedada
+
+PR: `https://github.com/ShanderPH/judah/pull/75`
+
+SHA de implementação verificado:
+`3bbc0649ed7249a163de7a11ad498cc25ec552fe`.
+
+GitHub Actions run: `29762444783`.
+
+O job `Tests (Python 3.14)` confirmou:
+
+```text
+Safe test database:
+  backend=postgresql host=localhost name=judah_ci_29762444783_1
+PostgreSQL service: postgres:16-alpine
+support.0015 ... OK
+support.0016 ... OK
+support.0017 ... OK
+427 passed in 19.64s
+Total coverage: 64.76% (required: 50%)
+```
+
+Checks requeridos observados no head:
+
+```text
+Lint & Type Check: SUCCESS
+Tests (Python 3.14): SUCCESS
+Security Scan: SUCCESS
+Django System Checks: SUCCESS
+Vercel: SUCCESS
+Vercel Preview Comments: SUCCESS
+```
+
+O `mergeStateStatus=BLOCKED` decorre de `reviewDecision=REVIEW_REQUIRED`, não de
+falha de CI.
 
 ## Correção do CI basal
 
@@ -70,5 +117,4 @@ restritos. O teste genérico de segurança também deixa de herdar `GITHUB_ACTIO
 ## Não executado
 
 - Nenhuma migration, role/grant, credencial, flag ou deploy compartilhado.
-- Nenhum commit ou push dos Gates C–E; requer autorização explícita.
-- Checks hospedados do novo SHA ainda não existem.
+- Gate F não foi iniciado; rollout exige aprovação explícita do Felipe.

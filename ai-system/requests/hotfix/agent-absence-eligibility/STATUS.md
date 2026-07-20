@@ -2,12 +2,12 @@ request: hotfix/agent-absence-eligibility
 cycle: F
 state: VERIFY
 opened_at: 2026-07-17T15:24:48-03:00
-last_update: 2026-07-20T13:40:00-03:00
+last_update: 2026-07-20T14:32:34-03:00
 agent_run_id: codex-root
 current_blockers:
   - "OPS-09 shared-environment roles, grants, credential rotation, migrations, and feature flags require Felipe's explicit approval."
-  - "Gate E hosted verification requires explicit authorization to commit/push Gates C-E and observe the new PR SHA."
-next_action: "Felipe: review 03-verification/04-pr75-gates-c-d-e.md and authorize commit/push for hosted Gate E."
+  - "Gate F rollout requires Felipe's explicit deployment approval after PR review."
+next_action: "Felipe: review PR 75 and 03-verification/04-pr75-gates-c-d-e.md; approve Gate F separately if rollout should begin."
 artifacts_generated:
   - 00-context/production-diagnosis.md
   - 00-context/ops-prerequisite-revalidation.md
@@ -25,4 +25,4 @@ artifacts_generated:
   - 03-verification/04-pr75-gates-c-d-e.md
   - 05-deployment/rollout.md
   - HANDOFF.md
-verification_runs: 70
+verification_runs: 79
