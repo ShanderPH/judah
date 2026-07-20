@@ -216,6 +216,54 @@ class TestAuthoritativeReconciliation:
         assert agent.eligibility_state == "ineligible"
         assert agent.eligibility_reason == "unknown_remote_status"
 
+    @override_settings(
+        ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+        AVAILABILITY_REQUIRED_SAMPLES=1,
+        AVAILABILITY_STABLE_SECONDS=0,
+    )
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_local_schedule_is_authoritative_when_remote_schedule_is_missing(
+        self,
+        mock_client_fn: MagicMock,
+        _mock_business_hours: MagicMock,
+    ) -> None:
+        agent = _agent()
+        remote_user = _hubspot_user()
+        remote_user["working_hours"] = None
+        remote_user["timezone"] = ""
+        mock_client_fn.return_value.get_all_owners_availability.return_value = [remote_user]
+
+        from apps.support.sat_service import sat_heartbeat
+
+        sat_heartbeat(task_id="local-schedule")
+        agent.refresh_from_db()
+
+        assert agent.status_enum == "online"
+        assert agent.eligibility_state == "eligible"
+        assert agent.eligibility_reason == "eligible"
+        assert agent.hubspot_user_id == "207838823235"
+        assert agent.remote_working_hours == []
+        assert agent.remote_timezone == ""
+
+    @patch("apps.support.sat_service.is_business_hours", return_value=False)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_heartbeat_skips_outside_local_schedule(
+        self,
+        mock_client_fn: MagicMock,
+        _mock_business_hours: MagicMock,
+    ) -> None:
+        agent = _agent(status="online")
+
+        from apps.support.sat_service import sat_heartbeat
+
+        result = sat_heartbeat(task_id="outside-local-schedule")
+        agent.refresh_from_db()
+
+        assert result["skipped_off_hours"] is True
+        assert agent.status_enum == "online"
+        mock_client_fn.assert_not_called()
+
 
 @pytest.mark.django_db
 class TestAssignmentFinalGuard:
@@ -310,10 +358,12 @@ class TestAssignmentFinalGuard:
 
 @pytest.mark.django_db
 class TestAssignmentTimeHubSpotVerification:
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
     @patch("apps.integrations.hubspot.client.get_hubspot_client")
-    def test_available_response_is_idempotently_eligible(
+    def test_available_response_without_remote_schedule_is_idempotently_eligible(
         self,
         mock_client_fn: MagicMock,
+        _mock_business_hours: MagicMock,
     ) -> None:
         agent = _agent(status="online")
         agent.hubspot_user_id = "207838823235"
@@ -324,8 +374,8 @@ class TestAssignmentTimeHubSpotVerification:
             "email": "nathan@example.com",
             "hs_availability_status": "available",
             "hs_out_of_office_hours": "[]",
-            "hs_working_hours": ('[{"days":"EVERY_DAY","startMinute":0,"endMinute":1440}]'),
-            "hs_standard_time_zone": "UTC",
+            "hs_working_hours": None,
+            "hs_standard_time_zone": "",
         }
 
         from apps.support.sat_service import (
@@ -340,6 +390,34 @@ class TestAssignmentTimeHubSpotVerification:
         assert first.eligible is True
         assert agent.availability_revision == initial_revision
         assert mock_client_fn.return_value.get_user_by_id.call_count == 2
+
+    @patch("apps.support.sat_service.is_business_hours", return_value=False)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_local_schedule_vetoes_remote_available_status(
+        self,
+        mock_client_fn: MagicMock,
+        _mock_business_hours: MagicMock,
+    ) -> None:
+        agent = _agent(status="online")
+        agent.hubspot_user_id = "207838823235"
+        agent.save(update_fields=["hubspot_user_id", "updated_at"])
+        mock_client_fn.return_value.get_user_by_id.return_value = {
+            "id": "207838823235",
+            "email": "nathan@example.com",
+            "hs_availability_status": "available",
+            "hs_out_of_office_hours": "[]",
+            "hs_working_hours": None,
+            "hs_standard_time_zone": "",
+        }
+
+        from apps.support.sat_service import (
+            sat_verify_agent_assignment_eligibility,
+        )
+
+        decision = sat_verify_agent_assignment_eligibility(agent)
+
+        assert decision.eligible is False
+        assert decision.reason.value == "outside_working_hours"
 
     @patch("apps.integrations.hubspot.client.get_hubspot_client")
     def test_away_response_fails_closed(

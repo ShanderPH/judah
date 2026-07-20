@@ -75,14 +75,16 @@ class AvailabilityObservation(BaseModel):
     availability_status: str
     out_of_office_hours: list[OutOfOfficeInterval]
     working_hours: list[WorkingHoursWindow]
-    timezone_name: str
+    timezone_name: str | None
     observed_at: datetime
     raw_state_hash: str
 
     @field_validator("timezone_name")
     @classmethod
-    def validate_timezone(cls, value: str) -> str:
-        """Require a valid IANA timezone."""
+    def validate_timezone(cls, value: str | None) -> str | None:
+        """Validate an optional remote IANA timezone."""
+        if not value:
+            return None
         try:
             ZoneInfo(value)
         except ZoneInfoNotFoundError as exc:
@@ -101,7 +103,12 @@ def _decode_json_array(raw: Any, *, required: bool, field_name: str) -> list[dic
     return value
 
 
-def normalize_availability_item(item: dict[str, Any], observed_at: datetime) -> AvailabilityObservation:
+def normalize_availability_item(
+    item: dict[str, Any],
+    observed_at: datetime,
+    *,
+    require_remote_schedule: bool = True,
+) -> AvailabilityObservation:
     """Convert one HubSpot client result into a validated observation."""
     raw_state = {
         "user_id": item.get("user_id"),
@@ -126,17 +133,20 @@ def normalize_availability_item(item: dict[str, Any], observed_at: datetime) -> 
             WorkingHoursWindow.model_validate(value)
             for value in _decode_json_array(
                 item.get("working_hours"),
-                required=True,
+                required=require_remote_schedule,
                 field_name="working_hours",
             )
         ]
+        timezone_name = str(item.get("timezone") or "").strip() or None
+        if require_remote_schedule and timezone_name is None:
+            raise AvailabilityParseError("missing_timezone")
         return AvailabilityObservation(
             hubspot_user_id=str(item.get("user_id") or ""),
             email=str(item.get("email") or "").strip().lower(),
             availability_status=str(item.get("availability_status") or "").strip().lower(),
             out_of_office_hours=out_of_office,
             working_hours=working_hours,
-            timezone_name=str(item.get("timezone") or "").strip(),
+            timezone_name=timezone_name,
             observed_at=observed_at,
             raw_state_hash=raw_hash,
         )

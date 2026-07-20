@@ -233,9 +233,17 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                         }
                     remote_status = str(item.get("availability_status") or "").strip().lower()
                     try:
-                        observation = normalize_availability_item(item, now)
+                        observation = normalize_availability_item(
+                            item,
+                            now,
+                            require_remote_schedule=False,
+                        )
                         raw_hash = observation.raw_state_hash
-                        decision = evaluate_observation_signals(observation, now)
+                        decision = evaluate_observation_signals(
+                            observation,
+                            now,
+                            within_working_hours=is_business_hours(now),
+                        )
                     except AvailabilityParseError:
                         decision = EligibilityDecision(False, EligibilityReason.MALFORMED_REMOTE_DATA)
 
@@ -285,7 +293,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     agent.remote_working_hours = [
                         value.model_dump(mode="json", by_alias=True) for value in observation.working_hours
                     ]
-                    agent.remote_timezone = observation.timezone_name
+                    agent.remote_timezone = observation.timezone_name or ""
 
                 if old_status != new_status:
                     sat_accumulate_time(agent, old_status, new_status, now)
@@ -414,10 +422,18 @@ def sat_verify_agent_assignment_eligibility(
         "timezone": remote.get("hs_standard_time_zone"),
     }
     try:
-        observation = normalize_availability_item(item, captured_now)
+        observation = normalize_availability_item(
+            item,
+            captured_now,
+            require_remote_schedule=False,
+        )
     except AvailabilityParseError:
         return EligibilityDecision(False, EligibilityReason.MALFORMED_REMOTE_DATA)
-    return evaluate_observation_signals(observation, captured_now)
+    return evaluate_observation_signals(
+        observation,
+        captured_now,
+        within_working_hours=is_business_hours(captured_now),
+    )
 
 
 def sat_reconcile_agent_load(agent) -> int:

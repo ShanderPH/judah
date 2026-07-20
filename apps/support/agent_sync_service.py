@@ -6,6 +6,7 @@ with support for business hours scheduling.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -31,7 +32,7 @@ _DEFAULT_BUSINESS_HOURS = {
 }
 
 
-def _get_business_hours_for_today() -> tuple[int, int] | None:
+def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int] | None:
     """Get today's business hours, considering special schedules and DB config.
 
     Priority:
@@ -42,8 +43,8 @@ def _get_business_hours_for_today() -> tuple[int, int] | None:
     Returns:
         (start_hour, end_hour) tuple, or None if closed today.
     """
-    now = timezone.localtime()
-    today = now.date()
+    local_now = timezone.localtime(now)
+    today = local_now.date()
 
     # 1. Check for special schedule override
     try:
@@ -71,15 +72,21 @@ def _get_business_hours_for_today() -> tuple[int, int] | None:
 
         config = BusinessHoursConfig.objects.filter(is_active=True).first()
         if config:
-            return config.get_hours_for_weekday(now.weekday())
+            from apps.ai_agents.utils.business_rules import is_holiday
+
+            weekday = 6 if is_holiday(local_now) else local_now.weekday()
+            return config.get_hours_for_weekday(weekday)
     except Exception:
         pass  # Table may not exist yet during migrations
 
     # 3. Fallback to hardcoded defaults
-    return _DEFAULT_BUSINESS_HOURS.get(now.weekday())
+    from apps.ai_agents.utils.business_rules import is_holiday
+
+    weekday = 6 if is_holiday(local_now) else local_now.weekday()
+    return _DEFAULT_BUSINESS_HOURS.get(weekday)
 
 
-def is_business_hours() -> bool:
+def is_business_hours(now: datetime | None = None) -> bool:
     """Check if current time is within business hours.
 
     Considers special schedules, database-configured hours, and default hours.
@@ -87,14 +94,14 @@ def is_business_hours() -> bool:
     Returns:
         True if within business hours, False otherwise.
     """
-    now = timezone.localtime()
-    hours = _get_business_hours_for_today()
+    local_now = timezone.localtime(now)
+    hours = _get_business_hours_for_today(local_now)
 
     if hours is None:
         return False
 
     start_hour, end_hour = hours
-    return start_hour <= now.hour < end_hour
+    return start_hour <= local_now.hour < end_hour
 
 
 def get_poll_interval_seconds() -> int:
