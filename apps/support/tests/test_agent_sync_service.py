@@ -104,8 +104,8 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             is_active=True,
         )
 
-    def test_sync_updates_status_when_changed(self) -> None:
-        """Test that agent status is updated when it changes."""
+    def test_sync_does_not_mutate_authoritative_status(self) -> None:
+        """Load reconciliation cannot become a second availability writer."""
         agent = self._make_agent("Test Agent", "test@example.com", 123, status="away")
 
         mock_users = [
@@ -126,9 +126,10 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             result = sync_all_agents_status_and_counts_optimized()
 
         agent.refresh_from_db()
-        assert agent.status_enum == "online"
-        assert result["status_changes"] == 1
+        assert agent.status_enum == "away"
+        assert result["status_changes"] == 0
         assert result["agents_synced"] == 1
+        mock_client.get_all_owners_availability.assert_not_called()
 
     def test_sync_skips_status_when_unchanged(self) -> None:
         """Test that sync is skipped when status hasn't changed."""
@@ -257,16 +258,16 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
         agent1.refresh_from_db()
         agent2.refresh_from_db()
 
-        assert agent1.status_enum == "online"  # Changed
+        assert agent1.status_enum == "away"  # Availability belongs to SAT reconciliation
         assert agent2.status_enum == "online"  # Unchanged
         assert agent1.current_simultaneous_chats == 2  # Corrected
         assert agent2.current_simultaneous_chats == 2  # Unchanged
         assert result["agents_synced"] == 2
-        assert result["status_changes"] == 1
+        assert result["status_changes"] == 0
         assert result["count_corrections"] == 1
 
-    def test_sync_creates_status_history(self) -> None:
-        """Test that status changes are logged in AgentStatusHistory."""
+    def test_sync_does_not_create_status_history(self) -> None:
+        """Only the authoritative SAT reconciliation writes status history."""
         agent = self._make_agent("Test Agent", "test@example.com", 123, status="away")
 
         mock_users = [
@@ -287,10 +288,8 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             sync_all_agents_status_and_counts_optimized()
 
         history = AgentStatusHistory.objects.filter(agent=agent).first()
-        assert history is not None
-        assert history.old_status == "away"
-        assert history.new_status == "online"
-        assert history.sync_source == "hubspot_poll_optimized"
+        assert history is None
+        mock_client.get_all_owners_availability.assert_not_called()
 
     def test_sync_handles_email_not_in_availability_map(self) -> None:
         """Test that agents with email not in HubSpot availability map are still synced for counts."""

@@ -241,6 +241,7 @@ class QueueHealthResponse(Schema):
     eligible_agents: list[AgentDiagnosticSchema]
     pending_tickets: list[PendingTicketSchema]
     last_assignments: list[LastAssignmentSchema]
+    readiness: dict[str, Any]
 
 
 class SyncNovoResponse(Schema):
@@ -352,7 +353,6 @@ class UpdateAgentRequest(Schema):
     max_simultaneous_chats: int | None = Field(default=None, ge=0, le=50)
     auto_assign_enabled: bool | None = None
     is_active: bool | None = None
-    status_enum: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ class ManualAssignRequest(Schema):
 class ForceReassignRequest(Schema):
     hubspot_ticket_id: str
     target_agent_id: UUID
-    reason: str | None = None
+    reason: str = Field(min_length=1, max_length=255)
 
 
 class AssignmentActionResponse(Schema):

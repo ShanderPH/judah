@@ -1,4 +1,4 @@
-"""Tests for migration-aware Railway pre-deploy behavior."""
+"""Tests for queue-safe Railway pre-deploy behavior."""
 
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +19,7 @@ def _queue_ticket(ticket_id: str, status: str) -> NewConversation:
 
 
 @pytest.mark.django_db
-def test_pending_migration_suppresses_active_assignment_backlog() -> None:
+def test_pending_migration_preserves_active_assignment_backlog() -> None:
     pending = _queue_ticket("pending", NewConversation.QueueStatus.PENDING)
     queued = _queue_ticket("queued", NewConversation.QueueStatus.QUEUED)
     quarantined = _queue_ticket("failed", NewConversation.QueueStatus.FAILED)
@@ -42,10 +42,10 @@ def test_pending_migration_suppresses_active_assignment_backlog() -> None:
     pending.refresh_from_db()
     queued.refresh_from_db()
     quarantined.refresh_from_db()
-    assert pending.queue_status == NewConversation.QueueStatus.FAILED
-    assert queued.queue_status == NewConversation.QueueStatus.FAILED
-    assert pending.failure_code == "predeploy_queue_cleared"
-    assert queued.failure_code == "predeploy_queue_cleared"
+    assert pending.queue_status == NewConversation.QueueStatus.PENDING
+    assert queued.queue_status == NewConversation.QueueStatus.QUEUED
+    assert pending.failure_code == ""
+    assert queued.failure_code == ""
     assert quarantined.failure_code == "hubspot_ticket_not_found"
 
 

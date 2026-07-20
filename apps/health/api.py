@@ -90,10 +90,27 @@ def readiness_check(request) -> JsonResponse:
         checks["jwt_mint"] = f"error: {type(exc).__name__}: {exc}"
 
     all_ok = all(v == "ok" or v.startswith("skipped") for v in checks.values())
+    from django.conf import settings
+
+    from apps.support.availability_runtime import (
+        availability_writer_id,
+        is_authoritative_availability_runtime,
+        runtime_environment,
+    )
+
     body = {
         "status": "healthy" if all_ok else "degraded",
         "timestamp": datetime.now(tz=UTC).isoformat(),
         "version": "1.0.0",
         "checks": checks,
+        "assignment_runtime": {
+            "environment": runtime_environment(),
+            "authority_environment": settings.AVAILABILITY_AUTHORITY_ENVIRONMENT,
+            "authoritative_writer": is_authoritative_availability_runtime(),
+            "writer_id": availability_writer_id(),
+            "auto_assignment_enabled": bool(settings.AUTO_ASSIGNMENT_ENABLED),
+            "absence_safe_eligibility_shadow": bool(settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW),
+            "absence_safe_eligibility_enforced": bool(settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED),
+        },
     }
     return JsonResponse(body, status=200 if all_ok else 503)

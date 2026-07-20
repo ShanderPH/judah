@@ -1,4 +1,4 @@
-"""Run production migrations and safely suppress a stale assignment backlog."""
+"""Run production migrations without mutating the assignment backlog."""
 
 from __future__ import annotations
 
@@ -6,15 +6,12 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.utils import timezone
-
-from apps.support.models import NewConversation
 
 
 class Command(BaseCommand):
     """Prepare the database before Railway promotes a new API deployment."""
 
-    help = "Apply migrations and suppress the active queue when schema changes were pending."
+    help = "Apply migrations while preserving the authoritative assignment queue."
 
     def handle(self, *args: object, **options: object) -> None:
         executor = MigrationExecutor(connection)
@@ -27,21 +24,5 @@ class Command(BaseCommand):
             verbosity=int(options["verbosity"]),
         )
 
-        if not had_pending_migrations:
-            self.stdout.write("No pending migrations; assignment queue preserved.")
-            return
-
-        now = timezone.now()
-        cleared = NewConversation.objects.filter(
-            queue_status__in=(
-                NewConversation.QueueStatus.PENDING,
-                NewConversation.QueueStatus.QUEUED,
-            )
-        ).update(
-            queue_status=NewConversation.QueueStatus.FAILED,
-            next_assignment_attempt_at=None,
-            failure_code="predeploy_queue_cleared",
-            failure_message="Suppressed during a deployment with pending migrations.",
-            updated_at=now,
-        )
-        self.stdout.write(self.style.SUCCESS(f"Suppressed {cleared} pre-existing assignment queue item(s)."))
+        migration_state = "pending migrations applied" if had_pending_migrations else "no pending migrations"
+        self.stdout.write(self.style.SUCCESS(f"{migration_state}; assignment queue preserved."))

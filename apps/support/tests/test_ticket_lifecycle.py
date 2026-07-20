@@ -3,7 +3,7 @@
 Covers the critical path for current_simultaneous_chats accuracy:
   - handle_ticket_closed: atomic decrement, correct target, idempotency
   - task_handle_owner_change: idempotency guard on retries
-  - matchmaker _do_assign: retry-agent reconciliation
+  - durable Matchmaker: ordered candidate fallback
 """
 
 from __future__ import annotations
@@ -282,8 +282,8 @@ class TestHandleOwnerChange:
 
 @pytest.mark.django_db
 class TestMatchmakerRetryReconciliation:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.durable_assignment_service._verify_candidates")
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_retry_agent_reconciled_when_first_at_capacity(self, mock_client_fn, mock_reconcile):
         """When the first-selected agent is at capacity after reconcile, the retry
         agent must ALSO be reconciled before assignment.
@@ -301,10 +301,11 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T020",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # FirstAgent is actually at capacity per HubSpot (5); SecondAgent is not (1).
-        mock_reconcile.side_effect = lambda agent: 5 if agent.hubspot_owner_id == 100 else 1
+        mock_reconcile.return_value = [(second_agent, "eligible")]
         mock_client = MagicMock()
         mock_client_fn.return_value = mock_client
 
@@ -316,13 +317,13 @@ class TestMatchmakerRetryReconciliation:
 
         # sat_reconcile_agent_load must have been called at least twice —
         # once for first_agent (rejected) and once for second_agent (accepted).
-        assert mock_reconcile.call_count >= 2
+        mock_reconcile.assert_called_once_with()
 
         assigned = AssignedConversation.objects.get(hubspot_ticket_id="T020")
         assert assigned.agent == second_agent
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.durable_assignment_service._verify_candidates")
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_queued_when_retry_agent_also_at_capacity(self, mock_client_fn, mock_reconcile):
         """If both the first and retry agents are at capacity after reconcile,
         the ticket should stay queued rather than being over-assigned."""
@@ -333,10 +334,11 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T021",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # Both agents at or above capacity after reconciliation
-        mock_reconcile.return_value = 5
+        mock_reconcile.return_value = []
         mock_client = MagicMock()
         mock_client_fn.return_value = mock_client
 

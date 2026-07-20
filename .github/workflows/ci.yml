@@ -17,7 +17,7 @@ env:
   DJANGO_SECRET_KEY: ci-secret-key-not-for-production
   DJANGO_DEBUG: "False"
   DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/judah_test
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/judah_ci_${{ github.run_id }}_${{ github.run_attempt }}
   REDIS_URL: redis://localhost:6379/0
   SENTRY_DSN: ""
   OPENAI_API_KEY: sk-test-placeholder
@@ -74,7 +74,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: judah_test
+          POSTGRES_DB: judah_ci_${{ github.run_id }}_${{ github.run_attempt }}
         ports:
           - 5432:5432
         options: >-
@@ -105,6 +105,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements/test.txt
+
+      - name: Assert disposable database target
+        run: python -m common.database_safety
 
       - name: Run migrations
         run: python manage.py migrate --run-syncdb
@@ -160,11 +163,21 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: judah_test
+          POSTGRES_DB: judah_ci_${{ github.run_id }}_${{ github.run_attempt }}
         ports:
           - 5432:5432
         options: >-
           --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -182,11 +195,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements/base.txt
 
-      - name: Django system check
-        run: python manage.py check --fail-level WARNING
+      - name: Assert disposable database target
+        run: python -m common.database_safety
 
       - name: Apply migrations
         run: python manage.py migrate --run-syncdb
+
+      - name: Django system check
+        run: python manage.py check --fail-level WARNING
 
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run

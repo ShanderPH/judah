@@ -44,6 +44,7 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
         hubspot_ticket_id=ticket_id,
         pipeline_id="636459134",
         entered_queue_at=timezone.now() - timedelta(minutes=minutes_ago),
+        automatic_assignment_eligible=True,
     )
 
 
@@ -220,8 +221,8 @@ class TestSATResetDailyCounters:
 
 @pytest.mark.django_db
 class TestMatchmakerAssignNext:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_assigns_oldest_ticket_to_best_agent(self, mock_client_fn, mock_reconcile):
         agent = _make_agent("Agent1", 100, chats=0)
         _make_pending_ticket("T001", minutes_ago=10)
@@ -271,8 +272,8 @@ class TestMatchmakerAssignNext:
 
 @pytest.mark.django_db
 class TestMatchmakerDrainQueue:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_assigns_multiple_tickets(self, mock_client_fn, mock_reconcile):
         _make_agent("Agent1", 100, chats=0, max_chats=5)
         _make_agent("Agent2", 200, chats=0, max_chats=5)
@@ -298,8 +299,8 @@ class TestMatchmakerDrainQueue:
         assert result["assigned"] == 0
         assert result["total_pending"] == 0
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_quarantines_stale_head_and_assigns_next_ticket(self, mock_client_fn, mock_reconcile):
         from apps.integrations.hubspot.exceptions import HubSpotResourceNotFoundError
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -330,8 +331,8 @@ class TestMatchmakerDrainQueue:
         assert stale.assignment_attempts == 1
         assert not NewConversation.objects.filter(hubspot_ticket_id="VALID").exists()
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_defers_transient_provider_failure_with_backoff(self, mock_client_fn, mock_reconcile):
         from apps.integrations.hubspot.exceptions import HubSpotAPIError
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -498,11 +499,3 @@ class TestWebhookHandlerAsync:
         _handle_ticket_owner_change("T001", "200", payload)
 
         mock_delay.assert_called_once_with("T001", "200", payload)
-
-    @patch("apps.support.tasks.task_handle_availability_change.delay")
-    def test_availability_handler_dispatches_task(self, mock_delay):
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
-
-        _handle_agent_availability_change("C001", "available", {"email": "test@test.com"})
-
-        mock_delay.assert_called_once_with("C001", "available", {"email": "test@test.com"})

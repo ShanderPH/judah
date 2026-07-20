@@ -27,16 +27,10 @@ from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_cl
 from apps.support.models import (
     Agent,
     AssignedConversation,
-    AssignmentLog,
     ClosedConversation,
     NewConversation,
 )
-from apps.support.queue_service import (
-    decrement_agent_chat_count,
-    get_last_assigned_owner_id,
-    increment_agent_chat_count,
-    select_next_agent,
-)
+from apps.support.queue_service import decrement_agent_chat_count
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
@@ -119,6 +113,16 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
     Returns:
         True if the ticket was successfully assigned, False otherwise.
     """
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_assign,
+        may_ingest_queue,
+    )
+
+    if not may_ingest_queue():
+        log_runtime_rejection("process_new_ticket_event")
+        return False
+
     logger.info("auto_assign_new_ticket_event", ticket_id=hubspot_ticket_id)
 
     # Fetch ticket details from HubSpot
@@ -145,6 +149,7 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
             "priority": ticket_data.get("priority") or "",
             "subject": ticket_data.get("subject") or "",
             "entered_queue_at": entered_queue_at,
+            "automatic_assignment_eligible": True,
         },
     )
     if not created:
@@ -155,6 +160,9 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
         reason="Ticket enqueued for automatic assignment.",
     )
 
+    if not may_assign():
+        logger.info("auto_assign_disabled_queue_preserved", ticket_id=hubspot_ticket_id)
+        return False
     return attempt_auto_assign(new_conv, ticket_data)
 
 
@@ -214,118 +222,18 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
-    # Agent status is kept fresh by the SAT heartbeat (20-second polling).
-    # Load reconciliation is done per-agent by the Matchmaker before assignment.
-    # No batch sync needed here.
+    from apps.support.availability_runtime import log_runtime_rejection, may_assign
 
-    # Select next agent (Rule 1-4)
-    last_owner_id = get_last_assigned_owner_id()
-    agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
-
-    if agent is None:
-        # No agent available — mark as queued for later assignment
-        new_conv.queue_status = NewConversation.QueueStatus.QUEUED
-        new_conv.assignment_attempts += 1
-        new_conv.last_assignment_attempt_at = timezone.now()
-        new_conv.save(update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"])
-        logger.warning(
-            "auto_assign_no_agent_available",
-            ticket_id=new_conv.hubspot_ticket_id,
-            queue_position=new_conv.queue_position,
-            assignment_attempts=new_conv.assignment_attempts,
-        )
+    if not may_assign():
+        log_runtime_rejection("attempt_auto_assign")
         return False
 
-    # Verify selected agent is still available (double-check after sync)
-    agent.refresh_from_db()
-    if agent.status_enum != Agent.StatusEnum.ONLINE:
-        logger.warning(
-            "auto_assign_agent_no_longer_available",
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent=agent.name,
-            status=agent.status_enum,
-        )
-        # Re-select agent with updated data
-        agent = select_next_agent(last_assigned_hubspot_owner_id=last_owner_id)
-        if agent is None:
-            new_conv.queue_status = NewConversation.QueueStatus.QUEUED
-            new_conv.assignment_attempts += 1
-            new_conv.last_assignment_attempt_at = timezone.now()
-            new_conv.save(
-                update_fields=["queue_status", "assignment_attempts", "last_assignment_attempt_at", "updated_at"]
-            )
-            return False
+    # Matchmaker is the sole automatic assignment implementation. Keeping this
+    # compatibility entrypoint prevents legacy callers from bypassing the final
+    # eligibility guard and capacity reservation.
+    from apps.support.matchmaker_service import AssignmentOutcome, matchmaker_assign_next
 
-    # Assign via HubSpot API
-    try:
-        client = get_hubspot_client()
-        client.assign_ticket_owner(new_conv.hubspot_ticket_id, agent.hubspot_owner_id)
-    except ExternalServiceError:
-        logger.error(
-            "auto_assign_hubspot_update_failed",
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent_id=str(agent.id),
-        )
-        return False
-
-    # Persist changes atomically in local DB
-    now = timezone.now()
-    wait_seconds: Decimal | None = None
-    if new_conv.entered_queue_at:
-        delta = now - new_conv.entered_queue_at
-        wait_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
-    with transaction.atomic():
-        # Remove from pending queue — the record moves to assigned_conversations
-        new_conv.delete()
-
-        # Create or update assigned_conversation record
-        AssignedConversation.objects.update_or_create(
-            hubspot_ticket_id=new_conv.hubspot_ticket_id,
-            defaults={
-                "agent": agent,
-                "hubspot_owner_id": agent.hubspot_owner_id,
-                "agent_name": agent.name,
-                "pipeline_id": new_conv.pipeline_id,
-                "entered_queue_at": new_conv.entered_queue_at,
-                "assigned_at": now,
-                "queue_wait_seconds": wait_seconds,
-                "contact_name": new_conv.contact_name,
-                "contact_email": new_conv.contact_email,
-                "priority": new_conv.priority,
-                "subject": new_conv.subject,
-            },
-        )
-
-        # Write to assignment_logs
-        AssignmentLog.objects.create(
-            ticket_id=new_conv.hubspot_ticket_id,
-            agent=agent,
-            agent_name=agent.name,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            assignment_type="automatic",
-            pipeline_id=new_conv.pipeline_id,
-            entered_queue_at=new_conv.entered_queue_at,
-            queue_wait_seconds=wait_seconds,
-        )
-
-        # Update agent chat counter
-        increment_agent_chat_count(agent)
-
-    _transition_lifecycle_best_effort(
-        new_conv.hubspot_ticket_id,
-        ["HUMAN_ASSIGNED"],
-        reason="Matchmaker assigned the ticket to a human agent.",
-    )
-
-    logger.info(
-        "auto_assign_success",
-        ticket_id=new_conv.hubspot_ticket_id,
-        agent_name=agent.name,
-        hubspot_owner_id=agent.hubspot_owner_id,
-        queue_wait_seconds=float(wait_seconds) if wait_seconds is not None else None,
-    )
-    return True
+    return matchmaker_assign_next() == AssignmentOutcome.ASSIGNED
 
 
 def handle_ticket_closed(
@@ -353,6 +261,15 @@ def handle_ticket_closed(
             for ``closed_by_*`` metadata fields, not for count management).
     """
     from django.core.cache import cache
+
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+
+    if not may_write_routing_state():
+        log_runtime_rejection("handle_ticket_closed")
+        return
 
     # Redis dedup lock — prevent concurrent/duplicate calls (e.g., when both
     # Closed-stage timestamp and hs_pipeline_stage webhooks fire for the
@@ -493,7 +410,16 @@ def assign_pending_tickets() -> dict:
     Returns:
         Dict with ``assigned``, ``skipped``, ``total_pending`` counts.
     """
+    from apps.support.availability_runtime import may_assign
     from apps.support.matchmaker_service import matchmaker_drain_queue
+
+    if not may_assign():
+        result = matchmaker_drain_queue()
+        return {
+            "assigned": 0,
+            "skipped": result["remaining"],
+            "total_pending": result["total_pending"],
+        }
 
     result = matchmaker_drain_queue()
     return {
@@ -521,6 +447,16 @@ def sync_novo_stage_tickets() -> dict:
         Dict with ``created``, ``skipped``, ``already_assigned``,
         ``total_from_hubspot`` counts.
     """
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_assign,
+        may_reconcile_queue,
+    )
+
+    if not may_reconcile_queue():
+        log_runtime_rejection("sync_novo_stage_tickets")
+        return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0}
+
     logger.info("sync_novo_stage_tickets_start")
 
     try:
@@ -561,6 +497,7 @@ def sync_novo_stage_tickets() -> dict:
             conversation = existing_pending[ticket_id]
             if conversation.can_reactivate:
                 conversation.queue_status = NewConversation.QueueStatus.PENDING
+                conversation.automatic_assignment_eligible = False
                 conversation.assignment_attempts = 0
                 conversation.last_assignment_attempt_at = None
                 conversation.next_assignment_attempt_at = None
@@ -569,6 +506,7 @@ def sync_novo_stage_tickets() -> dict:
                 conversation.save(
                     update_fields=[
                         "queue_status",
+                        "automatic_assignment_eligible",
                         "assignment_attempts",
                         "last_assignment_attempt_at",
                         "next_assignment_attempt_at",
@@ -598,6 +536,7 @@ def sync_novo_stage_tickets() -> dict:
             priority=ticket.get("priority") or "",
             subject=ticket.get("subject") or "",
             entered_queue_at=entered_at,
+            automatic_assignment_eligible=False,
         )
         created += 1
         logger.info(
@@ -618,7 +557,7 @@ def sync_novo_stage_tickets() -> dict:
     # After populating the queue, immediately try to assign tickets to any
     # agent that is already online — so a sync that runs while agents are
     # available does not require a separate trigger.
-    if created > 0:
+    if created > 0 and may_assign():
         assign_result = assign_pending_tickets()
         logger.info(
             "sync_novo_auto_assign_triggered",
@@ -646,6 +585,15 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
     Returns:
         Number of new agents created.
     """
+    from apps.support.availability_runtime import (
+        is_authoritative_availability_runtime,
+        log_runtime_rejection,
+    )
+
+    if not is_authoritative_availability_runtime():
+        log_runtime_rejection("sync_hubspot_team_to_agents")
+        return 0
+
     try:
         client = get_hubspot_client()
         members = client.get_team_members(team_id)
