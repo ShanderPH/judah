@@ -159,6 +159,14 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma
   conversa. O contexto enviado ao modelo é limitado às mensagens recentes.
 - Primeira mensagem: greeting obrigatório. Demais: não repetir.
+- O Salomão lê a mensagem atual junto com o histórico recente e reutiliza dados
+  já informados; uma clarificação respondida não pode ser perguntada novamente.
+- Quando uma distinção muda materialmente o procedimento, o Salomão faz uma
+  única pergunta decisiva antes de orientar e encerra aquele turno sem despejar
+  todos os caminhos possíveis.
+- A completude é construída ao longo da conversa: depois da clarificação, o
+  Salomão retoma todos os pedidos pendentes e apresenta somente o caminho
+  aplicável, em geral com 3 a 7 passos curtos e detalhes adicionais sob demanda.
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.

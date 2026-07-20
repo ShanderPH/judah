@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from django.test import override_settings
 
-from apps.ai_agents.agents.salomao_chat import SalomaoChatTool, salomao_v1_result_to_draft
+from apps.ai_agents.agents.salomao_chat import (
+    SalomaoChatTool,
+    build_salomao_chat_prompt,
+    salomao_v1_result_to_draft,
+)
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
 from apps.integrations.salomao_v1 import SalomaoV1ChatResult, SalomaoV1TokenUsage
 from common.exceptions import ExternalServiceError
@@ -25,7 +29,11 @@ class FakeSalomaoClient:
         assert "Atendimento HubSpot\nTicket:" not in message
         assert "500 a 900 caracteres" not in message
         assert "no maximo 5 passos" not in message
-        assert "Nao resuma, corte ou omita informacoes relevantes" in message
+        assert "faça primeiro uma única pergunta curta" in message
+        assert "Não despeje o manual" in message
+        assert "completude como qualidade da conversa inteira" in message
+        assert "responda somente o caminho aplicável" in message
+        assert "nunca faça a mesma pergunta de novo" in message
         assert "Preserve Markdown legivel" in message
         assert "experiente e acolhedora" in message
         assert "Nao repita saudacoes" in message
@@ -144,6 +152,39 @@ async def test_salomao_chat_tool_forwards_image_outside_prompt() -> None:
     )
 
     assert draft.response_text == "A imagem mostra a tela de eventos."
+
+
+def test_prompt_uses_answered_clarification_and_preserves_pending_request() -> None:
+    context = ConversationContext(
+        channel="hubspot",
+        session_id="hubspot-thread-clarification",
+        ticket_id="789",
+        thread_id="clarification",
+        recent_messages=[
+            ConversationMessage(
+                direction="INCOMING",
+                text="Como criar cupom e fazer estorno?",
+            ),
+            ConversationMessage(
+                direction="OUTGOING",
+                text="O estorno é de evento ou de doação?",
+            ),
+            ConversationMessage(
+                direction="INCOMING",
+                text="É de inscrição de evento.",
+            ),
+        ],
+    )
+
+    prompt = build_salomao_chat_prompt(
+        message="É de inscrição de evento.",
+        conversation_context=context,
+    )
+
+    assert "[INCOMING] Como criar cupom e fazer estorno?" in prompt
+    assert "[OUTGOING] O estorno é de evento ou de doação?" in prompt
+    assert prompt.count("É de inscrição de evento.") == 1
+    assert "Preserve os demais pedidos para responder depois da clarificação" in prompt
 
 
 def test_salomao_v1_empty_response_becomes_handoff_draft() -> None:

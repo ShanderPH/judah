@@ -168,6 +168,14 @@ TAGS
 DADOS FALTANTES
 - Liste somente o que AINDA NÃO foi informado e seria necessário para
   resolver (ex: "cpf", "id_do_ticket", "nome_da_igreja", "print_do_erro").
+- Considere também uma distinção decisiva quando ela muda o procedimento
+  aplicável (ex: "tipo_da_transacao", "origem_do_pagamento",
+  "modulo_afetado"). Nesse caso, liste apenas o ponto mínimo que separa os
+  caminhos possíveis.
+- Leia o histórico incluído na mensagem antes de marcar um dado como faltante.
+  Se o cliente já respondeu à pergunta em um turno anterior, não peça de novo.
+- Não marque detalhes opcionais ou dados que podem ser solicitados somente
+  depois da orientação inicial.
 - Se já houver tudo que é necessário, retorne lista vazia [].
 
 REGRA DE OURO
