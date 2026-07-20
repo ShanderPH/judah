@@ -10,6 +10,7 @@ from apps.ai_agents.agents.supervisor import (
     FIRST_MESSAGE_GREETING,
     SalomaoResponse,
     SalomaoSupervisorAgent,
+    _deterministic_handoff_trigger,
     _is_greeting_only,
 )
 from apps.ai_agents.contracts import SalomaoChatDraft, TriageDecision
@@ -341,6 +342,60 @@ def test_integrated_chain_forces_handoff_for_explicit_handoff_route() -> None:
     assert "supervisor: mandatory_human_handoff" in response.agent_trace
     assert "sinto muito pelo transtorno" in response.message
     assert "pessoa do nosso time" in response.message
+
+
+def test_explicit_human_request_bypasses_models_and_requests_handoff() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FailingTriageRunner()
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("quero falar com um humano")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.requires_human_handoff is True
+    assert response.handoff_reason == "Customer explicitly requested human assistance."
+    assert response.model_name == "handoff_policy"
+    assert response.triage_decision is not None
+    assert response.triage_decision.tags == ["explicit_human_request"]
+    assert response.triage_decision.prioridade == "MEDIA"
+    assert "handoff_policy: explicit_human_request" in response.agent_trace
+    assert "Vou encaminhar seu atendimento" in response.message
+
+
+def test_severe_aggression_bypasses_models_and_requests_critical_handoff() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FailingTriageRunner()
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("VOCÊS SÃO INCOMPETENTES, ISSO É UMA MERDA!!!")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.requires_human_handoff is True
+    assert response.handoff_reason == "Severe customer aggression requires immediate human handoff."
+    assert response.triage_decision is not None
+    assert response.triage_decision.tags == ["severe_aggression"]
+    assert response.triage_decision.prioridade == "CRITICA"
+    assert response.triage_decision.sentimento == "negativo"
+    assert "handoff_policy: severe_aggression" in response.agent_trace
+
+
+def test_handoff_policy_does_not_escalate_normal_product_questions_or_mild_frustration() -> None:
+    assert _deterministic_handoff_trigger("Como cadastrar um atendente humano?") is None
+    assert _deterministic_handoff_trigger("Estou chateado porque tentei e não funcionou") is None
+    assert _deterministic_handoff_trigger("Como faço para falar com um atendente?") == "explicit_human_request"
+    assert _deterministic_handoff_trigger("Atendente, por favor") == "explicit_human_request"
+    assert _deterministic_handoff_trigger("Falar com alguém") == "explicit_human_request"
+    assert _deterministic_handoff_trigger("Vou denunciar isso no Procon") == "severe_aggression"
+    assert _deterministic_handoff_trigger("Vou cancelar o contrato") == "severe_aggression"
+    assert _deterministic_handoff_trigger("Vou cancelar meu evento para criar outro") is None
 
 
 def test_integrated_chain_uses_salomao_v1_for_high_priority() -> None:

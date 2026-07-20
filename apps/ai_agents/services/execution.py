@@ -25,8 +25,8 @@ from apps.ai_agents.services.tool_permissions import is_tool_allowed
 logger = structlog.get_logger(__name__)
 
 HUMAN_HANDOFF_CONFIRMATION = (
-    "Entendi. Já encaminhei seu atendimento para o nosso time de suporte. "
-    "Um atendente continuará a conversa por aqui assim que estiver disponível."
+    "Entendi. Vou encaminhar seu atendimento para uma pessoa do nosso time agora. "
+    "Ela continuará a conversa por aqui com o contexto que você já enviou."
 )
 
 
@@ -95,9 +95,6 @@ def _prepare_tool_call(
     input_payload: dict[str, Any],
     agent_run: AgentRun | None,
 ) -> PreparedToolCall:
-    if not is_tool_allowed(instance.state, tool_name):
-        raise PermissionError(f"Tool {tool_name} is not allowed in state {instance.state}.")
-
     audit = ToolCallAuditLog.objects.filter(idempotency_key=idempotency_key).first()
     if audit is not None and audit.status == ToolCallAuditLog.Status.SUCCEEDED:
         return PreparedToolCall(
@@ -105,6 +102,9 @@ def _prepare_tool_call(
             should_execute=False,
             cached_output=dict(audit.output or {}),
         )
+
+    if not is_tool_allowed(instance.state, tool_name):
+        raise PermissionError(f"Tool {tool_name} is not allowed in state {instance.state}.")
 
     if audit is None:
         audit = ToolCallAuditLog.objects.create(
@@ -441,15 +441,6 @@ async def apply_supervisor_result(
     )
 
     if decision.outcome == "escalate_human":
-        await sync_to_async(request_human_handoff)(
-            instance=instance,
-            reason=result.handoff_reason or "Supervisor requested human handoff.",
-            conversation_context=conversation_context,
-            triage_decision=result.triage_decision,
-            ai_summary=decision.final_response,
-            agent_run=agent_run,
-        )
-
         if can_reply and reply_tool_allowed:
             reply_result = await send_reply_with_audit(
                 instance=instance,
@@ -462,6 +453,15 @@ async def apply_supervisor_result(
             )
             if not reply_result.get("sent"):
                 raise RuntimeError(reply_result.get("reason") or "HubSpot handoff confirmation failed.")
+
+        await sync_to_async(request_human_handoff)(
+            instance=instance,
+            reason=result.handoff_reason or "Supervisor requested human handoff.",
+            conversation_context=conversation_context,
+            triage_decision=result.triage_decision,
+            ai_summary=decision.final_response,
+            agent_run=agent_run,
+        )
         return
 
     if can_reply and decision.final_response and not reply_tool_allowed:
