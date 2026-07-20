@@ -1,77 +1,74 @@
-# Handoff
+# Handoff — PR 75 remediation Gate A
 
 ## Resumo do implementado/corrigido
 
-- Identificada staging como o segundo writer que restaurava Nathan para
-  `online`; após o shutdown de staging, o flapping cessou sem desabilitar o
-  agente.
-- Criada conciliação autoritativa e idempotente a partir da HubSpot Users API,
-  incluindo ausência, horário individual, timezone, estabilidade e freshness.
-- Adicionadas cercas de ambiente no Python e PostgreSQL para staging não
-  alterar disponibilidade, capacidade, fila ou atribuições de produção.
-- Adicionadas auditoria por revisão, lease com owner token/fencing e guarda
-  final do Matchmaker sob lock.
-- Removida a edição de status pela API/Admin e eliminado o falso contrato de
-  `contact.propertyChange/hs_availability_status`, que a HubSpot não oferece.
-- O webhook real de ticket NOVO agora enfileira, força uma releitura sem cache
-  da Users API e falha fechado antes de chamar o Matchmaker.
-- O candidato escolhido é consultado novamente pelo ID na Users API,
-  imediatamente antes da reserva; `away`, ausência, dado inválido ou falha
-  remota vetam a atribuição sem modificar o snapshot SAT.
+- Corrigida `support.0016` sem reescrever migration aplicada: o histórico
+  compartilhado foi consultado em modo read-only e não contém `0015/0016`.
+- Adicionada prova PostgreSQL 16 de apply, reverse, reapply, write permitido e
+  veto SQLSTATE `42501` para runtime staging.
+- CI agora cria banco PostgreSQL único por run, valida o alvo antes de migrar
+  e executa a suíte real somente após migrations bem-sucedidas.
+- Testes destrutivos recusam hosts remotos, nomes não descartáveis e bancos de
+  outro workflow run antes do setup do pytest.
+- Gate A passou localmente com 402 testes e 64,17% de cobertura; nenhuma
+  mutation externa ou compartilhada foi executada.
 
 ## Arquivos modificados
 
-- `apps/integrations/hubspot/client.py`
-- `apps/integrations/hubspot/user_availability.py`
-- `apps/support/availability_runtime.py`
-- `apps/support/eligibility_service.py`
-- `apps/support/sat_service.py`
-- `apps/support/queue_service.py`
-- `apps/support/matchmaker_service.py`
-- `apps/support/auto_assign_service.py`
-- `apps/support/tasks.py`
-- `apps/support/agent_sync_service.py`
-- `apps/support/models.py`
-- `apps/support/admin.py`
-- `apps/support/admin_api.py`
-- `apps/support/schemas.py`
-- `apps/support/migrations/0015_absence_safe_eligibility.py`
+- `.github/workflows/ci.yml`
 - `apps/support/migrations/0016_block_non_authoritative_runtime_writes.py`
-- `core/settings/base.py`
-- `core/settings/production.py`
-- `apps/health/api.py`
-- testes correspondentes em `apps/support/tests/` e
-  `apps/integrations/tests/`.
+- `apps/support/tests/test_runtime_guard_migration.py`
+- `common/database_safety.py`
+- `common/tests/test_database_safety.py`
+- `conftest.py`
+- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/database/02-repair-runtime-guard-migration.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/devops/07-postgres-ci-gate.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/03-verification/02-pr75-gate-a.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/STATUS.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/HANDOFF.md`
 
 ## Como testar localmente
 
+Use somente PostgreSQL/Redis locais e descartáveis. O PostgreSQL deve usar o
+database `judah_test`.
+
 ```powershell
-uv run ruff check .
 $env:DJANGO_ENV='test'
 $env:DJANGO_SECRET_KEY='local-test-only'
-$env:DATABASE_URL='sqlite:///./.test.sqlite3'
+$env:DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:55432/judah_test'
+$env:REDIS_URL='redis://127.0.0.1:56379/0'
+
+uv run python -m common.database_safety
+uv run python manage.py migrate --run-syncdb
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
 uv run mypy .
+uv run python manage.py check --fail-level WARNING
 uv run python manage.py makemigrations --check --dry-run
-uv run python run_tests_local.py
+git diff --check
 ```
+
+As demais variáveis obrigatórias devem receber apenas placeholders locais,
+conforme `.github/workflows/ci.yml`.
 
 ## Riscos conhecidos / áreas frágeis
 
-- O formato real das propriedades de todos os usuários HubSpot deve ser
-  observado em shadow antes da enforcement; dado malformado falha fechado.
-- A migration `0016` usa triggers PostgreSQL e ainda precisa de validação em
-  staging isolado antes de produção.
-- A CLI Railway local não está autenticada nesta sessão, portanto variáveis e
-  topologia atuais não foram alteradas.
-- Staging deve receber banco e Redis próprios mesmo com as cercas adicionadas.
+- A migration `0016` ainda implementa a cerca denylist original. A troca por
+  roles PostgreSQL explicitamente confiáveis pertence a DB-03/Gate B.
+- GitHub-hosted checks do SHA final ainda não rodaram porque nenhum commit ou
+  push foi autorizado nesta execução.
+- O gate local usou PostgreSQL 16, enquanto o HelpdeskDB compartilhado reporta
+  PostgreSQL 17; nenhum teste foi executado no banco compartilhado.
+- O restante da remediação (queue gates, durable attempts, canonicalização e
+  rollout) permanece intencionalmente fora deste slice.
 
 ## Pontos de integração críticos
 
-- Aplicar `0015` antes de `0016`.
-- Confirmar na readiness que apenas produção é writer autoritativo.
-- Manter Nathan com `auto_assign_enabled=true`.
-- Comparar decisões shadow por um dia antes de habilitar
-  `ABSENCE_SAFE_ELIGIBILITY_ENFORCED=true`.
-- Confirmar em staging que a credencial possui `crm.objects.users.read` para a
-  leitura individual executada pela guarda final.
-- Não aplicar migrations, deploy ou enforcement sem aprovação explícita.
+- VERIFY deve confirmar que o nome dinâmico do database é idêntico no
+  `DATABASE_URL` e em `POSTGRES_DB`.
+- O teste de migration deve continuar recriando `MigrationExecutor` a cada
+  transição.
+- Não executar pytest se `common.database_safety` rejeitar o alvo.
+- Não avançar para Gate B, migration compartilhada, credenciais, deploy ou
+  rollout sem a próxima autorização prevista no plano.
