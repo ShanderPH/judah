@@ -1,36 +1,49 @@
-# Handoff — PR 75 remediation Gate A
+# Handoff — PR 75 remediation Gate B
 
 ## Resumo do implementado/corrigido
 
-- Corrigida `support.0016` sem reescrever migration aplicada: o histórico
-  compartilhado foi consultado em modo read-only e não contém `0015/0016`.
-- Adicionada prova PostgreSQL 16 de apply, reverse, reapply, write permitido e
-  veto SQLSTATE `42501` para runtime staging.
-- CI agora cria banco PostgreSQL único por run, valida o alvo antes de migrar
-  e executa a suíte real somente após migrations bem-sucedidas.
-- Testes destrutivos recusam hosts remotos, nomes não descartáveis e bancos de
-  outro workflow run antes do setup do pytest.
-- Gate A passou localmente com 402 testes e 64,17% de cobertura; nenhuma
-  mutation externa ou compartilhada foi executada.
+- Separadas as capacidades de ingestão, reconciliação e atribuição; desligar
+  auto-assignment preserva webhook intake, fila e backfill.
+- `AUTO_ASSIGNMENT_ENABLED` agora falha fechado por padrão; shadow e canário
+  não podem cair na elegibilidade legada.
+- Adicionado canário por UUID local de agente, com configuração inválida
+  falhando fechado.
+- `support.0016` passou a autorizar writers por roles PostgreSQL explícitos,
+  cobrindo insert/update/delete nas tabelas de roteamento.
+- Guardas Python agora vetam reconciliadores, lifecycle, Django Admin e
+  operações manuais antes de I/O; Railway pre-deploy preserva a fila.
 
 ## Arquivos modificados
 
-- `.github/workflows/ci.yml`
+- `apps/support/availability_runtime.py`
+- `apps/support/tasks.py`
+- `apps/support/matchmaker_service.py`
+- `apps/support/auto_assign_service.py`
+- `apps/support/queue_service.py`
+- `apps/support/sat_service.py`
+- `apps/support/admin.py`
+- `apps/support/admin_api.py`
+- `apps/support/management/commands/railway_predeploy.py`
 - `apps/support/migrations/0016_block_non_authoritative_runtime_writes.py`
+- `apps/support/tests/test_gate_b_runtime_controls.py`
 - `apps/support/tests/test_runtime_guard_migration.py`
-- `common/database_safety.py`
-- `common/tests/test_database_safety.py`
-- `conftest.py`
-- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/database/02-repair-runtime-guard-migration.md`
-- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/devops/07-postgres-ci-gate.md`
-- `ai-system/requests/hotfix/agent-absence-eligibility/03-verification/02-pr75-gate-a.md`
+- `apps/support/tests/test_railway_predeploy.py`
+- `apps/webhooks/handlers/hubspot_handler.py`
+- `core/settings/base.py`
+- `core/settings/development.py`
+- `core/settings/production.py`
+- `core/settings/test.py`
+- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/backend/09-queue-safe-runtime-capabilities.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/02-artifacts/database/03-role-based-writer-isolation.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/03-verification/03-pr75-gate-b.md`
+- `ai-system/requests/hotfix/agent-absence-eligibility/05-deployment/rollout.md`
 - `ai-system/requests/hotfix/agent-absence-eligibility/STATUS.md`
 - `ai-system/requests/hotfix/agent-absence-eligibility/HANDOFF.md`
 
 ## Como testar localmente
 
-Use somente PostgreSQL/Redis locais e descartáveis. O PostgreSQL deve usar o
-database `judah_test`.
+Use apenas PostgreSQL 16 e Redis locais descartáveis. O database informado a
+pytest deve começar com `judah_test`.
 
 ```powershell
 $env:DJANGO_ENV='test'
@@ -49,26 +62,21 @@ uv run python manage.py makemigrations --check --dry-run
 git diff --check
 ```
 
-As demais variáveis obrigatórias devem receber apenas placeholders locais,
-conforme `.github/workflows/ci.yml`.
-
 ## Riscos conhecidos / áreas frágeis
 
-- A migration `0016` ainda implementa a cerca denylist original. A troca por
-  roles PostgreSQL explicitamente confiáveis pertence a DB-03/Gate B.
-- GitHub-hosted checks do SHA final ainda não rodaram porque nenhum commit ou
-  push foi autorizado nesta execução.
-- O gate local usou PostgreSQL 16, enquanto o HelpdeskDB compartilhado reporta
-  PostgreSQL 17; nenhum teste foi executado no banco compartilhado.
-- O restante da remediação (queue gates, durable attempts, canonicalização e
-  rollout) permanece intencionalmente fora deste slice.
+- Os roles e grants compartilhados ainda não existem; OPS-09 exige aprovação
+  explícita, isolamento de staging e possível rotação de credenciais.
+- O protocolo durável contra crash entre reserva, HubSpot e finalize pertence
+  ao Gate C e ainda não foi implementado.
+- A implementação legada inalcançável permanece até o Gate D; seus entrypoints
+  ativos já estão protegidos pelas capacidades do Gate B.
+- Nenhuma migration compartilhada, alteração de credencial/flag ou deploy foi
+  executado; os Gates A e B foram preparados para publicação na PR 75.
 
 ## Pontos de integração críticos
 
-- VERIFY deve confirmar que o nome dinâmico do database é idêntico no
-  `DATABASE_URL` e em `POSTGRES_DB`.
-- O teste de migration deve continuar recriando `MigrationExecutor` a cada
-  transição.
-- Não executar pytest se `common.database_safety` rejeitar o alvo.
-- Não avançar para Gate B, migration compartilhada, credenciais, deploy ou
-  rollout sem a próxima autorização prevista no plano.
+- VERIFY deve manter a prova de que `application_name` forjado não eleva role.
+- O futuro `AssignmentAttempt` deve receber o mesmo trigger role-based.
+- Shadow obrigatório: assignment off, ingestão/reconciliação on.
+- Canary obrigatório: eligibility enforced e allowlist de `Agent.id` UUID.
+- Não avançar para Gate C sem a próxima autorização prevista no plano.
