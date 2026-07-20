@@ -78,3 +78,17 @@ git diff --check
   `git diff --check` aprovados.
 - Não fazer merge antes de a migration `0018` e os testes do gate estarem no
   head verde da PR 75.
+
+## Follow-up — autoridade local de expediente
+
+- O Gate F revelou que o HubSpot não fornece `hs_working_hours` nem
+  `hs_standard_time_zone` neste portal; exigir esses campos tornou os seis
+  agentes inelegíveis.
+- O SAT passa a usar o HubSpot somente para identidade, `available`/`away` e
+  ausência, mantendo `BusinessHoursConfig`/`SpecialSchedule` como autoridade
+  de expediente.
+- O veto de expediente local também é aplicado na revalidação imediatamente
+  anterior à reserva.
+- Feriados usam a faixa de domingo, 08:00–12:00, salvo override explícito.
+- Tercio Augusto está ativo, com autoatribuição habilitada e capacidade 4.
+- Validação: `434 passed, 3 skipped`, cobertura `64.76%`, Ruff e mypy limpos.

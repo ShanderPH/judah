@@ -61,8 +61,10 @@ _DAY_GROUPS: dict[str, set[int]] = {
 def evaluate_observation_signals(
     observation: AvailabilityObservation,
     now: datetime,
+    *,
+    within_working_hours: bool | None = None,
 ) -> EligibilityDecision:
-    """Evaluate HubSpot absence, status, and schedule signals."""
+    """Evaluate HubSpot presence/absence with an optional local schedule veto."""
     if not observation.hubspot_user_id:
         return EligibilityDecision(False, EligibilityReason.MISSING_IDENTITY)
     if observation.availability_status == "away":
@@ -72,12 +74,18 @@ def evaluate_observation_signals(
     if any(interval.start_at <= now < interval.end_at for interval in observation.out_of_office_hours):
         return EligibilityDecision(False, EligibilityReason.ACTIVE_OUT_OF_OFFICE)
 
-    local_now = now.astimezone(ZoneInfo(observation.timezone_name))
-    minute = local_now.hour * 60 + local_now.minute
-    within_hours = any(
-        local_now.weekday() in _DAY_GROUPS.get(window.days, set()) and window.start_minute <= minute < window.end_minute
-        for window in observation.working_hours
-    )
+    if within_working_hours is None:
+        if observation.timezone_name is None or not observation.working_hours:
+            return EligibilityDecision(False, EligibilityReason.MALFORMED_REMOTE_DATA)
+        local_now = now.astimezone(ZoneInfo(observation.timezone_name))
+        minute = local_now.hour * 60 + local_now.minute
+        within_hours = any(
+            local_now.weekday() in _DAY_GROUPS.get(window.days, set())
+            and window.start_minute <= minute < window.end_minute
+            for window in observation.working_hours
+        )
+    else:
+        within_hours = within_working_hours
     if not within_hours:
         return EligibilityDecision(False, EligibilityReason.OUTSIDE_WORKING_HOURS)
     return EligibilityDecision(True, EligibilityReason.ELIGIBLE)

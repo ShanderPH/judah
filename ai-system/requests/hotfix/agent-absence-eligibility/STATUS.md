@@ -1,12 +1,12 @@
 request: hotfix/agent-absence-eligibility
 cycle: F
-state: IMPLEMENT
+state: VERIFY
 opened_at: 2026-07-17T15:24:48-03:00
-last_update: 2026-07-20T15:58:54-03:00
+last_update: 2026-07-20T16:55:59-03:00
 agent_run_id: codex-root
 current_blockers:
-  - "PR 75 must not merge until the new-ticket-only rollout gate is committed, pushed, and green."
-next_action: "Codex: publish migration 0018 and the persistent new-ticket assignment gate to PR 75; Felipe merges only after final green checks."
+  - "The local-business-hours authority correction requires a new PR, merge by Felipe, and Railway deployment before production agents can become eligible."
+next_action: "Codex: publish the follow-up PR; Felipe performs the merge after hosted checks are green."
 artifacts_generated:
   - 00-context/production-diagnosis.md
   - 00-context/ops-prerequisite-revalidation.md
@@ -23,6 +23,7 @@ artifacts_generated:
   - 03-verification/03-pr75-gate-b.md
   - 03-verification/04-pr75-gates-c-d-e.md
   - 03-verification/05-pr75-gate-f-new-ticket-boundary.md
+  - 04-iteration/06-local-business-hours-authority.md
   - 05-deployment/rollout.md
   - HANDOFF.md
-verification_runs: 81
+verification_runs: 85

@@ -70,6 +70,21 @@ class TestBusinessHoursLogic:
         # Sunday: 8-12
         assert _DEFAULT_BUSINESS_HOURS[6] == (8, 12)
 
+    @pytest.mark.parametrize(
+        "hour,expected",
+        [
+            (7, False),
+            (8, True),
+            (11, True),
+            (12, False),
+        ],
+    )
+    def test_holiday_uses_sunday_hours(self, hour: int, expected: bool) -> None:
+        holiday = datetime(2026, 4, 21, hour, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch.object(timezone, "localtime", return_value=holiday):
+            assert is_business_hours() is expected
+
     def test_get_poll_interval_seconds_business_hours(self) -> None:
         """Test that interval is 30s during business hours."""
         with patch("apps.support.agent_sync_service.is_business_hours", return_value=True):
