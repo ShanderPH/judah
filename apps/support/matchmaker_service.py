@@ -84,12 +84,9 @@ def matchmaker_assign_next() -> AssignmentOutcome:
     """
     from django.core.cache import cache
 
-    from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
-        log_runtime_rejection,
-    )
+    from apps.support.availability_runtime import log_runtime_rejection, may_assign
 
-    if not is_auto_assignment_runtime_allowed():
+    if not may_assign():
         log_runtime_rejection("matchmaker_assign_next")
         return AssignmentOutcome.NO_AGENT
 
@@ -427,7 +424,20 @@ def matchmaker_drain_queue() -> dict:
     Returns:
         Queue processing counts, including quarantined and deferred tickets.
     """
+    from apps.support.availability_runtime import log_runtime_rejection, may_assign
     from apps.support.queue_service import get_eligible_agents
+
+    if not may_assign():
+        log_runtime_rejection("matchmaker_drain_queue")
+        total_pending = _active_queue().count()
+        return {
+            "assigned": 0,
+            "remaining": total_pending,
+            "total_pending": total_pending,
+            "quarantined": 0,
+            "deferred": 0,
+            "skipped_assignment_disabled": True,
+        }
 
     total_pending = _active_queue().count()
 
@@ -516,12 +526,9 @@ def enqueue_new_ticket(
         NewConversation instance if enqueued, None if ineligible.
     """
     from apps.support.auto_assign_service import _is_ticket_eligible, _parse_hubspot_timestamp
-    from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
-        log_runtime_rejection,
-    )
+    from apps.support.availability_runtime import log_runtime_rejection, may_ingest_queue
 
-    if not is_auto_assignment_runtime_allowed():
+    if not may_ingest_queue():
         log_runtime_rejection("enqueue_new_ticket")
         return None
 

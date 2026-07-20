@@ -65,6 +65,26 @@ class AgentAdmin(admin.ModelAdmin):
         "sat_last_count_sync_at",
     )
 
+    def save_model(self, request, obj, form, change) -> None:
+        """Reject agent writes from a non-authoritative Django Admin runtime."""
+        from django.core.exceptions import PermissionDenied
+
+        from apps.support.availability_runtime import may_write_routing_state
+
+        if not may_write_routing_state():
+            raise PermissionDenied("This runtime cannot mutate support routing state.")
+        super().save_model(request, obj, form, change)
+
+    def delete_model(self, request, obj) -> None:
+        """Reject agent deletion from a non-authoritative Django Admin runtime."""
+        from django.core.exceptions import PermissionDenied
+
+        from apps.support.availability_runtime import may_write_routing_state
+
+        if not may_write_routing_state():
+            raise PermissionDenied("This runtime cannot mutate support routing state.")
+        super().delete_model(request, obj)
+
 
 @admin.register(AgentStatusHistory)
 class AgentStatusHistoryAdmin(admin.ModelAdmin):

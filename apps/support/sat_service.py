@@ -626,7 +626,15 @@ def sat_reconcile_agent_load(agent) -> int:
         The effective chat count to use for capacity decisions.
     """
     from apps.integrations.hubspot.client import get_hubspot_client
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
     from apps.support.models import Agent
+
+    if not may_write_routing_state():
+        log_runtime_rejection("sat_reconcile_agent_load")
+        return agent.current_simultaneous_chats
 
     client = get_hubspot_client()
 
@@ -762,7 +770,15 @@ def sat_reset_daily_counters() -> dict:
     Returns:
         Dict with ``agents_reset`` count.
     """
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
     from apps.support.models import Agent, AgentDailyTimeLog
+
+    if not may_write_routing_state():
+        log_runtime_rejection("sat_reset_daily_counters")
+        return {"agents_reset": 0, "skipped_non_authoritative_runtime": True}
 
     yesterday = timezone.localdate() - timezone.timedelta(days=1)
     now = timezone.now()

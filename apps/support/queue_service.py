@@ -52,6 +52,14 @@ def get_eligible_agents() -> list[Agent]:
         filters["availability_observed_at__gte"] = timezone.now() - timezone.timedelta(
             seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS)
         )
+    from apps.support.availability_runtime import (
+        automatic_assignment_canary_agent_ids,
+        is_automatic_assignment_canary_configured,
+    )
+
+    canary_agent_ids = automatic_assignment_canary_agent_ids()
+    if is_automatic_assignment_canary_configured():
+        filters["id__in"] = canary_agent_ids
 
     eligible = list(
         Agent.objects.filter(**filters)
@@ -143,6 +151,10 @@ def increment_agent_chat_count(agent: Agent) -> None:
     """
     from django.db.models import F
 
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("increment_agent_chat_count")
+
     now = timezone.now()
     Agent.objects.filter(pk=agent.pk).update(
         current_simultaneous_chats=F("current_simultaneous_chats") + 1,
@@ -166,6 +178,9 @@ def decrement_agent_chat_count(agent: Agent) -> None:
     from django.db.models import F, Value
     from django.db.models.functions import Greatest
 
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("decrement_agent_chat_count")
     Agent.objects.filter(pk=agent.pk).update(
         current_simultaneous_chats=Greatest(F("current_simultaneous_chats") - 1, Value(0)),
         updated_at=timezone.now(),

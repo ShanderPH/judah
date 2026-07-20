@@ -64,7 +64,15 @@ def task_sat_reset_daily_counters() -> dict:
 
     Should run at 00:01 AM (America/Sao_Paulo).
     """
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
     from apps.support.sat_service import sat_reset_daily_counters
+
+    if not may_write_routing_state():
+        log_runtime_rejection("sat_reset_daily_counters")
+        return {"agents_reset": 0, "skipped_non_authoritative_runtime": True}
 
     result = sat_reset_daily_counters()
     logger.info("task_sat_reset_daily_counters_done", **result)
@@ -102,12 +110,13 @@ def task_matchmaker_assign_single(
     from django.core.cache import cache
 
     from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
         log_runtime_rejection,
+        may_assign,
+        may_ingest_queue,
     )
     from apps.support.matchmaker_service import enqueue_new_ticket, matchmaker_assign_next
 
-    if not is_auto_assignment_runtime_allowed():
+    if not may_ingest_queue():
         log_runtime_rejection("task_matchmaker_assign_single")
         return False
 
@@ -123,6 +132,12 @@ def task_matchmaker_assign_single(
     try:
         new_conv = enqueue_new_ticket(hubspot_ticket_id, entered_at_ms)
         if new_conv is None:
+            return False
+        if not may_assign():
+            logger.info(
+                "task_matchmaker_assignment_disabled_queue_preserved",
+                ticket_id=hubspot_ticket_id,
+            )
             return False
 
         # HubSpot does not publish user availability-change webhooks. A real
@@ -187,15 +202,7 @@ def task_matchmaker_drain_queue() -> dict:
     from django.core.cache import cache
 
     from apps.support.agent_sync_service import is_business_hours
-    from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
-        log_runtime_rejection,
-    )
     from apps.support.matchmaker_service import matchmaker_drain_queue
-
-    if not is_auto_assignment_runtime_allowed():
-        log_runtime_rejection("task_matchmaker_drain_queue")
-        return {"skipped_non_authoritative_runtime": True}
 
     if not is_business_hours():
         return {"skipped_off_hours": True}
@@ -234,6 +241,14 @@ def task_handle_ticket_closed(
         owner_id: HubSpot owner ID at the time of closure.
     """
     from apps.support.auto_assign_service import handle_ticket_closed
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+
+    if not may_write_routing_state():
+        log_runtime_rejection("task_handle_ticket_closed")
+        return
 
     try:
         handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
@@ -270,6 +285,14 @@ def task_handle_owner_change(
     from django.core.cache import cache
 
     from apps.support.auto_assign_service import _safe_parse_owner_id
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+
+    if not may_write_routing_state():
+        log_runtime_rejection("task_handle_owner_change")
+        return
 
     try:
         previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
@@ -325,9 +348,11 @@ def _do_handle_owner_change(
 
     from django.db import transaction
 
+    from apps.support.availability_runtime import require_routing_writer_authority
     from apps.support.models import Agent, AssignedConversation, ConversationReassignment
     from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
 
+    require_routing_writer_authority("task_handle_owner_change")
     logger.info(
         "task_owner_change_processing",
         ticket_id=hubspot_ticket_id,
@@ -524,6 +549,18 @@ def task_reconcile_agent_counts() -> dict:
         Dict with ``agents_checked``, ``corrections`` counts.
     """
     from apps.support.agent_sync_service import is_business_hours
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+
+    if not may_write_routing_state():
+        log_runtime_rejection("task_reconcile_agent_counts")
+        return {
+            "agents_checked": 0,
+            "corrections": 0,
+            "skipped_non_authoritative_runtime": True,
+        }
 
     if not is_business_hours():
         return {"skipped_off_hours": True}

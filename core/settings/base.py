@@ -185,7 +185,11 @@ AVAILABILITY_AUTHORITY_ENVIRONMENT = config(
     "AVAILABILITY_AUTHORITY_ENVIRONMENT",
     default="production",
 )
-AUTO_ASSIGNMENT_ENABLED = config("AUTO_ASSIGNMENT_ENABLED", default=True, cast=bool)
+# Fail closed globally. Environment-specific settings must opt in explicitly.
+AUTO_ASSIGNMENT_ENABLED = config("AUTO_ASSIGNMENT_ENABLED", default=False, cast=bool)
+AUTO_ASSIGNMENT_CANARY_AGENT_IDS = tuple(
+    value.strip() for value in config("AUTO_ASSIGNMENT_CANARY_AGENT_IDS", default="", cast=Csv()) if value.strip()
+)
 ABSENCE_SAFE_ELIGIBILITY_SHADOW = config(
     "ABSENCE_SAFE_ELIGIBILITY_SHADOW",
     default=_RUNTIME_DJANGO_ENV == "production",

@@ -102,6 +102,9 @@ def create_agent(request, payload: CreateAgentRequest) -> tuple[int, Agent]:
     start in OFFLINE status with the SAT system controlling availability
     transitions afterwards.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_create_agent")
     if Agent.objects.filter(hubspot_owner_id=payload.hubspot_owner_id).exists():
         raise ConflictError(f"Agent with hubspot_owner_id={payload.hubspot_owner_id} already exists.")
     if Agent.objects.filter(agent_email__iexact=payload.agent_email).exists():
@@ -127,6 +130,9 @@ def create_agent(request, payload: CreateAgentRequest) -> tuple[int, Agent]:
 @require_manager_or_admin
 def update_agent(request, agent_id: str, payload: UpdateAgentRequest) -> Agent:
     """Partially update an agent (capacity, schedule flags, activation)."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_update_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -174,6 +180,9 @@ def inactivate_agent(request, agent_id: str) -> Agent:
     remain auditable. A new agent with the same email/owner cannot be
     re-created until the previous record is reactivated.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_inactivate_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -195,6 +204,9 @@ def inactivate_agent(request, agent_id: str) -> Agent:
 @require_manager_or_admin
 def reactivate_agent(request, agent_id: str) -> Agent:
     """Reactivate a previously disabled agent."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_reactivate_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -431,6 +443,9 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
     """Move a ticket from ``new_conversations`` directly to ``assigned_conversations``
     for the agent identified by ``agent_id`` regardless of the round-robin order.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_manual_assign")
     try:
         agent = Agent.objects.get(pk=payload.agent_id)
     except Agent.DoesNotExist as err:
@@ -508,6 +523,9 @@ def _force_reassign_internal(
     actor_email: str | None = None,
 ) -> dict:
     """Force-reassign a ticket already present in assigned_conversations."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_force_reassign")
     _ensure_agent_is_currently_eligible(target_agent)
     assigned = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if not assigned:

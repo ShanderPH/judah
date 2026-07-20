@@ -120,11 +120,12 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
         True if the ticket was successfully assigned, False otherwise.
     """
     from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
         log_runtime_rejection,
+        may_assign,
+        may_ingest_queue,
     )
 
-    if not is_auto_assignment_runtime_allowed():
+    if not may_ingest_queue():
         log_runtime_rejection("process_new_ticket_event")
         return False
 
@@ -164,6 +165,9 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
         reason="Ticket enqueued for automatic assignment.",
     )
 
+    if not may_assign():
+        logger.info("auto_assign_disabled_queue_preserved", ticket_id=hubspot_ticket_id)
+        return False
     return attempt_auto_assign(new_conv, ticket_data)
 
 
@@ -223,6 +227,12 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
+    from apps.support.availability_runtime import log_runtime_rejection, may_assign
+
+    if not may_assign():
+        log_runtime_rejection("attempt_auto_assign")
+        return False
+
     # Matchmaker is the sole automatic assignment implementation. Keeping this
     # compatibility entrypoint prevents legacy callers from bypassing the final
     # eligibility guard and capacity reservation.
@@ -370,6 +380,15 @@ def handle_ticket_closed(
     """
     from django.core.cache import cache
 
+    from apps.support.availability_runtime import (
+        log_runtime_rejection,
+        may_write_routing_state,
+    )
+
+    if not may_write_routing_state():
+        log_runtime_rejection("handle_ticket_closed")
+        return
+
     # Redis dedup lock — prevent concurrent/duplicate calls (e.g., when both
     # Closed-stage timestamp and hs_pipeline_stage webhooks fire for the
     # same closure event).
@@ -509,15 +528,16 @@ def assign_pending_tickets() -> dict:
     Returns:
         Dict with ``assigned``, ``skipped``, ``total_pending`` counts.
     """
-    from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
-        log_runtime_rejection,
-    )
+    from apps.support.availability_runtime import may_assign
     from apps.support.matchmaker_service import matchmaker_drain_queue
 
-    if not is_auto_assignment_runtime_allowed():
-        log_runtime_rejection("assign_pending_tickets")
-        return {"assigned": 0, "skipped": 0, "total_pending": 0}
+    if not may_assign():
+        result = matchmaker_drain_queue()
+        return {
+            "assigned": 0,
+            "skipped": result["remaining"],
+            "total_pending": result["total_pending"],
+        }
 
     result = matchmaker_drain_queue()
     return {
@@ -546,11 +566,12 @@ def sync_novo_stage_tickets() -> dict:
         ``total_from_hubspot`` counts.
     """
     from apps.support.availability_runtime import (
-        is_auto_assignment_runtime_allowed,
         log_runtime_rejection,
+        may_assign,
+        may_reconcile_queue,
     )
 
-    if not is_auto_assignment_runtime_allowed():
+    if not may_reconcile_queue():
         log_runtime_rejection("sync_novo_stage_tickets")
         return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0}
 
@@ -651,7 +672,7 @@ def sync_novo_stage_tickets() -> dict:
     # After populating the queue, immediately try to assign tickets to any
     # agent that is already online — so a sync that runs while agents are
     # available does not require a separate trigger.
-    if created > 0:
+    if created > 0 and may_assign():
         assign_result = assign_pending_tickets()
         logger.info(
             "sync_novo_auto_assign_triggered",

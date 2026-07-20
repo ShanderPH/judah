@@ -38,6 +38,9 @@ ALLOWED_HOSTS = list(ALLOWED_HOSTS) + _railway_hosts
 
 DEBUG = False
 
+# Deliberately no permissive production override: base.py defaults automatic
+# assignment to False when AUTO_ASSIGNMENT_ENABLED is absent.
+
 # Railway terminates TLS at its edge proxy and forwards requests over plain
 # HTTP internally.  Without SECURE_PROXY_SSL_HEADER Django treats every
 # request as insecure and SECURE_SSL_REDIRECT creates an infinite loop.

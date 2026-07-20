@@ -78,6 +78,12 @@ def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | Non
 
     Non-blocking — dispatches a Celery task and returns immediately.
     """
+    from apps.support.availability_runtime import log_runtime_rejection, may_ingest_queue
+
+    if not may_ingest_queue():
+        log_runtime_rejection("hubspot_ticket_entered_novo")
+        return
+
     logger.info("hubspot_ticket_entered_novo", ticket_id=hubspot_ticket_id, entered_at_ms=entered_at_ms)
 
     from apps.support.tasks import task_matchmaker_assign_single

@@ -22,6 +22,10 @@ EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
+# Local development may ingest only when explicitly configured as the
+# authoritative environment, but automatic owner mutation remains opt-in.
+AUTO_ASSIGNMENT_ENABLED = config("AUTO_ASSIGNMENT_ENABLED", default=False, cast=bool)
+
 # ---------------------------------------------------------------------------
 # Logging overrides for development
 # ---------------------------------------------------------------------------
