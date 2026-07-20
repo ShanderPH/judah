@@ -44,6 +44,7 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
         hubspot_ticket_id=ticket_id,
         pipeline_id="636459134",
         entered_queue_at=timezone.now() - timedelta(minutes=minutes_ago),
+        automatic_assignment_eligible=True,
     )
 
 

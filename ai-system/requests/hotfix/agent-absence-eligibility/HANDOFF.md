@@ -64,3 +64,17 @@ git diff --check
 - Manter `ABSENCE_SAFE_ELIGIBILITY_ENFORCED=true` antes de canário.
 - Validar role/application name no readiness após deploy.
 - Monitorar tentativas travadas e executar `repair_assignment_attempts` se necessário.
+
+## Gate F — limite persistente de novos tickets
+
+- Migration `support.0018` adiciona
+  `NewConversation.automatic_assignment_eligible` com default seguro `false`.
+- Registros existentes e tickets criados por reconciliação/backfill permanecem
+  fora de toda consulta de drain, reserva e backoff.
+- Somente uma nova linha criada pela ingestão canônica do webhook recebe
+  `automatic_assignment_eligible=true`.
+- Duplicatas de registros antigos não são promovidas por um webhook tardio.
+- Suíte local pós-correção: `430 passed`; Ruff, mypy, missing migrations e
+  `git diff --check` aprovados.
+- Não fazer merge antes de a migration `0018` e os testes do gate estarem no
+  head verde da PR 75.

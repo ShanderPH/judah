@@ -97,6 +97,7 @@ class TestQueueSafeControls:
         NewConversation.objects.create(
             hubspot_ticket_id="GATE-B-DRAIN",
             entered_queue_at=timezone.now(),
+            automatic_assignment_eligible=True,
         )
 
         from apps.support.matchmaker_service import matchmaker_drain_queue

@@ -1,13 +1,12 @@
 request: hotfix/agent-absence-eligibility
 cycle: F
-state: VERIFY
+state: IMPLEMENT
 opened_at: 2026-07-17T15:24:48-03:00
-last_update: 2026-07-20T14:32:34-03:00
+last_update: 2026-07-20T15:58:54-03:00
 agent_run_id: codex-root
 current_blockers:
-  - "OPS-09 shared-environment roles, grants, credential rotation, migrations, and feature flags require Felipe's explicit approval."
-  - "Gate F rollout requires Felipe's explicit deployment approval after PR review."
-next_action: "Felipe: review PR 75 and 03-verification/04-pr75-gates-c-d-e.md; approve Gate F separately if rollout should begin."
+  - "PR 75 must not merge until the new-ticket-only rollout gate is committed, pushed, and green."
+next_action: "Codex: publish migration 0018 and the persistent new-ticket assignment gate to PR 75; Felipe merges only after final green checks."
 artifacts_generated:
   - 00-context/production-diagnosis.md
   - 00-context/ops-prerequisite-revalidation.md
@@ -23,6 +22,7 @@ artifacts_generated:
   - 03-verification/02-pr75-gate-a.md
   - 03-verification/03-pr75-gate-b.md
   - 03-verification/04-pr75-gates-c-d-e.md
+  - 03-verification/05-pr75-gate-f-new-ticket-boundary.md
   - 05-deployment/rollout.md
   - HANDOFF.md
-verification_runs: 79
+verification_runs: 81

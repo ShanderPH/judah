@@ -252,6 +252,7 @@ class TestAssignmentFinalGuard:
         NewConversation.objects.create(
             hubspot_ticket_id="ABSENCE-RACE",
             entered_queue_at=timezone.now(),
+            automatic_assignment_eligible=True,
         )
 
         from apps.support.matchmaker_service import matchmaker_assign_next
@@ -293,6 +294,7 @@ class TestAssignmentFinalGuard:
         NewConversation.objects.create(
             hubspot_ticket_id="REMOTE-AWAY-RACE",
             entered_queue_at=timezone.now(),
+            automatic_assignment_eligible=True,
         )
 
         from apps.support.matchmaker_service import matchmaker_assign_next

@@ -56,6 +56,7 @@ def _queue(ticket_id: str = "9001") -> NewConversation:
     return NewConversation.objects.create(
         hubspot_ticket_id=ticket_id,
         entered_queue_at=timezone.now() - timedelta(minutes=2),
+        automatic_assignment_eligible=True,
     )
 
 

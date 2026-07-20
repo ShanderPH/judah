@@ -13,17 +13,21 @@ Required approved sequence:
    set a unique `application_name` per Railway service;
 6. apply migrations `support.0015` and `support.0016` using only the schema
    migration identity;
-7. deploy shadow with `AUTO_ASSIGNMENT_ENABLED=false`,
-   `ABSENCE_SAFE_ELIGIBILITY_SHADOW=true`, and ingestion/reconciliation active;
-8. validate one business day of decision telemetry and queue age/depth;
-9. explicitly approve a canary with enforced eligibility, automatic assignment
-   enabled, and `AUTO_ASSIGNMENT_CANARY_AGENT_IDS` set to local Agent UUIDs;
-10. observe queue depth, heartbeat age, writer conflicts, and final-guard
-   rejections.
+7. Felipe's 2026-07-20 Gate F approval selects direct enforced assignment:
+   `AUTO_ASSIGNMENT_ENABLED=true`,
+   `ABSENCE_SAFE_ELIGIBILITY_SHADOW=false`, and
+   `ABSENCE_SAFE_ELIGIBILITY_ENFORCED=true`;
+8. migration `support.0018` keeps every pre-deploy/backfilled queue row
+   `automatic_assignment_eligible=false`;
+9. only the canonical live webhook ingestion path may create a queue row with
+   `automatic_assignment_eligible=true`;
+10. observe queue depth, heartbeat age, writer conflicts, final-guard
+    rejections, and prove that the pre-deploy backlog has zero assignment
+    attempts.
 
-Removing the canary allowlist or enabling full assignment requires a separate
-explicit rollout action. No shared-environment credential, role, migration, or
-feature-flag mutation is authorized by this document.
+Felipe explicitly authorized the production roles, migrations, feature flags,
+and direct enforcement on 2026-07-20. Felipe retains sole responsibility for
+merging PR 75. Codex must not merge the pull request.
 
 Nathan must remain `auto_assign_enabled=true`. His out-of-office interval makes
 him ineligible today; after the interval ends, HubSpot availability, working

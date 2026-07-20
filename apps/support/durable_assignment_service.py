@@ -104,10 +104,11 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
     now = timezone.now()
     ready = (
         NewConversation.objects.filter(
+            automatic_assignment_eligible=True,
             queue_status__in=(
                 NewConversation.QueueStatus.PENDING,
                 NewConversation.QueueStatus.QUEUED,
-            )
+            ),
         )
         .filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=now))
         .filter(Q(claim_expires_at__isnull=True) | Q(claim_expires_at__lte=now))
@@ -133,10 +134,11 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
             database_now = _database_now()
             ready = (
                 NewConversation.objects.filter(
+                    automatic_assignment_eligible=True,
                     queue_status__in=(
                         NewConversation.QueueStatus.PENDING,
                         NewConversation.QueueStatus.QUEUED,
-                    )
+                    ),
                 )
                 .filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=database_now))
                 .filter(Q(claim_expires_at__isnull=True) | Q(claim_expires_at__lte=database_now))
@@ -329,10 +331,11 @@ def _defer_without_candidate(ticket_id: str | None) -> None:
     """Back off a queue row without blocking later ready tickets."""
     now = timezone.now()
     rows = NewConversation.objects.filter(
+        automatic_assignment_eligible=True,
         queue_status__in=(
             NewConversation.QueueStatus.PENDING,
             NewConversation.QueueStatus.QUEUED,
-        )
+        ),
     )
     if ticket_id is not None:
         rows = rows.filter(hubspot_ticket_id=ticket_id)

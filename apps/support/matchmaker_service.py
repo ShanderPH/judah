@@ -27,12 +27,13 @@ class AssignmentOutcome(StrEnum):
 
 
 def _active_queue():
-    """Return queue rows that have not been quarantined."""
+    """Return post-rollout queue rows that have not been quarantined."""
     return NewConversation.objects.filter(
+        automatic_assignment_eligible=True,
         queue_status__in=(
             NewConversation.QueueStatus.PENDING,
             NewConversation.QueueStatus.QUEUED,
-        )
+        ),
     )
 
 
@@ -169,10 +170,12 @@ def enqueue_new_ticket(
             "priority": ticket_data.get("priority") or "",
             "subject": ticket_data.get("subject") or "",
             "entered_queue_at": entered_queue_at,
+            "automatic_assignment_eligible": True,
         },
     )
     if not created and new_conv.can_reactivate:
         new_conv.queue_status = NewConversation.QueueStatus.PENDING
+        new_conv.automatic_assignment_eligible = True
         new_conv.assignment_attempts = 0
         new_conv.last_assignment_attempt_at = None
         new_conv.next_assignment_attempt_at = None
@@ -181,6 +184,7 @@ def enqueue_new_ticket(
         new_conv.save(
             update_fields=[
                 "queue_status",
+                "automatic_assignment_eligible",
                 "assignment_attempts",
                 "last_assignment_attempt_at",
                 "next_assignment_attempt_at",

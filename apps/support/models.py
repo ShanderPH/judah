@@ -307,6 +307,11 @@ class NewConversation(models.Model):
     next_assignment_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
     failure_code = models.CharField(max_length=50, blank=True, default="")
     failure_message = models.TextField(blank=True, default="")
+    automatic_assignment_eligible = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True only for tickets ingested by the live webhook path after the rollout gate.",
+    )
     claim_owner_token = models.CharField(max_length=64, blank=True, default="")
     claim_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     claimed_at = models.DateTimeField(null=True, blank=True)

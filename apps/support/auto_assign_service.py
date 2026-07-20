@@ -149,6 +149,7 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
             "priority": ticket_data.get("priority") or "",
             "subject": ticket_data.get("subject") or "",
             "entered_queue_at": entered_queue_at,
+            "automatic_assignment_eligible": True,
         },
     )
     if not created:
@@ -496,6 +497,7 @@ def sync_novo_stage_tickets() -> dict:
             conversation = existing_pending[ticket_id]
             if conversation.can_reactivate:
                 conversation.queue_status = NewConversation.QueueStatus.PENDING
+                conversation.automatic_assignment_eligible = False
                 conversation.assignment_attempts = 0
                 conversation.last_assignment_attempt_at = None
                 conversation.next_assignment_attempt_at = None
@@ -504,6 +506,7 @@ def sync_novo_stage_tickets() -> dict:
                 conversation.save(
                     update_fields=[
                         "queue_status",
+                        "automatic_assignment_eligible",
                         "assignment_attempts",
                         "last_assignment_attempt_at",
                         "next_assignment_attempt_at",
@@ -533,6 +536,7 @@ def sync_novo_stage_tickets() -> dict:
             priority=ticket.get("priority") or "",
             subject=ticket.get("subject") or "",
             entered_queue_at=entered_at,
+            automatic_assignment_eligible=False,
         )
         created += 1
         logger.info(

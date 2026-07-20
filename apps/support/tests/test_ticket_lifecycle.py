@@ -301,6 +301,7 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T020",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # FirstAgent is actually at capacity per HubSpot (5); SecondAgent is not (1).
@@ -333,6 +334,7 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T021",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # Both agents at or above capacity after reconciliation
