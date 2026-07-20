@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+from common.database_safety import assert_safe_test_database
+
+assert_safe_test_database(os.environ.get("DATABASE_URL", ""))
 
 
 @pytest.fixture(scope="session")
@@ -13,9 +19,9 @@ def django_db_setup(django_db_setup, django_db_blocker):
     creates a fresh test database file and this fixture applies migrations so the
     schema is present before any test runs.
 
-    For PostgreSQL/Supabase (used in CI), Django's default create/destroy lifecycle
-    is skipped. The database is expected to exist and be migrated beforehand, and
-    each test runs inside a transaction that is rolled back afterward.
+    For PostgreSQL CI runs, pytest-django's dependency above creates and migrates
+    a separate ``test_`` database. The module-level safety assertion rejects
+    remote hosts and non-disposable database names before setup can begin.
     """
     from django.db import connections
 
@@ -27,8 +33,7 @@ def django_db_setup(django_db_setup, django_db_blocker):
             call_command("migrate", "--run-syncdb", verbosity=0)
         return
 
-    # PostgreSQL/Supabase: rely on the existing migrated database. Django wraps
-    # each test in a transaction; production data is never modified permanently.
+    # PostgreSQL setup and teardown are owned by pytest-django.
 
 
 @pytest.fixture(autouse=True)
