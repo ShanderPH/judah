@@ -92,3 +92,25 @@ git diff --check
 - Feriados usam a faixa de domingo, 08:00–12:00, salvo override explícito.
 - Tercio Augusto está ativo, com autoatribuição habilitada e capacidade 4.
 - Validação: `434 passed, 3 skipped`, cobertura `64.76%`, Ruff e mypy limpos.
+
+## Follow-up — drift de `last_assignment_at`
+
+- O heartbeat SAT regravava o modelo `Agent` inteiro e avançava em três horas o
+  `last_assignment_at` legado a cada ciclo.
+- A causa estrutural é `agents.last_assignment_at` como `timestamp without time
+  zone` em produção com Django `USE_TZ=True`.
+- O SAT agora usa uma allowlist explícita em `update_fields` e não toca campos
+  de atribuição.
+- `support.0019` converte a coluna para `timestamp with time zone` de forma
+  idempotente, com rollback para UTC-naive.
+- O Supabase MCP aplicou a alteração administrativa preservando atomicamente a
+  view `v_agent_performance_realtime`; a coluna está timezone-aware em produção.
+- Os agentes foram restaurados via `assignment_logs` e permaneceram sem drift
+  após mais de dois ciclos SAT; seis agentes estão elegíveis.
+- O deploy ainda é necessário para levar a allowlist do SAT e registrar
+  `support.0019` no histórico Django.
+- Ticket `46934213935` revelou um incidente separado de duplicidade: uma
+  tentativa concluída para Esther e outra `external_applied` para Raphael. O
+  reparador em lote aborta ao encontrar a constraint de ticket já concluído.
+- Validação local: `435 passed, 3 skipped`, cobertura `64.77%`, Ruff e diff
+  limpos; mypy bloqueado pelo erro interno do plugin Django existente.

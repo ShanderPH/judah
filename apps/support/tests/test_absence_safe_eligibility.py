@@ -246,6 +246,42 @@ class TestAuthoritativeReconciliation:
         assert agent.remote_working_hours == []
         assert agent.remote_timezone == ""
 
+    @override_settings(
+        ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+        AVAILABILITY_REQUIRED_SAMPLES=1,
+        AVAILABILITY_STABLE_SECONDS=0,
+    )
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_heartbeat_does_not_rewrite_assignment_timestamp(
+        self,
+        mock_client_fn: MagicMock,
+        _mock_business_hours: MagicMock,
+    ) -> None:
+        agent = _agent()
+        assigned_at = timezone.now() - timedelta(days=1)
+        Agent.objects.filter(pk=agent.pk).update(last_assignment_at=assigned_at)
+        mock_client_fn.return_value.get_all_owners_availability.return_value = [_hubspot_user()]
+
+        original_save = Agent.save
+        observed_update_fields: list[set[str] | None] = []
+
+        def save_with_capture(instance: Agent, *args, **kwargs) -> None:
+            update_fields = kwargs.get("update_fields")
+            observed_update_fields.append(set(update_fields) if update_fields is not None else None)
+            original_save(instance, *args, **kwargs)
+
+        from apps.support.sat_service import sat_heartbeat
+
+        with patch.object(Agent, "save", new=save_with_capture):
+            sat_heartbeat(task_id="preserve-assignment-clock")
+
+        agent.refresh_from_db()
+        assert agent.last_assignment_at == assigned_at
+        assert observed_update_fields
+        assert all(fields is not None for fields in observed_update_fields)
+        assert all("last_assignment_at" not in fields for fields in observed_update_fields if fields is not None)
+
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     @patch("apps.integrations.hubspot.client.get_hubspot_client")
     def test_heartbeat_skips_outside_local_schedule(

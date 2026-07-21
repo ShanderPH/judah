@@ -38,6 +38,29 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_SAT_AGENT_UPDATE_FIELDS = (
+    "availability_revision",
+    "availability_fencing_token",
+    "availability_writer_id",
+    "availability_observed_at",
+    "availability_online_since",
+    "availability_sample_count",
+    "remote_availability_status",
+    "eligibility_state",
+    "eligibility_reason",
+    "eligibility_evaluated_at",
+    "sat_last_heartbeat_at",
+    "updated_at",
+    "hubspot_user_id",
+    "remote_out_of_office_hours",
+    "remote_working_hours",
+    "remote_timezone",
+    "status_enum",
+    "last_status_change_at",
+    "online_time_seconds_today",
+    "away_time_seconds_today",
+)
+
 
 def _acquire_reconciliation_lease() -> tuple[str, int] | None:
     """Acquire the singleton database lease and return its token/generation."""
@@ -324,7 +347,10 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 ):
                     agents_came_online += 1
 
-                agent.save()
+                # The SAT owns availability fields only. A full model save can
+                # rewrite legacy timestamp-without-time-zone columns such as
+                # last_assignment_at and corrupt the fair-queue ordering.
+                agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
                 AgentAvailabilityDecision.objects.create(
                     agent=agent,
                     revision=agent.availability_revision,
