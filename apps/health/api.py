@@ -98,6 +98,16 @@ def readiness_check(request) -> JsonResponse:
         runtime_environment,
     )
 
+    try:
+        from apps.support.assignment_readiness import _conversation_cycle_checks
+
+        conversation_cycles = _conversation_cycle_checks()
+    except Exception as exc:
+        conversation_cycles = {
+            "enforcement_ready": False,
+            "error": type(exc).__name__,
+        }
+
     body = {
         "status": "healthy" if all_ok else "degraded",
         "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -111,6 +121,7 @@ def readiness_check(request) -> JsonResponse:
             "auto_assignment_enabled": bool(settings.AUTO_ASSIGNMENT_ENABLED),
             "absence_safe_eligibility_shadow": bool(settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW),
             "absence_safe_eligibility_enforced": bool(settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED),
+            "conversation_cycles": conversation_cycles,
         },
     }
     return JsonResponse(body, status=200 if all_ok else 503)

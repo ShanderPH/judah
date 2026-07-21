@@ -45,6 +45,7 @@ class TestQueueSafeControls:
             "id": "GATE-B-QUEUE",
             "pipeline": "636459134",
             "owner_id": "",
+            "entered_novo_at": "1711900000000",
         }
 
         from apps.support.tasks import task_matchmaker_assign_single
@@ -68,6 +69,7 @@ class TestQueueSafeControls:
                 "id": "GATE-B-BACKLOG",
                 "pipeline": "636459134",
                 "owner_id": "",
+                "entered_novo_at": "1711900000000",
             }
         ]
 

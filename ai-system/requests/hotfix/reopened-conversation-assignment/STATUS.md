@@ -1,0 +1,50 @@
+request: hotfix/reopened-conversation-assignment
+cycle: F
+state: DONE
+opened_at: 2026-07-21T10:57:40-03:00
+last_update: 2026-07-21T19:20:00-03:00
+agent_run_id: codex-g1-production
+current_blockers: []
+next_action: "Felipe: revisar G1 e autorizar separadamente o dry-run read-only do backfill em producao; enforcement permanece desligado."
+artifacts_generated:
+  - 00-context/research.md
+  - 00-context/legacy-cycle-profile.md
+  - 01-plan/master-plan.md
+  - 02-artifacts/backend/BE-01-conversation-cycle-service.md
+  - 02-artifacts/database/DB-01-legacy-cycle-profile.md
+  - HANDOFF.md
+  - apps/support/conversation_cycle_service.py
+  - apps/support/legacy_cycle_profile.py
+  - apps/support/management/commands/profile_legacy_cycles.py
+  - apps/support/tests/test_conversation_cycles.py
+  - apps/support/tests/test_legacy_cycle_profile.py
+  - 02-artifacts/database/DB-02-conversation-cycle-expansion.md
+  - 02-artifacts/backend/BE-02-cycle-dual-write-readiness.md
+  - 03-verification/01-gate-b.md
+  - apps/support/migrations/0020_conversation_cycles_expand.py
+  - apps/support/tests/test_conversation_cycle_migration.py
+  - apps/support/tests/test_conversation_cycle_model.py
+  - apps/support/tests/test_cycle_dual_write.py
+  - apps/support/tests/test_cycle_readiness.py
+  - 02-artifacts/backend/INT-01-hubspot-cycle-occurrence.md
+  - 02-artifacts/backend/BE-03-04-cycle-aware-assignment.md
+  - 03-verification/02-gate-c.md
+  - apps/support/migrations/0021_cycle_assignment_invariants.py
+  - 02-artifacts/backend/BE-05-07-gate-d-consumers.md
+  - 03-verification/03-gate-d.md
+  - apps/support/migrations/0022_closed_conversation_multi_cycle.py
+  - apps/support/tests/test_gate_d_cycle_consumers.py
+  - apps/support/legacy_cycle_backfill.py
+  - apps/support/management/commands/backfill_conversation_cycles.py
+  - apps/support/migrations/0023_cycle_backfill_contract.py
+  - apps/support/tests/test_legacy_cycle_backfill.py
+  - 02-artifacts/database/DB-03-04-gate-e.md
+  - 03-verification/04-gate-e.md
+  - apps/support/tests/test_gate_e_contract_migration.py
+  - 03-verification/05-gate-f.md
+  - docs/operations/absence-safe-assignment.md
+  - 05-deployment/01-gate-g-rollout.md
+  - 03-verification/06-gate-g.md
+  - apps/health/api.py
+  - 05-deployment/02-g1-production.md
+verification_runs: 18

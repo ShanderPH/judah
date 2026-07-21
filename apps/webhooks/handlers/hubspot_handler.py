@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import structlog
 from django.conf import settings
+from django.db import transaction
 
 logger = structlog.get_logger(__name__)
 
@@ -34,7 +35,8 @@ def handle_hubspot_event(event) -> None:
     logger.info("hubspot_event_received", event_type=event_type, event_id=event.pk)
 
     if et_lower.startswith("ticket."):
-        _handle_ticket_event(event_type, payload)
+        provider_event_id = getattr(event, "event_id", "")
+        _handle_ticket_event(event_type, payload, source_event_id=str(provider_event_id or event.pk))
     elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
     elif et_lower.startswith("conversation."):
@@ -45,7 +47,7 @@ def handle_hubspot_event(event) -> None:
         logger.debug("hubspot_event_unhandled", event_type=event_type)
 
 
-def _handle_ticket_event(event_type: str, payload: dict) -> None:
+def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str = "") -> None:
     """Process ticket-related HubSpot events."""
     object_id = str(payload.get("objectId", ""))
     if not object_id:
@@ -56,7 +58,7 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
 
     if event_type == "ticket.propertyChange":
         if property_name == _PROP_STAGE_NOVO:
-            _handle_ticket_entered_novo(object_id, property_value)
+            _handle_ticket_entered_novo(object_id, property_value, source_event_id=source_event_id)
 
         elif property_name == _PROP_STAGE_CLOSED:
             _handle_ticket_entered_closed(object_id, property_value, payload)
@@ -73,7 +75,12 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
         logger.debug("hubspot_ticket_event_unhandled", event_type=event_type, ticket_id=object_id)
 
 
-def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | None) -> None:
+def _handle_ticket_entered_novo(
+    hubspot_ticket_id: str,
+    entered_at_ms: str | None,
+    *,
+    source_event_id: str = "",
+) -> None:
     """Dispatch auto-assignment via Matchmaker when a ticket enters NOVO stage.
 
     Non-blocking — dispatches a Celery task and returns immediately.
@@ -88,7 +95,9 @@ def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | Non
 
     from apps.support.tasks import task_matchmaker_assign_single
 
-    task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms)
+    transaction.on_commit(
+        lambda: task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms, source_event_id)
+    )
 
 
 def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:

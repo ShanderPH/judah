@@ -25,6 +25,7 @@ from apps.support.models import (
     AssignmentAttempt,
     AssignmentLog,
     NewConversation,
+    SupportConversationCycle,
 )
 
 logger = structlog.get_logger(__name__)
@@ -44,6 +45,29 @@ class Reservation:
 
     attempt: AssignmentAttempt | None
     reason: str
+
+
+def _attempt_scope(queue_row: NewConversation) -> Q:
+    """Return the durable uniqueness scope for a queue row."""
+    if queue_row.cycle_id is not None:
+        return Q(cycle_id=queue_row.cycle_id)
+    return Q(ticket_id=queue_row.hubspot_ticket_id, cycle__isnull=True)
+
+
+def _assignment_idempotency_key(queue_row: NewConversation, assignment_type: str) -> uuid.UUID:
+    """Build a stable idempotency key from cycle identity when available."""
+    identity = str(queue_row.cycle_id or f"legacy:{queue_row.hubspot_ticket_id}")
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"judah:assignment:{identity}:{assignment_type}")
+
+
+def _lock_assignable_cycle(queue_row: NewConversation) -> SupportConversationCycle | None:
+    """Lock and validate the queue row's cycle before reserving capacity."""
+    if queue_row.cycle_id is None:
+        return None
+    cycle = SupportConversationCycle.objects.select_for_update().get(pk=queue_row.cycle_id)
+    if cycle.state != SupportConversationCycle.State.QUEUED:
+        return None
+    return cycle
 
 
 def _database_now() -> datetime:
@@ -115,12 +139,6 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
     )
     if ticket_id is not None:
         ready = ready.filter(hubspot_ticket_id=ticket_id)
-        completed = AssignmentAttempt.objects.filter(
-            ticket_id=ticket_id,
-            state=AssignmentAttempt.State.COMPLETED,
-        ).first()
-        if completed is not None:
-            return Reservation(completed, "completed")
     if not ready.exists():
         return Reservation(None, "queue_empty_or_claimed")
 
@@ -147,15 +165,22 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                 ready = ready.filter(hubspot_ticket_id=ticket_id)
             queue_row = ready.select_for_update(skip_locked=True).order_by("entered_queue_at", "id").first()
             if queue_row is None:
-                completed = AssignmentAttempt.objects.filter(
-                    ticket_id=ticket_id,
-                    state=AssignmentAttempt.State.COMPLETED,
-                ).first()
-                return Reservation(completed, "completed" if completed else "queue_empty_or_claimed")
+                return Reservation(None, "queue_empty_or_claimed")
+
+            if queue_row.cycle_id is not None and _lock_assignable_cycle(queue_row) is None:
+                return Reservation(None, "skipped_stale_cycle")
+
+            completed = (
+                AssignmentAttempt.objects.select_for_update()
+                .filter(_attempt_scope(queue_row), state=AssignmentAttempt.State.COMPLETED)
+                .first()
+            )
+            if completed is not None:
+                return Reservation(completed, "completed")
 
             existing = (
                 AssignmentAttempt.objects.select_for_update()
-                .filter(ticket_id=queue_row.hubspot_ticket_id, state__in=LIVE_STATES)
+                .filter(_attempt_scope(queue_row), state__in=LIVE_STATES)
                 .first()
             )
             if existing is not None:
@@ -213,8 +238,12 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                 ]
             )
             attempt = AssignmentAttempt.objects.create(
-                idempotency_key=uuid.uuid4(),
+                idempotency_key=_assignment_idempotency_key(
+                    queue_row,
+                    AssignmentAttempt.AssignmentType.AUTOMATIC,
+                ),
                 ticket_id=queue_row.hubspot_ticket_id,
+                cycle=queue_row.cycle,
                 queue_row=queue_row,
                 selected_agent=locked_agent,
                 eligibility_revision=locked_agent.availability_revision,
@@ -224,6 +253,7 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                     "availability_revision": locked_agent.availability_revision,
                     "current_chats_before": locked_agent.current_simultaneous_chats - 1,
                     "max_chats": locked_agent.max_simultaneous_chats or 5,
+                    "cycle_id": str(queue_row.cycle_id) if queue_row.cycle_id else None,
                 },
                 decision_reason=reason,
                 provider_request_classification="hubspot_owner_update",
@@ -266,8 +296,12 @@ def reserve_manual_assignment(
         queue_row = NewConversation.objects.select_for_update().filter(hubspot_ticket_id=ticket_id).first()
         if queue_row is None:
             return Reservation(None, "queue_row_missing")
+        if queue_row.cycle_id is not None and _lock_assignable_cycle(queue_row) is None:
+            return Reservation(None, "skipped_stale_cycle")
         existing = (
-            AssignmentAttempt.objects.select_for_update().filter(ticket_id=ticket_id, state__in=LIVE_STATES).first()
+            AssignmentAttempt.objects.select_for_update()
+            .filter(_attempt_scope(queue_row), state__in=LIVE_STATES)
+            .first()
         )
         if existing is not None:
             return Reservation(existing, "existing_attempt")
@@ -307,8 +341,12 @@ def reserve_manual_assignment(
             ]
         )
         attempt = AssignmentAttempt.objects.create(
-            idempotency_key=uuid.uuid4(),
+            idempotency_key=_assignment_idempotency_key(
+                queue_row,
+                AssignmentAttempt.AssignmentType.MANUAL,
+            ),
             ticket_id=ticket_id,
+            cycle=queue_row.cycle,
             queue_row=queue_row,
             selected_agent=agent,
             eligibility_revision=agent.availability_revision,
@@ -317,6 +355,7 @@ def reserve_manual_assignment(
                 "agent_id": str(agent.pk),
                 "availability_revision": agent.availability_revision,
                 "manual": True,
+                "cycle_id": str(queue_row.cycle_id) if queue_row.cycle_id else None,
             },
             decision_reason=(decision.reason.value if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED else "manual_rollout"),
             assignment_type=AssignmentAttempt.AssignmentType.MANUAL,
@@ -363,9 +402,16 @@ def _defer_without_candidate(ticket_id: str | None) -> None:
 
 def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     """Apply HubSpot mutation and converge the durable attempt."""
-    attempt = AssignmentAttempt.objects.select_related("selected_agent").get(pk=attempt_id)
+    attempt = AssignmentAttempt.objects.select_related("selected_agent", "cycle").get(pk=attempt_id)
     if attempt.state == AssignmentAttempt.State.COMPLETED:
         return "assigned"
+    if attempt.cycle_id is not None and attempt.cycle.state != SupportConversationCycle.State.QUEUED:
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=False,
+            error_code="stale_cycle",
+        )
+        return "skipped_stale_cycle"
     if attempt.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
         finalize_assignment_attempt(attempt.pk)
         return "assigned"
@@ -414,7 +460,7 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
     with transaction.atomic():
         attempt = (
             AssignmentAttempt.objects.select_for_update(of=("self",))
-            .select_related("selected_agent", "queue_row")
+            .select_related("selected_agent", "queue_row", "cycle")
             .get(pk=attempt_id)
         )
         if attempt.state == AssignmentAttempt.State.COMPLETED:
@@ -422,12 +468,20 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
         if attempt.state != AssignmentAttempt.State.EXTERNAL_APPLIED:
             raise ValueError(f"attempt {attempt.pk} is not externally applied")
 
+        cycle = None
+        if attempt.cycle_id is not None:
+            cycle = SupportConversationCycle.objects.select_for_update().get(pk=attempt.cycle_id)
+            if cycle.state != SupportConversationCycle.State.QUEUED:
+                raise ValueError(f"attempt {attempt.pk} belongs to stale cycle {cycle.pk}")
+
         now = _database_now()
         queue_row = attempt.queue_row
         wait_seconds: Decimal | None = None
         if queue_row is not None and queue_row.entered_queue_at:
             wait_seconds = Decimal(str(round((now - queue_row.entered_queue_at).total_seconds(), 2)))
         defaults = {
+            "hubspot_ticket_id": attempt.ticket_id,
+            "cycle": attempt.cycle,
             "agent": attempt.selected_agent,
             "hubspot_owner_id": attempt.desired_hubspot_owner_id,
             "agent_name": attempt.selected_agent.name,
@@ -445,14 +499,15 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
                     "subject": queue_row.subject,
                 }
             )
-        AssignedConversation.objects.update_or_create(
-            hubspot_ticket_id=attempt.ticket_id,
-            defaults=defaults,
-        )
+        assigned_lookup: dict[str, object] = {"hubspot_ticket_id": attempt.ticket_id}
+        if attempt.cycle_id is not None:
+            assigned_lookup = {"cycle_id": attempt.cycle_id}
+        AssignedConversation.objects.update_or_create(defaults=defaults, **assigned_lookup)
         AssignmentLog.objects.update_or_create(
             assignment_attempt=attempt,
             defaults={
                 "ticket_id": attempt.ticket_id,
+                "cycle": attempt.cycle,
                 "agent": attempt.selected_agent,
                 "agent_name": attempt.selected_agent.name,
                 "hubspot_owner_id": attempt.desired_hubspot_owner_id,
@@ -480,6 +535,9 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
                 "updated_at",
             ]
         )
+        if cycle is not None:
+            cycle.state = SupportConversationCycle.State.ASSIGNED
+            cycle.save(update_fields=["state", "updated_at"])
         return attempt
 
 
@@ -531,7 +589,7 @@ def compensate_assignment_attempt(
             attempt.next_retry_at = None
 
         queue_row = attempt.queue_row
-        if queue_row is not None:
+        if queue_row is not None and (attempt.cycle_id is None or queue_row.cycle_id == attempt.cycle_id):
             queue_row.claim_owner_token = ""
             queue_row.claim_expires_at = None
             queue_row.claimed_at = None
@@ -576,7 +634,17 @@ def reconcile_ambiguous_attempt(
     provider_error: HubSpotAPIError | None = None,
 ) -> str:
     """Read the provider owner and converge without assuming mutation failure."""
-    attempt = AssignmentAttempt.objects.get(pk=attempt_id)
+    attempt = AssignmentAttempt.objects.select_related("cycle").get(pk=attempt_id)
+    if attempt.cycle_id is not None and attempt.cycle.state not in (
+        SupportConversationCycle.State.QUEUED,
+        SupportConversationCycle.State.ASSIGNED,
+    ):
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=False,
+            error_code="stale_cycle",
+        )
+        return "skipped_stale_cycle"
     error_code = provider_error.error_code if provider_error else "ambiguous_provider_result"
     if provider_error is not None and error_code == "unknown" and provider_error.external_status is not None:
         error_code = f"hubspot_http_{provider_error.external_status}"
@@ -630,9 +698,11 @@ def reconcile_ambiguous_attempt(
 
 def retry_assignment_attempt(attempt_id: uuid.UUID) -> str:
     """Re-reserve a due retry and execute it without creating another attempt."""
-    attempt = AssignmentAttempt.objects.select_related("selected_agent").get(pk=attempt_id)
+    attempt = AssignmentAttempt.objects.select_related("selected_agent", "cycle").get(pk=attempt_id)
     if attempt.state != AssignmentAttempt.State.RETRYABLE:
         return attempt.state
+    if attempt.cycle_id is not None and attempt.cycle.state != SupportConversationCycle.State.QUEUED:
+        return "skipped_stale_cycle"
     from apps.support.eligibility_service import evaluate_persisted_agent
     from apps.support.sat_service import sat_verify_agent_assignment_eligibility
 
@@ -697,22 +767,62 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
             | Q(state=AssignmentAttempt.State.REPAIR_REQUIRED)
         ).order_by("updated_at")[:limit]
     )
-    counts = {"scanned": len(attempts), "assigned": 0, "retryable": 0, "repair_required": 0}
+    counts = {
+        "scanned": len(attempts),
+        "completed": 0,
+        "retryable": 0,
+        "repair_required": 0,
+        "conflict": 0,
+        "failed_unexpected": 0,
+        "skipped_stale_cycle": 0,
+    }
     for attempt in attempts:
-        if attempt.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
-            outcome = "assigned"
-            finalize_assignment_attempt(attempt.pk)
-        elif attempt.state == AssignmentAttempt.State.RETRYABLE:
-            outcome = retry_assignment_attempt(attempt.pk)
-        else:
-            outcome = reconcile_ambiguous_attempt(attempt.pk)
-        if outcome in counts:
-            counts[outcome] += 1
+        try:
+            with transaction.atomic():
+                locked = AssignmentAttempt.objects.select_for_update(skip_locked=True).filter(pk=attempt.pk).first()
+                if locked is None:
+                    counts["conflict"] += 1
+                    continue
+                if (
+                    locked.cycle_id
+                    and locked.cycle
+                    and locked.cycle.state
+                    in {
+                        SupportConversationCycle.State.CLOSED,
+                        SupportConversationCycle.State.CANCELLED,
+                    }
+                ):
+                    counts["skipped_stale_cycle"] += 1
+                    continue
+                if locked.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
+                    finalize_assignment_attempt(locked.pk)
+                    outcome = "completed"
+                elif locked.state == AssignmentAttempt.State.RETRYABLE:
+                    outcome = retry_assignment_attempt(locked.pk)
+                else:
+                    outcome = reconcile_ambiguous_attempt(locked.pk)
+                if outcome == "assigned":
+                    outcome = "completed"
+                if outcome in counts:
+                    counts[outcome] += 1
+        except Exception as exc:
+            counts["failed_unexpected"] += 1
+            AssignmentAttempt.objects.filter(pk=attempt.pk).update(
+                last_error_code=type(exc).__name__[:64],
+                state=AssignmentAttempt.State.REPAIR_REQUIRED,
+            )
+            logger.exception(
+                "assignment_attempt_repair_item_failed",
+                attempt_id=str(attempt.pk),
+                cycle_id=str(attempt.cycle_id) if attempt.cycle_id else None,
+            )
     return counts
 
 
-def purge_terminal_assignment_attempts(*, days: int = 30, limit: int = 500) -> int:
-    """Delete a bounded batch of terminal attempts older than retention."""
+def purge_terminal_assignment_attempts(*, days: int | None = None, limit: int = 500) -> int:
+    """Delete a bounded batch using the configured audit-retention policy."""
+    if days is None:
+        days = int(getattr(settings, "ASSIGNMENT_ATTEMPT_RETENTION_DAYS", 365))
     cutoff = timezone.now() - timedelta(days=days)
     ids = list(
         AssignmentAttempt.objects.filter(

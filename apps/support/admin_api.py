@@ -486,6 +486,7 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
     return {
         "success": True,
         "hubspot_ticket_id": payload.hubspot_ticket_id,
+        "cycle_id": str(reservation.attempt.cycle_id) if reservation.attempt.cycle_id else None,
         "agent_id": str(agent.id),
         "agent_name": agent.name,
         "detail": "Ticket assigned manually.",
@@ -510,6 +511,7 @@ def _force_reassign_internal(
         return {
             "success": True,
             "hubspot_ticket_id": hubspot_ticket_id,
+            "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
             "agent_id": str(target_agent.id),
             "agent_name": target_agent.name,
             "detail": "Target agent already owns this ticket — no-op.",
@@ -521,11 +523,20 @@ def _force_reassign_internal(
     if assigned.assigned_at:
         duration_with_previous = Decimal(str(round((now - assigned.assigned_at).total_seconds(), 2)))
 
-    _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
-
     with transaction.atomic():
-        ConversationReassignment.objects.create(
+        assigned = AssignedConversation.objects.select_for_update().get(pk=assigned.pk)
+        if assigned.hubspot_owner_id == target_agent.hubspot_owner_id:
+            return {
+                "success": True,
+                "hubspot_ticket_id": hubspot_ticket_id,
+                "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
+                "agent_id": str(target_agent.id),
+                "agent_name": target_agent.name,
+                "detail": "Target agent already owns this ticket â€” no-op.",
+            }
+        reassignment = ConversationReassignment.objects.create(
             hubspot_ticket_id=hubspot_ticket_id,
+            cycle=assigned.cycle,
             from_agent=previous_agent,
             from_hubspot_owner_id=assigned.hubspot_owner_id,
             from_agent_name=assigned.agent_name,
@@ -534,8 +545,15 @@ def _force_reassign_internal(
             to_agent_name=target_agent.name,
             reassigned_at=now,
             time_with_previous_agent_seconds=duration_with_previous,
-            reassignment_source=reason or "admin_force_reassign",
+            reassignment_source=f"{reason or 'admin_force_reassign'}:reserved",
         )
+
+    _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
+
+    with transaction.atomic():
+        assigned = AssignedConversation.objects.select_for_update().get(pk=assigned.pk)
+        reassignment.reassignment_source = reason or "admin_force_reassign"
+        reassignment.save(update_fields=["reassignment_source"])
         assigned.agent = target_agent
         assigned.hubspot_owner_id = target_agent.hubspot_owner_id
         assigned.agent_name = target_agent.name
@@ -553,6 +571,7 @@ def _force_reassign_internal(
         )
         AssignmentLog.objects.create(
             ticket_id=hubspot_ticket_id,
+            cycle=assigned.cycle,
             agent=target_agent,
             agent_name=target_agent.name,
             hubspot_owner_id=target_agent.hubspot_owner_id,
@@ -575,6 +594,7 @@ def _force_reassign_internal(
     return {
         "success": True,
         "hubspot_ticket_id": hubspot_ticket_id,
+        "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
         "agent_id": str(target_agent.id),
         "agent_name": target_agent.name,
         "detail": "Ticket reassigned.",

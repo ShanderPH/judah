@@ -55,6 +55,7 @@ def isolate_db(db):
         ClosedConversation,
         ConversationReassignment,
         NewConversation,
+        SupportConversationCycle,
     )
 
     # Delete in FK-safe order: dependents first, then parent tables.
@@ -66,6 +67,7 @@ def isolate_db(db):
     ClosedConversation.objects.all().delete()
     NewConversation.objects.all().delete()
     AssignmentLog.objects.all().delete()
+    SupportConversationCycle.objects.all().delete()
     AgentMetrics.objects.all().delete()
     AgentStatusHistory.objects.all().delete()
     Agent.objects.all().delete()

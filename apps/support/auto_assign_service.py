@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -29,6 +30,7 @@ from apps.support.models import (
     AssignedConversation,
     ClosedConversation,
     NewConversation,
+    SupportConversationCycle,
 )
 from apps.support.queue_service import decrement_agent_chat_count
 from common.exceptions import ExternalServiceError
@@ -123,37 +125,12 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
         log_runtime_rejection("process_new_ticket_event")
         return False
 
+    from apps.support.matchmaker_service import enqueue_new_ticket
+
     logger.info("auto_assign_new_ticket_event", ticket_id=hubspot_ticket_id)
-
-    # Fetch ticket details from HubSpot
-    try:
-        client = get_hubspot_client()
-        ticket_data = client.get_ticket_details(hubspot_ticket_id)
-    except ExternalServiceError:
-        logger.error("auto_assign_hubspot_fetch_failed", ticket_id=hubspot_ticket_id)
+    new_conv = enqueue_new_ticket(hubspot_ticket_id, entered_at_ms)
+    if new_conv is None:
         return False
-
-    # Validate ticket is eligible for assignment
-    if not _is_ticket_eligible(ticket_data):
-        return False
-
-    entered_queue_at = _parse_hubspot_timestamp(entered_at_ms) or timezone.now()
-
-    # Enqueue in new_conversations (idempotent)
-    new_conv, created = NewConversation.objects.get_or_create(
-        hubspot_ticket_id=hubspot_ticket_id,
-        defaults={
-            "pipeline_id": ticket_data.get("pipeline", SUPPORT_PIPELINE_ID),
-            "contact_name": ticket_data.get("contact_name") or "",
-            "contact_email": ticket_data.get("contact_email") or "",
-            "priority": ticket_data.get("priority") or "",
-            "subject": ticket_data.get("subject") or "",
-            "entered_queue_at": entered_queue_at,
-            "automatic_assignment_eligible": True,
-        },
-    )
-    if not created:
-        logger.info("auto_assign_ticket_already_queued", ticket_id=hubspot_ticket_id)
     _transition_lifecycle_best_effort(
         hubspot_ticket_id,
         ["QUEUE_PENDING"],
@@ -163,7 +140,7 @@ def process_new_ticket_event(hubspot_ticket_id: str, entered_at_ms: str | int | 
     if not may_assign():
         logger.info("auto_assign_disabled_queue_preserved", ticket_id=hubspot_ticket_id)
         return False
-    return attempt_auto_assign(new_conv, ticket_data)
+    return attempt_auto_assign(new_conv)
 
 
 def _is_ticket_eligible(ticket_data: dict) -> bool:
@@ -182,12 +159,21 @@ def _is_ticket_eligible(ticket_data: dict) -> bool:
     ticket_id = ticket_data.get("id", "?")
     pipeline = ticket_data.get("pipeline", "")
     owner_id = ticket_data.get("owner_id", "")
+    stage = ticket_data.get("stage", "")
 
     if str(pipeline) != SUPPORT_PIPELINE_ID:
         logger.info(
             "auto_assign_ticket_wrong_pipeline",
             ticket_id=ticket_id,
             pipeline=pipeline,
+        )
+        return False
+
+    if stage and str(stage) != settings.HUBSPOT_SUPPORT_NEW_STAGE_ID:
+        logger.info(
+            "auto_assign_ticket_not_in_novo",
+            ticket_id=ticket_id,
+            stage=stage,
         )
         return False
 
@@ -291,11 +277,30 @@ def _do_handle_ticket_closed(
     owner_id: str | None = None,
 ) -> None:
     """Internal implementation of ticket closure — called only after dedup lock is held."""
-    closed_at = _parse_hubspot_timestamp(closed_at_ms) or timezone.now()
+    closed_at = _parse_hubspot_timestamp(closed_at_ms)
+    if closed_at is None and bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False)):
+        logger.warning("auto_assign_close_identity_unavailable", ticket_id=hubspot_ticket_id)
+        return
+    closed_at = closed_at or timezone.now()
+
+    active_cycle = (
+        SupportConversationCycle.objects.filter(
+            hubspot_ticket_id=hubspot_ticket_id,
+            state__in=["queued", "assigned", "repair_required"],
+        )
+        .order_by("-entered_stage_at")
+        .first()
+    )
+    if active_cycle is not None and closed_at < active_cycle.entered_stage_at:
+        logger.info("auto_assign_close_stale_cycle", ticket_id=hubspot_ticket_id, cycle_id=str(active_cycle.pk))
+        return
 
     # If the ticket is still pending (never assigned), remove it from the queue
     # so it is not assigned after closure.
-    pending_conv = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
+    pending_qs = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id)
+    if active_cycle is not None:
+        pending_qs = pending_qs.filter(cycle=active_cycle)
+    pending_conv = pending_qs.first()
     if pending_conv:
         pending_conv.delete()
         logger.info("auto_assign_pending_deleted_on_close", ticket_id=hubspot_ticket_id)
@@ -314,7 +319,10 @@ def _do_handle_ticket_closed(
     # DoesNotExist which falls through to the minimal ClosedConversation path.
     try:
         with transaction.atomic():
-            assigned = AssignedConversation.objects.select_for_update().get(hubspot_ticket_id=hubspot_ticket_id)
+            assigned_qs = AssignedConversation.objects.select_for_update().filter(hubspot_ticket_id=hubspot_ticket_id)
+            if active_cycle is not None:
+                assigned_qs = assigned_qs.filter(cycle=active_cycle)
+            assigned = assigned_qs.get()
 
             handle_time: Decimal | None = None
             if assigned.assigned_at:
@@ -341,9 +349,12 @@ def _do_handle_ticket_closed(
                 decrement_agent_chat_count(assigned.agent)
 
             # Move from assigned_conversations → closed_conversations
+            lookup = {"cycle": active_cycle} if active_cycle is not None else {"hubspot_ticket_id": hubspot_ticket_id}
             ClosedConversation.objects.get_or_create(
-                hubspot_ticket_id=hubspot_ticket_id,
+                **lookup,
                 defaults={
+                    "hubspot_ticket_id": hubspot_ticket_id,
+                    "cycle": assigned.cycle,
                     "agent": assigned.agent,
                     "hubspot_owner_id": assigned.hubspot_owner_id,
                     "agent_name": assigned.agent_name,
@@ -364,19 +375,30 @@ def _do_handle_ticket_closed(
                 },
             )
             assigned.delete()
+            if active_cycle is not None:
+                active_cycle.state = SupportConversationCycle.State.CLOSED
+                active_cycle.closed_at = closed_at
+                active_cycle.save(update_fields=["state", "closed_at", "updated_at"])
 
     except AssignedConversation.DoesNotExist:
         # Ticket was closed without ever being assigned (or already processed) —
         # create a minimal closed record so the event is not silently dropped.
         logger.info("auto_assign_close_no_assigned_record", ticket_id=hubspot_ticket_id)
+        lookup = {"cycle": active_cycle} if active_cycle is not None else {"hubspot_ticket_id": hubspot_ticket_id}
         ClosedConversation.objects.get_or_create(
-            hubspot_ticket_id=hubspot_ticket_id,
+            **lookup,
             defaults={
+                "hubspot_ticket_id": hubspot_ticket_id,
+                "cycle": pending_conv.cycle if pending_conv is not None else None,
                 "closed_at": closed_at,
                 "closed_by_owner_id": closing_owner,
                 "closed_by_agent_name": closing_agent_name,
             },
         )
+        if active_cycle is not None:
+            active_cycle.state = SupportConversationCycle.State.CLOSED
+            active_cycle.closed_at = closed_at
+            active_cycle.save(update_fields=["state", "closed_at", "updated_at"])
         _transition_lifecycle_best_effort(
             hubspot_ticket_id,
             ["RESOLVED_BY_HUMAN", "CLOSED"],
@@ -393,6 +415,7 @@ def _do_handle_ticket_closed(
     logger.info(
         "auto_assign_ticket_closed",
         ticket_id=hubspot_ticket_id,
+        cycle_id=str(active_cycle.pk) if active_cycle is not None else None,
         closed_by_owner_id=closing_owner,
         handle_time_minutes=float(handle_time) if handle_time is not None else None,
     )
@@ -526,10 +549,38 @@ def sync_novo_stage_tickets() -> dict:
             already_assigned += 1
             continue
 
-        entered_at = _parse_hubspot_timestamp(ticket.get("entered_novo_at")) or timezone.now()
+        entered_at = _parse_hubspot_timestamp(ticket.get("entered_novo_at"))
+        if entered_at is None:
+            skipped += 1
+            logger.warning("sync_novo_ticket_identity_unavailable", ticket_id=ticket_id)
+            continue
+
+        from apps.support.conversation_cycle_service import (
+            CycleClassification,
+            open_or_get_cycle,
+        )
+
+        cycle_result = open_or_get_cycle(
+            hubspot_ticket_id=ticket_id,
+            entered_stage_value=ticket.get("entered_novo_at"),
+        )
+        cycle = (
+            cycle_result.cycle
+            if cycle_result.admission.classification in (CycleClassification.CREATED, CycleClassification.DUPLICATE)
+            else None
+        )
+        if cycle is None and settings.CONVERSATION_CYCLES_ENFORCED:
+            skipped += 1
+            logger.warning(
+                "sync_novo_ticket_cycle_blocked",
+                ticket_id=ticket_id,
+                classification=cycle_result.admission.classification.value,
+            )
+            continue
 
         NewConversation.objects.create(
             hubspot_ticket_id=ticket_id,
+            cycle=cycle,
             pipeline_id=ticket.get("pipeline") or SUPPORT_PIPELINE_ID,
             contact_name=ticket.get("contact_name") or "",
             contact_email=ticket.get("contact_email") or "",

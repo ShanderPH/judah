@@ -160,3 +160,83 @@ Rollback must not restore fail-open routing:
 4. investigate/repair HubSpot parsing or identity mapping;
 5. restore shadow mode;
 6. re-enable global assignment only after fresh eligibility is healthy.
+
+## Conversation cycles and reopened tickets
+
+A HubSpot ticket may have multiple sequential support cycles. The durable
+identity is the account, ticket and proven NOVO-stage entry timestamp; retries
+of the same occurrence reuse the cycle, while a legitimate entry after closure
+opens another cycle. Queue, assignment, closure, attempts, logs and
+reassignments must carry the same `cycle_id`.
+
+Before enabling `CONVERSATION_CYCLES_ENFORCED`, verify that API, Worker and Beat
+run cycle-aware code and that readiness reports no legacy writers. Never use
+receipt time or `timezone.now()` to manufacture a missing stage occurrence.
+
+### Backfill procedure
+
+The backfill never calls HubSpot or changes ticket owners by default. On a
+staging clone or other explicitly authorized database:
+
+```powershell
+uv run python manage.py backfill_conversation_cycles --dry-run --limit 500 --report gate-e-dry-run.json
+uv run python manage.py backfill_conversation_cycles --after <last-ticket-id> --limit 500 --report gate-e-batch.json
+```
+
+Review every quarantined row before continuing. A batch is resumable from
+`next_cursor`; reexecuting it must not create another cycle or repeat a link.
+Use `--ticket` for an individually approved investigation. External HubSpot
+evidence and incident-ticket repair require separate authorization.
+
+### Cycle verification queries
+
+More than one active cycle is an invariant violation:
+
+```sql
+select source_account_id, hubspot_ticket_id, count(*)
+from support_conversation_cycles
+where state in ('queued', 'assigned', 'repair_required')
+group by 1, 2
+having count(*) > 1;
+```
+
+Coverage must be reviewed per table before enforcement:
+
+```sql
+select 'new_conversations' as source, count(*) filter (where cycle_id is null) as missing from new_conversations
+union all
+select 'assigned_conversations', count(*) filter (where cycle_id is null) from assigned_conversations
+union all
+select 'closed_conversations', count(*) filter (where cycle_id is null) from closed_conversations
+union all
+select 'assignment_attempts', count(*) filter (where cycle_id is null) from assignment_attempts
+union all
+select 'assignment_logs', count(*) filter (where cycle_id is null) from assignment_logs
+union all
+select 'conversation_reassignments', count(*) filter (where cycle_id is null) from conversation_reassignments;
+```
+
+Rollback is functional and non-destructive: disable enforcement or automatic
+assignment, retain cycle data and reconciliation, and repair ambiguities. Do
+not reverse migration `0023` after multi-cycle rows exist; its guard refuses to
+recreate ticket-wide uniqueness over valid history.
+
+### Cycle rollout readiness
+
+Both `/api/v1/health/ready` and the support queue health response expose a
+PII-free `conversation_cycles` posture. Before requesting enforcement, require:
+
+- `portal_configured=true` and `migration_applied=true`;
+- `legacy_rows=0` and `legacy_writers_detected=false`;
+- `projection_mismatches=0`;
+- `queued_without_dispatch=0`;
+- `enforcement_ready=true`.
+
+`cycles_by_state` is an aggregate observation surface. Any increase in legacy
+rows after deploy means an old or non-cycle-aware writer remains active: stop
+the rollout, drain the old process and keep enforcement off. A queued cycle
+without dispatch must be recovered before proceeding.
+
+Enforcement must not be used as a probe. Set
+`CONVERSATION_CYCLES_ENFORCED=true` only after the readiness contract is already
+green and the specific canary/enforcement approval has been recorded.

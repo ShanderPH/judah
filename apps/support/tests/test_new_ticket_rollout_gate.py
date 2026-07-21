@@ -35,6 +35,7 @@ def test_live_webhook_ingestion_marks_new_ticket_eligible(mock_client_fn) -> Non
         "id": "POST-DEPLOY-NEW",
         "pipeline": SUPPORT_PIPELINE_ID,
         "owner_id": "",
+        "entered_novo_at": "1711900000000",
     }
 
     conversation = enqueue_new_ticket("POST-DEPLOY-NEW")

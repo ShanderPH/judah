@@ -273,6 +273,75 @@ class TicketJiraAssociation(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class SupportConversationCycle(models.Model):
+    """One independent attendance of a HubSpot ticket (conversation cycle).
+
+    Gate B (DB-02) of the reopened-conversation hotfix. A proven entry into
+    the configured NOVO stage opens a cycle; a terminal closure ends it. A
+    ticket may accumulate many sequential cycles, but at most one cycle is
+    active (``queued``/``assigned``/``repair_required``) per account + ticket.
+
+    Identity rules (natural key, cycle_key derivation, admission
+    classification and state transitions) live exclusively in
+    ``apps.support.conversation_cycle_service`` — this model only persists
+    the contract. ``source_event_id`` is audit metadata and never
+    participates in cycle identity.
+    """
+
+    class State(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        ASSIGNED = "assigned", "Assigned"
+        REPAIR_REQUIRED = "repair_required", "Repair Required"
+        CLOSED = "closed", "Closed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle_key = models.TextField(unique=True)
+    source_system = models.TextField(default="hubspot")
+    source_account_id = models.TextField()
+    hubspot_ticket_id = models.TextField(db_index=True)
+    entered_stage_at = models.DateTimeField(null=True, blank=True)
+    identity_source = models.CharField(max_length=32, default="hubspot_stage_entry")
+    identity_evidence_key = models.TextField(blank=True, default="")
+    source_event_id = models.TextField(blank=True, default="")
+    state = models.CharField(max_length=20, choices=State.choices, default=State.QUEUED)
+    opened_at = models.DateTimeField()
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "support_conversation_cycles"
+        ordering = ["-entered_stage_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            # Natural key of one proven stage-entry occurrence.
+            models.UniqueConstraint(
+                fields=["source_system", "source_account_id", "hubspot_ticket_id", "entered_stage_at"],
+                condition=models.Q(entered_stage_at__isnull=False),
+                name="uniq_conv_cycle_natural_key",
+            ),
+            # At most one active cycle per account + ticket. Values mirror
+            # conversation_cycle_service.ACTIVE_CYCLE_STATES.
+            models.UniqueConstraint(
+                fields=["source_account_id", "hubspot_ticket_id"],
+                condition=models.Q(state__in=["queued", "assigned", "repair_required"]),
+                name="uniq_active_conv_cycle_ticket",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            # Admission decisions load every cycle of a ticket in occurrence
+            # order (duplicate/stale detection).
+            models.Index(fields=["hubspot_ticket_id", "entered_stage_at"], name="idx_cycle_ticket_opened"),
+            # Readiness/repair scan active or broken cycles by age.
+            models.Index(fields=["state", "entered_stage_at"], name="idx_cycle_state_opened"),
+            # Natural-key lookup is served by the backing index of
+            # uniq_conv_cycle_natural_key (leftmost columns); no extra index.
+        ]
+
+    def __str__(self) -> str:
+        return f"Cycle {self.hubspot_ticket_id} entered={self.entered_stage_at} state={self.state}"
+
+
 class NewConversation(models.Model):
     """Ticket that entered the NOVO stage and is awaiting automatic assignment.
 
@@ -290,7 +359,14 @@ class NewConversation(models.Model):
         FAILED = "failed", "Quarantined After Permanent Failure"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="new_conversations",
+    )
     pipeline_id = models.TextField(default=default_support_pipeline_id)
     contact_name = models.TextField(blank=True, null=True)
     contact_email = models.TextField(blank=True, null=True)
@@ -321,6 +397,13 @@ class NewConversation(models.Model):
     class Meta:
         db_table = "new_conversations"
         ordering = ["entered_queue_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_new_conversation_cycle",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"NewConversation {self.hubspot_ticket_id}"
@@ -351,7 +434,14 @@ class AssignedConversation(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assigned_conversations",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -385,6 +475,13 @@ class AssignedConversation(models.Model):
             models.Index(fields=["hubspot_owner_id", "assigned_at"]),
             models.Index(fields=["assigned_at"]),
         ]
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_assigned_conversation_cycle",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"AssignedConversation {self.hubspot_ticket_id} → {self.agent_name}"
@@ -410,6 +507,13 @@ class AssignmentAttempt(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     idempotency_key = models.UUIDField(unique=True, editable=False)
     ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assignment_attempts",
+    )
     queue_row = models.ForeignKey(
         NewConversation,
         on_delete=models.SET_NULL,
@@ -452,22 +556,23 @@ class AssignmentAttempt(models.Model):
         db_table = "assignment_attempts"
         constraints = [  # noqa: RUF012
             models.UniqueConstraint(
-                fields=["ticket_id"],
+                fields=["cycle"],
                 condition=models.Q(
+                    cycle__isnull=False,
                     state__in=[
                         "reserved",
                         "external_applied",
                         "compensating",
                         "retryable",
                         "repair_required",
-                    ]
+                    ],
                 ),
-                name="uniq_live_assignment_attempt_ticket",
+                name="uniq_live_assignment_cycle",
             ),
             models.UniqueConstraint(
-                fields=["ticket_id"],
-                condition=models.Q(state="completed"),
-                name="uniq_completed_assignment_ticket",
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False, state="completed"),
+                name="uniq_completed_assignment_cycle",
             ),
         ]
         indexes = [  # noqa: RUF012
@@ -491,7 +596,14 @@ class ClosedConversation(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="closed_conversations",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -524,6 +636,13 @@ class ClosedConversation(models.Model):
         indexes = [  # noqa: RUF012
             models.Index(fields=["closed_at"]),
             models.Index(fields=["hubspot_owner_id", "closed_at"]),
+        ]
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_closed_conversation_cycle",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -575,6 +694,13 @@ class AssignmentLog(models.Model):
         related_name="assignment_log",
     )
     ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assignment_logs",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -617,6 +743,13 @@ class ConversationReassignment(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reassignments",
+    )
     from_agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
