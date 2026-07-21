@@ -94,6 +94,7 @@ def task_matchmaker_assign_single(
     self,
     hubspot_ticket_id: str,
     entered_at_ms: str | None = None,
+    source_event_id: str = "",
 ) -> bool:
     """Enqueue a ticket and attempt immediate assignment.
 
@@ -103,6 +104,7 @@ def task_matchmaker_assign_single(
     Args:
         hubspot_ticket_id: HubSpot ticket ID.
         entered_at_ms: HubSpot millisecond timestamp.
+        source_event_id: Persisted webhook delivery identifier for audit.
 
     Returns:
         True if assigned, False otherwise.
@@ -130,7 +132,11 @@ def task_matchmaker_assign_single(
         return False
 
     try:
-        new_conv = enqueue_new_ticket(hubspot_ticket_id, entered_at_ms)
+        new_conv = enqueue_new_ticket(
+            hubspot_ticket_id,
+            entered_at_ms,
+            source_event_id=source_event_id,
+        )
         if new_conv is None:
             return False
         if not may_assign():
@@ -234,7 +240,15 @@ def task_repair_assignment_attempts() -> dict[str, int]:
 
     if not may_write_routing_state():
         log_runtime_rejection("task_repair_assignment_attempts")
-        return {"scanned": 0, "assigned": 0, "retryable": 0, "repair_required": 0}
+        return {
+            "scanned": 0,
+            "completed": 0,
+            "retryable": 0,
+            "repair_required": 0,
+            "conflict": 0,
+            "failed_unexpected": 0,
+            "skipped_stale_cycle": 0,
+        }
     result = repair_assignment_attempts(limit=100)
     logger.info("assignment_attempt_repair_done", **result)
     return result
@@ -403,13 +417,20 @@ def _do_handle_owner_change(
 
     # Calculate time with previous agent
     time_with_prev_seconds: Decimal | None = None
-    assigned_conv = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
-
-    if assigned_conv and assigned_conv.assigned_at:
-        delta = now - assigned_conv.assigned_at
-        time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
-
     with transaction.atomic():
+        assigned_conv = (
+            AssignedConversation.objects.select_for_update().filter(hubspot_ticket_id=hubspot_ticket_id).first()
+        )
+        if assigned_conv is None or assigned_conv.hubspot_owner_id != prev_owner_int:
+            logger.info(
+                "task_owner_change_stale_cycle",
+                ticket_id=hubspot_ticket_id,
+                cycle_id=str(assigned_conv.cycle_id) if assigned_conv and assigned_conv.cycle_id else None,
+            )
+            return
+        if assigned_conv.assigned_at:
+            delta = now - assigned_conv.assigned_at
+            time_with_prev_seconds = Decimal(str(round(delta.total_seconds(), 2)))
         if from_agent:
             decrement_agent_chat_count(from_agent)
 
@@ -432,6 +453,7 @@ def _do_handle_owner_change(
 
         ConversationReassignment.objects.create(
             hubspot_ticket_id=hubspot_ticket_id,
+            cycle=assigned_conv.cycle if assigned_conv is not None else None,
             from_agent=from_agent,
             from_hubspot_owner_id=prev_owner_int,
             from_agent_name=from_agent.name if from_agent else None,
@@ -446,6 +468,7 @@ def _do_handle_owner_change(
     logger.info(
         "task_owner_change_done",
         ticket_id=hubspot_ticket_id,
+        cycle_id=str(assigned_conv.cycle_id) if assigned_conv.cycle_id else None,
         from_agent=from_agent.name if from_agent else str(prev_owner_int),
         to_agent=to_agent.name if to_agent else str(new_owner_int),
     )
@@ -482,7 +505,7 @@ def task_aggregate_queue_metrics() -> None:
 
     Should run once daily (e.g., at 00:05 AM) to aggregate the previous day.
     """
-    from apps.support.models import AssignedConversation, NewConversation, QueuePerformanceMetrics
+    from apps.support.models import AssignedConversation, ClosedConversation, NewConversation, QueuePerformanceMetrics
 
     today = timezone.localdate()
     yesterday = today - timedelta(days=1)
@@ -492,7 +515,7 @@ def task_aggregate_queue_metrics() -> None:
     assigned_qs = AssignedConversation.objects.filter(assigned_at__date=yesterday)
     assigned_count = assigned_qs.count()
 
-    closed_qs = AssignedConversation.objects.filter(closed_at__date=yesterday)
+    closed_qs = ClosedConversation.objects.filter(closed_at__date=yesterday)
     closed_count = closed_qs.count()
 
     # Queue wait time aggregates

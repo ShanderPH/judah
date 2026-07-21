@@ -373,6 +373,7 @@ class TestEnqueueNewTicket:
             "contact_name": "John",
             "contact_email": "john@test.com",
             "priority": "HIGH",
+            "entered_novo_at": "1711900000000",
         }
         mock_client_fn.return_value = mock_client
 
@@ -409,6 +410,7 @@ class TestEnqueueNewTicket:
             "pipeline": "636459134",
             "owner_id": "",
             "subject": "Test",
+            "entered_novo_at": "1711900000000",
         }
         mock_client_fn.return_value = mock_client
 
@@ -432,6 +434,7 @@ class TestEnqueueNewTicket:
             "id": "T001",
             "pipeline": "636459134",
             "owner_id": "",
+            "entered_novo_at": "1711900000000",
         }
 
         from apps.support.matchmaker_service import enqueue_new_ticket
@@ -456,6 +459,7 @@ class TestEnqueueNewTicket:
             "id": "T001",
             "pipeline": "636459134",
             "owner_id": "",
+            "entered_novo_at": "1711900000000",
         }
 
         from apps.support.matchmaker_service import enqueue_new_ticket
@@ -475,13 +479,14 @@ class TestEnqueueNewTicket:
 
 @pytest.mark.django_db
 class TestWebhookHandlerAsync:
+    @patch("apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback())
     @patch("apps.support.tasks.task_matchmaker_assign_single.delay")
-    def test_novo_handler_dispatches_task(self, mock_delay):
+    def test_novo_handler_dispatches_task(self, mock_delay, _mock_on_commit):
         from apps.webhooks.handlers.hubspot_handler import _handle_ticket_entered_novo
 
         _handle_ticket_entered_novo("T001", "1711900000000")
 
-        mock_delay.assert_called_once_with("T001", "1711900000000")
+        mock_delay.assert_called_once_with("T001", "1711900000000", "")
 
     @patch("apps.support.tasks.task_handle_ticket_closed.delay")
     def test_closed_handler_dispatches_task(self, mock_delay):

@@ -210,6 +210,8 @@ class HubSpotClient:
                 "pipeline": props.get("hs_pipeline", ""),
                 "stage": props.get("hs_pipeline_stage", ""),
                 "owner_id": props.get("hubspot_owner_id") or "",
+                "entered_novo_at": props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}"),
+                "entered_closed_at": props.get(f"hs_v2_date_entered_{STAGE_CLOSED_ID}"),
                 "contact_name": props.get("firstname", ""),
                 "contact_email": props.get("email", ""),
             }

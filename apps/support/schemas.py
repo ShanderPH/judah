@@ -398,6 +398,7 @@ class AgentDailyTimeLogResponse(Schema):
 class ConversationReassignmentResponse(Schema):
     id: UUID
     hubspot_ticket_id: str
+    cycle_id: UUID | None = None
     from_agent_name: str | None = None
     from_hubspot_owner_id: int | None = None
     to_agent_name: str | None = None
@@ -452,6 +453,7 @@ class ForceReassignRequest(Schema):
 class AssignmentActionResponse(Schema):
     success: bool
     hubspot_ticket_id: str
+    cycle_id: UUID | None = None
     agent_id: str | None = None
     agent_name: str | None = None
     detail: str

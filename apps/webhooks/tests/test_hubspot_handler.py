@@ -32,7 +32,12 @@ class TestHandleHubspotEvent:
                 "propertyValue": "1699999999000",
             },
         )
-        with patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_delay:
+        with (
+            patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_delay,
+            patch(
+                "apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback()
+            ),
+        ):
             handle_hubspot_event(event)
         mock_delay.assert_called_once()
 

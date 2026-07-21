@@ -333,6 +333,16 @@ SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
+# Non-secret portal (account) ID. Required by the support conversation-cycle
+# contract to build deterministic cycle identities. Empty means the
+# cycle-opening writer must fail closed (identity_unavailable); reads are not
+# affected. The concrete value is a Stop Gate A decision.
+HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
+# Conversation-cycle enforcement (Gate B dual-write). False = legacy behavior
+# is preserved; writers only attach proven cycles additively and conflicts are
+# telemetry-only. True = cycle divergences fail closed. Must stay False until
+# Gate C/G approval.
+CONVERSATION_CYCLES_ENFORCED = config("CONVERSATION_CYCLES_ENFORCED", default=False, cast=bool)
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID = config("HUBSPOT_SALOMAO_SENDER_ACTOR_ID", default="")
 HUBSPOT_AI_TRIAGE_PIPELINE_ID = config("HUBSPOT_AI_TRIAGE_PIPELINE_ID", default="636594474")
 HUBSPOT_N1_NEW_STAGE_ID = config("HUBSPOT_N1_NEW_STAGE_ID", default="939271304")

@@ -5,13 +5,19 @@ from __future__ import annotations
 from enum import StrEnum
 
 import structlog
-from django.utils import timezone
+from django.conf import settings
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
+from apps.support.conversation_cycle_service import CycleClassification, open_or_get_cycle
 from apps.support.models import NewConversation
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
+
+_ATTACHABLE_CYCLE_CLASSIFICATIONS = (
+    CycleClassification.CREATED,
+    CycleClassification.DUPLICATE,
+)
 
 
 class AssignmentOutcome(StrEnum):
@@ -141,6 +147,8 @@ def matchmaker_drain_queue() -> dict:
 def enqueue_new_ticket(
     hubspot_ticket_id: str,
     entered_at_ms: str | int | None = None,
+    *,
+    source_event_id: str = "",
 ) -> NewConversation | None:
     """Validate and idempotently enqueue one HubSpot ticket."""
     from apps.support.auto_assign_service import (
@@ -160,7 +168,35 @@ def enqueue_new_ticket(
     if not _is_ticket_eligible(ticket_data):
         return None
 
-    entered_queue_at = _parse_hubspot_timestamp(entered_at_ms) or timezone.now()
+    # Gate B dual-write: attach a proven conversation cycle additively. With
+    # CONVERSATION_CYCLES_ENFORCED off (default), a non-attachable admission
+    # (missing timestamp/portal, stale, active conflict, repair) is telemetry
+    # only and the legacy flow below is byte-for-byte unchanged. With
+    # enforcement on, the same condition fails closed before any effect.
+    confirmed_entered_at = entered_at_ms or ticket_data.get("entered_novo_at")
+    cycle_result = open_or_get_cycle(
+        hubspot_ticket_id=hubspot_ticket_id,
+        entered_stage_value=confirmed_entered_at,
+        source_event_id=source_event_id,
+    )
+    if cycle_result.admission.classification not in _ATTACHABLE_CYCLE_CLASSIFICATIONS:
+        logger.warning(
+            "conversation_cycle_admission_blocked",
+            ticket_id=hubspot_ticket_id,
+            classification=cycle_result.admission.classification.value,
+            reason=cycle_result.admission.reason,
+        )
+        if settings.CONVERSATION_CYCLES_ENFORCED:
+            return None
+
+    entered_queue_at = _parse_hubspot_timestamp(confirmed_entered_at)
+    if entered_queue_at is None:
+        logger.warning(
+            "conversation_cycle_identity_unavailable",
+            ticket_id=hubspot_ticket_id,
+            source_event_id=source_event_id,
+        )
+        return None
     new_conv, created = NewConversation.objects.get_or_create(
         hubspot_ticket_id=hubspot_ticket_id,
         defaults={
@@ -193,4 +229,7 @@ def enqueue_new_ticket(
                 "updated_at",
             ]
         )
+    if cycle_result.cycle is not None and new_conv.cycle_id != cycle_result.cycle.pk:
+        new_conv.cycle = cycle_result.cycle
+        new_conv.save(update_fields=["cycle", "updated_at"])
     return new_conv

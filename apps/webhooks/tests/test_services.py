@@ -156,11 +156,16 @@ class TestProcessWebhookEvent:
             },
         )
 
-        with patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign:
+        with (
+            patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign,
+            patch(
+                "apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback()
+            ),
+        ):
             ok = process_webhook_event(event.pk)
 
         assert ok is True
-        mock_assign.assert_called_once_with("ticket-blocked", "1783022765000")
+        mock_assign.assert_called_once_with("ticket-blocked", "1783022765000", str(event.pk))
         event.refresh_from_db()
         assert event.processed is True
         assert event.retry_count == 0
