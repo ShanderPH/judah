@@ -27,6 +27,7 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.LOGGING['root']['level']); "
         "print('debug_toolbar' in settings.INSTALLED_APPS); "
         "print(settings.AGENT_STATUS_SYNC_ENABLED); "
+        "print(settings.NOVO_STAGE_SYNC_ENABLED); "
         "print(settings.CELERY_RESULT_BACKEND); "
         "print(settings.CELERY_TASK_IGNORE_RESULT); "
         "print(settings.CACHES['default']['OPTIONS']['pool_class'])"
@@ -51,6 +52,7 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
         "INFO",
         "False",
         "False",
+        "False",
         "None",
         "True",
         "redis.BlockingConnectionPool",
@@ -66,6 +68,7 @@ def test_production_keeps_stricter_root_logging() -> None:
         "json",
         "ERROR",
         "False",
+        "True",
         "True",
         "None",
         "True",

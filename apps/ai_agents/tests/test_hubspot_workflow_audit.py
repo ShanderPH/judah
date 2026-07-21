@@ -12,7 +12,7 @@ from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditL
 @pytest.mark.asyncio
 async def test_handoff_turn_records_agent_tools_and_package() -> None:
     instance = await sync_to_async(ConversationInstance.objects.create)(
-        idempotency_key="conversation:ticket:audit-1",
+        idempotency_key="conversation:thread:thread-audit-1",
         hubspot_ticket_id="audit-1",
         hubspot_thread_id="thread-audit-1",
         state=ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
@@ -20,7 +20,7 @@ async def test_handoff_turn_records_agent_tools_and_package() -> None:
     )
     conversation_context = ConversationContext(
         channel="hubspot",
-        session_id="hubspot-ticket-audit-1",
+        session_id="hubspot-thread-thread-audit-1",
         ticket_id="audit-1",
         thread_id="thread-audit-1",
         recent_messages=[
@@ -44,7 +44,7 @@ async def test_handoff_turn_records_agent_tools_and_package() -> None:
             ],
         },
         ticket_id="audit-1",
-        session_id="hubspot-ticket-audit-1",
+        session_id="hubspot-thread-thread-audit-1",
         agent_name="SalomaoSupervisorAgent",
         output_structured={
             "message": "Vou encaminhar ao time humano.",
@@ -67,6 +67,14 @@ async def test_handoff_turn_records_agent_tools_and_package() -> None:
 
     assert await sync_to_async(AgentRun.objects.filter(instance=instance).count)() == 3
     assert await sync_to_async(ToolCallAuditLog.objects.filter(instance=instance).count)() == 3
+    reply_audit = await sync_to_async(ToolCallAuditLog.objects.get)(
+        instance=instance,
+        tool_name="send_thread_reply",
+    )
+    assert reply_audit.external_object_type == "hubspot_thread"
+    assert reply_audit.external_object_id == "thread-audit-1"
+    stage_audits = ToolCallAuditLog.objects.filter(instance=instance, tool_name__contains="stage")
+    assert await sync_to_async(stage_audits.filter(external_object_id="audit-1").count)() == 2
     await sync_to_async(instance.refresh_from_db)()
     package = instance.metadata["handoff_package"]
     assert package["reason"] == "High-impact frustrated customer."

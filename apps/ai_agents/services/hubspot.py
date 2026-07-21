@@ -37,6 +37,10 @@ HUBSPOT_API_BASE = "https://api.hubapi.com"
 ConversationChannel = Literal["hubspot", "webchat_central", "api"]
 SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
 DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_TICKET_CHURCH_PROPERTY = "codigo_de_igreja_local___ticket"
+TICKET_CHURCH_PROPERTY = (
+    str(getattr(settings, "HUBSPOT_TICKET_CHURCH_PROPERTY", "")).strip() or DEFAULT_TICKET_CHURCH_PROPERTY
+)
 
 # QA/dev switch: quando True, `hydrate_ticket_context` devolve um payload
 # sintético sem tocar na API do HubSpot. Usado pelo simulador local de
@@ -61,6 +65,7 @@ def _mock_ticket_context(ticket_id: str) -> dict[str, Any]:
         "pipeline": "0",
         "pipeline_stage": "1",
         "priority": "high",
+        "church_id": "1573",
         "contact_ids": ["mock-contact-001"],
         "thread_ids": ["mock-thread-001"],
         "conversation_history": [
@@ -95,6 +100,7 @@ _TICKET_PROPERTIES: list[str] = [
     "hs_thread_ids_to_restore",
     "createdate",
     "hs_lastmodifieddate",
+    TICKET_CHURCH_PROPERTY,
 ]
 
 
@@ -122,6 +128,26 @@ async def _fetch_ticket(client: httpx.AsyncClient, ticket_id: str) -> dict[str, 
     )
     response.raise_for_status()
     return response.json()
+
+
+def _apply_ticket_context(context: dict[str, Any], ticket: dict[str, Any]) -> None:
+    """Copy the ticket fields needed by routing and protocol lookup."""
+    props = ticket.get("properties", {}) or {}
+    context["subject"] = props.get("subject", "") or ""
+    context["content"] = props.get("content", "") or ""
+    context["owner_id"] = props.get("hubspot_owner_id", "") or ""
+    context["originating_channel"] = props.get("source_type", "") or context.get("originating_channel", "")
+    context["pipeline"] = props.get("hs_pipeline", "") or ""
+    context["pipeline_stage"] = props.get("hs_pipeline_stage", "") or ""
+    context["priority"] = props.get("hs_ticket_priority", "") or ""
+    context["church_id"] = props.get(TICKET_CHURCH_PROPERTY, "") or ""
+    context["raw_ticket"] = ticket
+
+    associations = ticket.get("associations") or {}
+    contacts = (associations.get("contacts") or {}).get("results") or []
+    contact_ids = [str(contact.get("id")) for contact in contacts if contact.get("id")]
+    if contact_ids:
+        context["contact_ids"] = contact_ids
 
 
 async def _fetch_conversation_history(
@@ -490,6 +516,7 @@ async def hydrate_ticket_context(
         "pipeline": "",
         "pipeline_stage": "",
         "priority": "",
+        "church_id": "",
         "contact_ids": [],
         "thread_ids": [],
         "threads": [],
@@ -517,25 +544,12 @@ async def hydrate_ticket_context(
             errors.append(f"ticket_fetch:{exc.__class__.__name__}")
             return context
 
-        props = ticket.get("properties", {}) or {}
-        context["subject"] = props.get("subject", "") or ""
-        context["content"] = props.get("content", "") or ""
-        context["owner_id"] = props.get("hubspot_owner_id", "") or ""
-        context["originating_channel"] = props.get("source_type", "") or ""
-        context["pipeline"] = props.get("hs_pipeline", "") or ""
-        context["pipeline_stage"] = props.get("hs_pipeline_stage", "") or ""
-        context["priority"] = props.get("hs_ticket_priority", "") or ""
-        context["raw_ticket"] = ticket
-
-        associations = ticket.get("associations") or {}
-        contacts = (associations.get("contacts") or {}).get("results") or []
-        context["contact_ids"] = [str(c.get("id")) for c in contacts if c.get("id")]
+        _apply_ticket_context(context, ticket)
 
         candidate_thread_ids = _extract_thread_ids(ticket)
-        valid_thread_ids: list[str] = []
-        history: list[dict[str, Any]] = []
+        hydrated_threads: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
         for thread_id in candidate_thread_ids:
-            if len(valid_thread_ids) >= max_threads:
+            if len(hydrated_threads) >= max_threads:
                 break
             try:
                 thread = await _fetch_thread(client, thread_id)
@@ -563,16 +577,25 @@ async def hydrate_ticket_context(
                 errors.append(f"history:{thread_id}")
                 continue
 
-            valid_thread_ids.append(thread_id)
-            context["threads"].append(thread)
-            history.extend(thread_history)
+            hydrated_threads.append((thread_id, thread, thread_history))
 
-        context["thread_ids"] = valid_thread_ids
-
-        context["conversation_history"] = sorted(
-            history,
-            key=lambda m: m.get("created_at") or "",
-        )
+        if hydrated_threads:
+            # A ticket can contain several independent conversations. The
+            # ticket-triggered pipeline must select one concrete thread rather
+            # than concatenate histories and accidentally share state.
+            selected_thread_id, selected_thread, selected_history = max(
+                hydrated_threads,
+                key=lambda item: max(
+                    (str(message.get("created_at") or "") for message in item[2]),
+                    default=str(item[1].get("createdAt") or ""),
+                ),
+            )
+            context["thread_ids"] = [selected_thread_id]
+            context["threads"] = [selected_thread]
+            context["conversation_history"] = sorted(
+                selected_history,
+                key=lambda message: message.get("created_at") or "",
+            )
         await _hydrate_latest_incoming_image(client, context)
 
     logger.info(
@@ -611,6 +634,7 @@ async def hydrate_thread_context(
         "pipeline": "",
         "pipeline_stage": "",
         "priority": "",
+        "church_id": "",
         "contact_ids": [],
         "thread_ids": [str(thread_id)],
         "threads": [],
@@ -627,6 +651,26 @@ async def hydrate_thread_context(
             contact_id = thread.get("associatedContactId")
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
+            if context["ticket_id"]:
+                try:
+                    ticket = await _fetch_ticket(client, context["ticket_id"])
+                    _apply_ticket_context(context, ticket)
+                except httpx.HTTPStatusError as exc:
+                    logger.warning(
+                        "hubspot_thread_ticket_fetch_failed",
+                        thread_id=thread_id,
+                        ticket_id=context["ticket_id"],
+                        status=exc.response.status_code,
+                    )
+                    errors.append(f"ticket_fetch:{exc.response.status_code}")
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "hubspot_thread_ticket_fetch_error",
+                        thread_id=thread_id,
+                        ticket_id=context["ticket_id"],
+                        error=str(exc),
+                    )
+                    errors.append(f"ticket_fetch:{exc.__class__.__name__}")
             context["conversation_history"] = await _fetch_conversation_history(client, thread_id, limit=limit)
             await _hydrate_latest_incoming_image(client, context)
         except httpx.HTTPStatusError as exc:

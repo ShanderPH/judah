@@ -24,12 +24,28 @@ SUPPORT_N2_TRIVIAL_STAGE_ID = settings.HUBSPOT_N2_TRIVIAL_STAGE_ID
 SUPPORT_N2_RESOLVED_STAGE_ID = settings.HUBSPOT_N2_RESOLVED_STAGE_ID
 SUPPORT_N2_STAGE_STATUS = {
     SUPPORT_N2_ENTRY_STAGE_ID: "Sendo analisado pelo time t\u00e9cnico",
+    "1110524173": "Em triagem pelo time t\u00e9cnico",
     SUPPORT_N2_CRITICAL_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_HIGH_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_MEDIUM_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_LOW_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_TRIVIAL_STAGE_ID: "Em atendimento pelo time t\u00e9cnico",
     SUPPORT_N2_RESOLVED_STAGE_ID: "Resolvido",
+    "1028692851": "Fechado",
+    "960373660": "A\u00e7\u00e3o interna do N1",
+    "936942377": "Analisando",
+    "936942378": "Solicita\u00e7\u00e3o",
+    "937504358": "Bug",
+    "1033289605": "Atualiza\u00e7\u00e3o",
+    "1208927003": "Em andamento",
+    "1245790466": "Aguardando informa\u00e7\u00e3o",
+    "1245790467": "Aguardando revis\u00e3o do cliente",
+    "1245790468": "Aguardando aceite de termos",
+    "1245791369": "Aguardando revis\u00e3o em produ\u00e7\u00e3o",
+    "1208927005": "Finalizado",
+    "1368995876": "Solicitado",
+    "1368995712": "Atualizado",
+    "1368986534": "Atualiza\u00e7\u00e3o cancelada",
 }
 SUPPORT_N2_STAGE_PRIORITY = {
     SUPPORT_N2_CRITICAL_STAGE_ID: "Cr\u00edtica",
@@ -38,9 +54,15 @@ SUPPORT_N2_STAGE_PRIORITY = {
     SUPPORT_N2_LOW_STAGE_ID: "Baixa",
     SUPPORT_N2_TRIVIAL_STAGE_ID: "Trivial",
 }
-SUPPORT_N2_OPEN_STAGE_IDS = set(SUPPORT_N2_STAGE_STATUS) - {
+SUPPORT_N2_CLOSED_STAGE_IDS = {
     SUPPORT_N2_RESOLVED_STAGE_ID,
+    "1028692851",  # Fechado
+    "1208927005",  # Finalizado
+    "1368995876",  # Solicitado
+    "1368995712",  # Atualizado
+    "1368986534",  # Atualiza\u00e7\u00e3o cancelada
 }
+SUPPORT_N2_OPEN_STAGE_IDS = set(SUPPORT_N2_STAGE_STATUS) - SUPPORT_N2_CLOSED_STAGE_IDS
 PRIORITY_LABELS = {
     "LOW": "Baixa",
     "MEDIUM": "M\u00e9dia",
@@ -119,11 +141,6 @@ class HubSpotProtocolClient:
         stage_id = str(properties.get("hs_pipeline_stage") or "")
         if pipeline_id != SUPPORT_N2_PIPELINE_ID:
             raise ProtocolLookupError("Esse protocolo n\u00e3o pertence ao atendimento t\u00e9cnico N2.")
-        if stage_id not in SUPPORT_N2_STAGE_STATUS:
-            raise ProtocolLookupError(
-                "Esse protocolo n\u00e3o est\u00e1 em uma etapa acompanhada pelo suporte t\u00e9cnico N2."
-            )
-
         return self._summary(payload, properties, stage_id)
 
     async def list_open_tickets_for_church(
@@ -214,7 +231,7 @@ class HubSpotProtocolClient:
                 )
                 or None
             ),
-            status=SUPPORT_N2_STAGE_STATUS[stage_id],
+            status=SUPPORT_N2_STAGE_STATUS.get(stage_id, "Etapa t\u00e9cnica ainda n\u00e3o mapeada"),
             priority=SUPPORT_N2_STAGE_PRIORITY.get(
                 stage_id,
                 _priority(properties.get("hs_ticket_priority")),
@@ -253,7 +270,9 @@ class ProtocolConversationHandler:
     """Recognize and answer protocol turns without invoking an AI model."""
 
     REQUEST_MESSAGE = (
-        "Claro. Informe o protocolo do ticket ou o ID num\u00e9rico da igreja. Por exemplo: 123456789 ou 1573."
+        "Claro. Para consultar somente um ticket, informe o protocolo. "
+        "Para listar os protocolos da igreja, informe o ID num\u00e9rico da igreja local, "
+        "que geralmente tem 5 d\u00edgitos."
     )
     STATUS_TERMS = (
         "status",
@@ -279,21 +298,25 @@ class ProtocolConversationHandler:
         normalized = _normalize(current).strip()
         history = context.get("conversation_history") or []
         awaiting_identifier = self._awaiting_identifier(history)
-
-        church_match = re.fullmatch(r"t\s*[-#:]?\s*(\d{1,12})", normalized, re.IGNORECASE)
-        if church_match:
-            return await self._church_response(church_match.group(1))
-
-        numeric_match = re.fullmatch(r"\d{1,6}", normalized)
-        if numeric_match:
-            return await self._church_response(numeric_match.group(0))
-
-        protocol = self._extract_protocol(current, awaiting_identifier=awaiting_identifier)
+        protocol = self._extract_protocol(
+            current,
+            awaiting_identifier=awaiting_identifier or self._recent_status_intent(history),
+        )
         status_intent = self._has_status_intent(normalized)
         mentions_protocol = any(term in normalized for term in self.PROTOCOL_TERMS)
         if protocol and (awaiting_identifier or status_intent or mentions_protocol):
             return await self._ticket_response(protocol)
+
+        church_id = self._extract_church_id(current)
+        if church_id:
+            return await self._church_response(church_id)
+
+        if protocol and self._recent_status_intent(history):
+            return await self._ticket_response(protocol)
         if status_intent or (mentions_protocol and any(term in normalized for term in ("consult", "ver", "saber"))):
+            contextual_church_id = self._contextual_church_id(context)
+            if contextual_church_id:
+                return await self._church_response(contextual_church_id)
             return self.REQUEST_MESSAGE
         return None
 
@@ -303,21 +326,18 @@ class ProtocolConversationHandler:
         except ProtocolLookupError as exc:
             return str(exc)
 
-        identity = f'O ticket "{ticket.name}" (protocolo #{ticket.protocol})'
-        if ticket.status == SUPPORT_N2_STAGE_STATUS[SUPPORT_N2_ENTRY_STAGE_ID]:
-            text = f"{identity} est\u00e1 sendo analisado pelo time t\u00e9cnico."
-            if ticket.priority:
-                text += f" A prioridade registrada \u00e9 {ticket.priority}."
-        elif ticket.status == SUPPORT_N2_STAGE_STATUS[SUPPORT_N2_CRITICAL_STAGE_ID]:
-            text = f"{identity} est\u00e1 em atendimento pelo time t\u00e9cnico"
-            text += f", com prioridade {ticket.priority}." if ticket.priority else "."
-        else:
-            text = f"{identity} est\u00e1 com status {ticket.status}."
-            if ticket.priority:
-                text += f" A prioridade registrada \u00e9 {ticket.priority}."
+        priority = ticket.priority or "N\u00e3o informada"
+        lines = [
+            "Encontrei o ticket solicitado:",
+            "",
+            f"- **Protocolo:** #{ticket.protocol}",
+            f"- **T\u00edtulo:** {ticket.name}",
+            f"- **Status:** {ticket.status}",
+            f"- **Prioridade:** {priority}",
+        ]
         if ticket.error_area:
-            text += f" \u00c1rea com erro: {ticket.error_area}."
-        return text
+            lines.append(f"- **\u00c1rea com erro:** {ticket.error_area}")
+        return "\n".join(lines)
 
     async def _church_response(self, church_id: str) -> str:
         try:
@@ -331,13 +351,18 @@ class ProtocolConversationHandler:
         noun = "protocolo aberto" if total == 1 else "protocolos abertos"
         lines = [f"Encontrei {total} {noun} para a igreja {church_id}:"]
         for ticket in tickets:
-            details = [ticket.name]
+            priority = ticket.priority or "N\u00e3o informada"
+            lines.extend(
+                [
+                    "",
+                    f"**Protocolo #{ticket.protocol}**",
+                    f"- **T\u00edtulo:** {ticket.name}",
+                    f"- **Status:** {ticket.status}",
+                    f"- **Prioridade:** {priority}",
+                ]
+            )
             if ticket.error_area:
-                details.append(f"\u00e1rea com erro: {ticket.error_area}")
-            details.append(f"status: {ticket.status}")
-            if ticket.priority:
-                details.append(f"prioridade {ticket.priority}")
-            lines.append(f"- Protocolo #{ticket.protocol}: {'; '.join(details)}.")
+                lines.append(f"- **\u00c1rea com erro:** {ticket.error_area}")
         return "\n".join(lines)
 
     @staticmethod
@@ -359,6 +384,20 @@ class ProtocolConversationHandler:
         return any("informe o protocolo" in message and "id numerico da igreja" in message for message in outgoing[-4:])
 
     @classmethod
+    def _recent_status_intent(cls, history: list[dict[str, Any]]) -> bool:
+        incoming = [
+            _normalize(str(message.get("text") or ""))
+            for message in history[-8:]
+            if str(message.get("direction") or "").upper() == "INCOMING"
+        ]
+        return any(cls._has_status_intent(message) for message in incoming)
+
+    @staticmethod
+    def _contextual_church_id(context: dict[str, Any]) -> str | None:
+        value = str(context.get("church_id") or "").strip().upper().removeprefix("T")
+        return value if value.isdigit() else None
+
+    @classmethod
     def _has_status_intent(cls, normalized: str) -> bool:
         if any(term in normalized for term in cls.STATUS_TERMS):
             return True
@@ -378,6 +417,24 @@ class ProtocolConversationHandler:
             re.IGNORECASE,
         )
         return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_church_id(message: str) -> str | None:
+        normalized = _normalize(message).strip()
+        prefixed = re.fullmatch(r"t\s*[-#:]?\s*(\d{1,12})", normalized, re.IGNORECASE)
+        if prefixed:
+            return prefixed.group(1)
+
+        explicit = re.search(
+            r"(?:id|codigo)\s+(?:da\s+)?(?:igreja|local)(?:\s+local)?\s*(?:e|eh|:|#|-)?\s*t?\s*(\d{1,12})\b",
+            normalized,
+            re.IGNORECASE,
+        )
+        if explicit:
+            return explicit.group(1)
+
+        numeric = re.fullmatch(r"\d{1,6}", normalized)
+        return numeric.group(0) if numeric else None
 
 
 async def handle_protocol_lookup_from_hubspot_context(

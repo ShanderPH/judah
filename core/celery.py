@@ -4,6 +4,7 @@ import os
 
 import structlog
 from celery.signals import worker_ready
+from django.conf import settings
 
 from celery import Celery
 
@@ -26,6 +27,10 @@ def on_worker_ready(**kwargs):
     conversations that arrived while the worker was down are picked up
     immediately.
     """
+    if not settings.NOVO_STAGE_SYNC_ENABLED:
+        logger.info("worker_ready_startup_sync_disabled")
+        return
+
     from apps.support.tasks import task_sync_novo_stage_tickets
 
     logger.info("worker_ready_startup_sync", action="dispatching NOVO-stage ticket sync")

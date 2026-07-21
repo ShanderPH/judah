@@ -108,6 +108,7 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` e o fallback do código permanecem desabilitados por segurança. |
 | `AI_ROUTING_ROLLOUT_PERCENTAGE` | `apps/ai_agents/services/rollout.py` | Percentual determinístico de tickets habilitados para IA, de `0` a `100` (padrão: `100`). |
 | `AGENT_STATUS_SYNC_ENABLED` | `core/settings/base.py` | Permite que SAT, reconciliação e webhooks alterem automaticamente o status dos agentes (padrão: `true`). O perfil `staging` força `false`, independentemente do valor no ambiente. |
+| `NOVO_STAGE_SYNC_ENABLED` | `core/settings/base.py` | Habilita o backfill automático de tickets do estágio Novo para a fila interna (padrão: `true`). O perfil `staging` força `false`, pois sua conexão de banco não é autorizada a alterar o estado de roteamento. |
 
 ## Variáveis de observabilidade
 
