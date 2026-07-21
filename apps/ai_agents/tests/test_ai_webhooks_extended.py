@@ -114,6 +114,105 @@ async def test_prepare_retryable_instance_and_mark_pipeline_failure() -> None:
     mark.assert_not_called()
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_customer_message_resumes_waiting_instance() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:ticket:waiting",
+        hubspot_ticket_id="waiting",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+
+    await webhooks._resume_waiting_instance_for_customer_message(instance)
+
+    await instance.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_waiting_conversation_processes_and_sends_next_customer_turn() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:resumed-turn",
+        hubspot_thread_id="resumed-turn",
+        hubspot_ticket_id="ticket-resumed-turn",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    sibling = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:sibling-turn",
+        hubspot_thread_id="sibling-turn",
+        hubspot_ticket_id="ticket-resumed-turn",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    context = {
+        "ticket_id": "ticket-resumed-turn",
+        "originating_channel": "chat",
+        "thread_ids": ["resumed-turn"],
+        "conversation_history": [
+            {"id": "customer-message-2", "direction": "INCOMING", "text": "Tenho outra dúvida"},
+        ],
+    }
+    supervisor_instance = Mock()
+    supervisor_instance.run_pipeline_async = AsyncMock(return_value=_response())
+
+    with (
+        patch(
+            "apps.ai_agents.api.webhooks.handle_protocol_lookup_from_hubspot_context",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("apps.ai_agents.api.webhooks.SalomaoSupervisorAgent", return_value=supervisor_instance),
+        patch("apps.ai_agents.api.webhooks._record_usage", new=AsyncMock()),
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "reply-2"}),
+        ) as send_reply,
+    ):
+        await webhooks._run_supervisor_for_hubspot_context(
+            context,
+            session_id="hubspot-thread-resumed-turn",
+            ticket_id="ticket-resumed-turn",
+            require_incoming=True,
+        )
+
+    send_reply.assert_awaited_once()
+    await instance.arefresh_from_db()
+    await sibling.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.failure_count == 0
+    assert sibling.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert await sibling.state_transitions.acount() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_pipeline_failure_is_recorded_only_on_the_target_thread() -> None:
+    first = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:failure-first",
+        hubspot_thread_id="failure-first",
+        hubspot_ticket_id="ticket-shared-failure",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+    second = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:failure-second",
+        hubspot_thread_id="failure-second",
+        hubspot_ticket_id="ticket-shared-failure",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+
+    await webhooks._mark_pipeline_failure(
+        ticket_id="ticket-shared-failure",
+        thread_id="failure-second",
+        error=RuntimeError("targeted failure"),
+    )
+
+    await first.arefresh_from_db()
+    await second.arefresh_from_db()
+    assert first.state == ConversationInstance.State.AI_SERVICE_RUNNING
+    assert first.failure_count == 0
+    assert second.state == ConversationInstance.State.FAILED_RETRYABLE
+    assert second.failure_count == 1
+
+
 @pytest.mark.asyncio
 async def test_pipeline_wrappers_success_and_failure() -> None:
     with (
@@ -147,6 +246,7 @@ async def test_pipeline_wrappers_success_and_failure() -> None:
     ):
         await webhooks._run_salomao_v1_thread_pipeline("thread-1")
     assert run.await_args.kwargs["require_incoming"] is True
+    assert run.await_args.kwargs["session_id"] == "hubspot-thread-thread-1"
 
     with (
         patch(
@@ -205,6 +305,10 @@ async def test_thread_pipeline_skips_when_latest_message_is_outgoing() -> None:
             "apps.ai_agents.api.webhooks._prepare_instance_for_supervisor",
             new=AsyncMock(),
         ),
+        patch(
+            "apps.ai_agents.api.webhooks._resume_waiting_instance_for_customer_message",
+            new=AsyncMock(),
+        ) as resume,
         patch("apps.ai_agents.api.webhooks.SalomaoSupervisorAgent") as supervisor,
     ):
         await webhooks._run_supervisor_for_hubspot_context(
@@ -215,6 +319,7 @@ async def test_thread_pipeline_skips_when_latest_message_is_outgoing() -> None:
         )
 
     supervisor.assert_not_called()
+    resume.assert_not_awaited()
 
 
 @pytest.mark.asyncio

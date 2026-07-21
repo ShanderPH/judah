@@ -97,7 +97,7 @@ async def test_get_ticket_not_found_is_customer_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_church_lookup_filters_pipeline_stages_and_paginates() -> None:
+async def test_church_lookup_filters_closed_n2_stages_and_paginates() -> None:
     request_bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -118,7 +118,7 @@ async def test_church_lookup_filters_pipeline_stages_and_paginates() -> None:
                             },
                         },
                         {
-                            "id": "closed",
+                            "id": "26279339999",
                             "properties": {
                                 "hs_pipeline_stage": "936942379",
                             },
@@ -153,6 +153,12 @@ async def test_church_lookup_filters_pipeline_stages_and_paginates() -> None:
     assert filters[1]["value"] == "634240100"
     assert filters[2]["operator"] == "IN"
     assert set(filters[2]["values"]) == SUPPORT_N2_OPEN_STAGE_IDS
+    assert "936942379" not in filters[2]["values"]
+    assert "1028692851" not in filters[2]["values"]
+    assert "1208927005" not in filters[2]["values"]
+    assert "1368995876" not in filters[2]["values"]
+    assert "1368995712" not in filters[2]["values"]
+    assert "1368986534" not in filters[2]["values"]
     assert "subject" in request_bodies[0]["properties"]
     assert "suporte__area_com_erro" in request_bodies[0]["properties"]
 
@@ -205,8 +211,48 @@ async def test_status_intent_asks_for_identifier() -> None:
     response = await handler.handle(_context("Quero acompanhar meu chamado"))
 
     assert response is not None
-    assert "Informe o protocolo" in response
+    assert "informe o protocolo" in response
     assert "ID num\u00e9rico da igreja" in response
+
+
+@pytest.mark.asyncio
+async def test_status_intent_uses_contextual_church_id() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    context = _context("Quero saber como est\u00e1 meu protocolo")
+    context["church_id"] = "T35120"
+
+    response = await handler.handle(context)
+
+    assert client.church_queries == ["35120"]
+    assert response is not None
+    assert "protocolo" in response
+
+
+@pytest.mark.asyncio
+async def test_status_intent_never_treats_current_chat_ticket_as_requested_protocol() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    context = _context("Quero saber como est\u00e1 meu protocolo")
+    context["ticket_id"] = "47029795230"
+
+    response = await handler.handle(context)
+
+    assert client.ticket_queries == []
+    assert client.church_queries == []
+    assert response == handler.REQUEST_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_explicit_church_id_phrase_lists_protocols() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("O ID da igreja local \u00e9 35120"))
+
+    assert client.church_queries == ["35120"]
+    assert response is not None
+    assert "igreja 35120" in response
 
 
 @pytest.mark.asyncio
@@ -218,9 +264,46 @@ async def test_plain_church_id_lists_protocols() -> None:
 
     assert client.church_queries == ["1573"]
     assert response is not None
-    assert "Falha no relat\u00f3rio" in response
-    assert "\u00e1rea com erro: Outros" in response
-    assert "prioridade M\u00e9dia" in response
+    assert "**T\u00edtulo:** Falha no relat\u00f3rio" in response
+    assert "**Status:** Em atendimento pelo time t\u00e9cnico" in response
+    assert "**Prioridade:** M\u00e9dia" in response
+    assert "**\u00c1rea com erro:** Outros" in response
+
+
+@pytest.mark.asyncio
+async def test_typical_five_digit_local_church_id_lists_church_protocols() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("35120"))
+
+    assert client.church_queries == ["35120"]
+    assert client.ticket_queries == []
+    assert response is not None
+
+
+@pytest.mark.asyncio
+async def test_explicit_protocol_intent_wins_even_for_a_five_digit_number() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("Quero o status do protocolo 35120"))
+
+    assert client.ticket_queries == ["35120"]
+    assert client.church_queries == []
+    assert response is not None
+
+
+@pytest.mark.asyncio
+async def test_explicit_church_intent_accepts_an_unusually_long_local_id() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("ID da igreja local: 12345678"))
+
+    assert client.church_queries == ["12345678"]
+    assert client.ticket_queries == []
+    assert response is not None
 
 
 @pytest.mark.asyncio
@@ -238,10 +321,67 @@ async def test_numeric_followup_queries_protocol() -> None:
 
     assert client.ticket_queries == ["26279339425"]
     assert response == (
-        'O ticket "Falha no relat\u00f3rio" (protocolo #26279339425) est\u00e1 em atendimento '
-        "pelo time t\u00e9cnico, com prioridade M\u00e9dia."
+        "Encontrei o ticket solicitado:\n\n"
+        "- **Protocolo:** #26279339425\n"
+        "- **T\u00edtulo:** Falha no relat\u00f3rio\n"
+        "- **Status:** Em atendimento pelo time t\u00e9cnico\n"
+        "- **Prioridade:** M\u00e9dia"
     )
     assert "\u00c1rea com erro" not in response
+
+
+@pytest.mark.asyncio
+async def test_ticket_response_keeps_required_fields_when_priority_is_missing() -> None:
+    from apps.ai_agents.services.protocol_lookup import TicketSummary
+
+    client = FakeClient()
+    client.get_ticket = AsyncMock(
+        return_value=TicketSummary(
+            protocol="46667856488",
+            name="Falha ao confirmar pedido de ora\u00e7\u00e3o",
+            error_area=None,
+            status="Sendo analisado pelo time t\u00e9cnico",
+            priority=None,
+        )
+    )
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("Status do protocolo 46667856488"))
+
+    assert response is not None
+    assert "**T\u00edtulo:** Falha ao confirmar pedido de ora\u00e7\u00e3o" in response
+    assert "**Status:** Sendo analisado pelo time t\u00e9cnico" in response
+    assert "**Prioridade:** N\u00e3o informada" in response
+
+
+@pytest.mark.asyncio
+async def test_numeric_protocol_after_status_question_survives_unhelpful_outgoing_reply() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    history = [
+        {"direction": "INCOMING", "text": "Quero saber como est\u00e1 meu protocolo"},
+        {"direction": "OUTGOING", "text": "N\u00e3o tenho uma atualiza\u00e7\u00e3o dispon\u00edvel."},
+    ]
+
+    response = await handler.handle(_context("46667856488", history=history))
+
+    assert client.ticket_queries == ["46667856488"]
+    assert response is not None
+    assert "**Protocolo:** #46667856488" in response
+
+
+@pytest.mark.asyncio
+async def test_explicit_protocol_takes_precedence_over_church_id() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(
+        _context("Quero o status do protocolo 46667856488. O ID da igreja local \u00e9 35120.")
+    )
+
+    assert client.ticket_queries == ["46667856488"]
+    assert client.church_queries == []
+    assert response is not None
 
 
 @pytest.mark.asyncio

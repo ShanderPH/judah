@@ -19,6 +19,7 @@ from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
 from apps.ai_agents.services.handoff import build_handoff_package
+from apps.ai_agents.services.instance_identity import conversation_idempotency_key, find_conversation_instance
 from apps.ai_agents.services.lifecycle import LifecycleEngine
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
 
@@ -55,36 +56,75 @@ def ensure_conversation_instance(
 ) -> ConversationInstance:
     """Return the canonical lifecycle instance, creating a safe fallback if needed."""
     thread_ids = context.get("thread_ids") or []
-    if thread_ids:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
-        if instance is not None:
-            return instance
-    effective_ticket_id = str(ticket_id or context.get("ticket_id") or "") or None
-    if effective_ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=effective_ticket_id).first()
-        if instance is not None:
-            return instance
-
     thread_id = str(thread_ids[0]) if thread_ids else None
-    idempotency_key = (
-        f"conversation:thread:{thread_id}"
-        if thread_id
-        else f"conversation:ticket:{effective_ticket_id}"
-        if effective_ticket_id
-        else f"conversation:session:{session_id}"
+    effective_ticket_id = str(ticket_id or context.get("ticket_id") or "") or None
+    instance = find_conversation_instance(thread_id=thread_id, ticket_id=effective_ticket_id)
+    if instance is not None:
+        _refresh_conversation_identity(
+            instance,
+            context=context,
+            thread_id=thread_id,
+            ticket_id=effective_ticket_id,
+            session_id=session_id,
+        )
+        return instance
+
+    idempotency_key = conversation_idempotency_key(
+        thread_id=thread_id,
+        ticket_id=effective_ticket_id,
+        session_id=session_id,
     )
-    return ConversationInstance.objects.create(
+    instance, _created = ConversationInstance.objects.get_or_create(
         idempotency_key=idempotency_key,
-        hubspot_thread_id=thread_id,
-        hubspot_ticket_id=effective_ticket_id,
-        channel=str(context.get("originating_channel") or "unknown"),
-        pipeline_id=str(context.get("pipeline") or "") or None,
-        pipeline_stage_id=str(context.get("pipeline_stage") or "") or None,
-        state=ConversationInstance.State.CONTEXT_HYDRATING,
-        ai_session_id=session_id,
-        last_activity_at=timezone.now(),
-        metadata={"created_by": "supervisor_worker_fallback"},
+        defaults={
+            "hubspot_thread_id": thread_id,
+            "hubspot_ticket_id": effective_ticket_id,
+            "channel": str(context.get("originating_channel") or "unknown"),
+            "pipeline_id": str(context.get("pipeline") or "") or None,
+            "pipeline_stage_id": str(context.get("pipeline_stage") or "") or None,
+            "state": ConversationInstance.State.CONTEXT_HYDRATING,
+            "ai_session_id": session_id,
+            "last_activity_at": timezone.now(),
+            "metadata": {"created_by": "supervisor_worker_fallback"},
+        },
     )
+    _refresh_conversation_identity(
+        instance,
+        context=context,
+        thread_id=thread_id,
+        ticket_id=effective_ticket_id,
+        session_id=session_id,
+    )
+    return instance
+
+
+def _refresh_conversation_identity(
+    instance: ConversationInstance,
+    *,
+    context: dict[str, Any],
+    thread_id: str | None,
+    ticket_id: str | None,
+    session_id: str,
+) -> None:
+    """Complete the external identifiers without changing conversation identity."""
+    update_fields: list[str] = []
+    values = {
+        "hubspot_thread_id": thread_id,
+        "hubspot_ticket_id": ticket_id,
+        "hubspot_contact_id": str((context.get("contact_ids") or [""])[0]) or None,
+        "channel": str(context.get("originating_channel") or "") or None,
+        "pipeline_id": str(context.get("pipeline") or "") or None,
+        "pipeline_stage_id": str(context.get("pipeline_stage") or "") or None,
+        "ai_session_id": session_id,
+    }
+    for field, value in values.items():
+        if value in (None, ""):
+            continue
+        if getattr(instance, field) != value:
+            setattr(instance, field, value)
+            update_fields.append(field)
+    if update_fields:
+        instance.save(update_fields=[*update_fields, "updated_at"])
 
 
 def _prepare_tool_call(

@@ -62,25 +62,32 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
         from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
 
         engine = LifecycleEngine()
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(hubspot_ticket_id)).first()
-        if instance is None:
+        instances = list(
+            ConversationInstance.objects.filter(
+                hubspot_ticket_id=str(hubspot_ticket_id),
+                state=ConversationInstance.State.QUEUE_PENDING,
+            )
+        )
+        if not instances:
             return
-        instance.assigned_agent_id = str(agent.hubspot_owner_id)
-        instance.save(update_fields=["assigned_agent_id", "updated_at"])
-        try:
-            engine.transition(
-                instance,
-                ConversationInstance.State.HUMAN_ASSIGNED,
-                reason="Matchmaker assigned the conversation to a human agent.",
-                actor_type="matchmaker",
-                actor_id=str(agent.hubspot_owner_id),
-            )
-        except InvalidStateTransitionError as exc:
-            logger.info(
-                "matchmaker_lifecycle_transition_skipped",
-                ticket_id=hubspot_ticket_id,
-                error=str(exc),
-            )
+        for instance in instances:
+            instance.assigned_agent_id = str(agent.hubspot_owner_id)
+            instance.save(update_fields=["assigned_agent_id", "updated_at"])
+            try:
+                engine.transition(
+                    instance,
+                    ConversationInstance.State.HUMAN_ASSIGNED,
+                    reason="Matchmaker assigned the conversation to a human agent.",
+                    actor_type="matchmaker",
+                    actor_id=str(agent.hubspot_owner_id),
+                )
+            except InvalidStateTransitionError as exc:
+                logger.info(
+                    "matchmaker_lifecycle_transition_skipped",
+                    ticket_id=hubspot_ticket_id,
+                    conversation_instance_id=str(instance.pk),
+                    error=str(exc),
+                )
     except Exception as exc:
         logger.warning(
             "matchmaker_lifecycle_transition_failed",

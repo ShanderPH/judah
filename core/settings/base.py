@@ -201,6 +201,11 @@ AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=
 # availability webhooks. Staging overrides this to False unconditionally.
 AGENT_STATUS_SYNC_ENABLED = config("AGENT_STATUS_SYNC_ENABLED", default=True, cast=bool)
 
+# Controls the HubSpot NOVO-stage backfill that writes to the internal routing
+# queue. Staging disables it because its database role is intentionally
+# non-authoritative for routing-state mutations.
+NOVO_STAGE_SYNC_ENABLED = config("NOVO_STAGE_SYNC_ENABLED", default=True, cast=bool)
+
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {

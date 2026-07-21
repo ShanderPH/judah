@@ -6,6 +6,7 @@ from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID
@@ -206,6 +207,21 @@ def test_sync_novo_stage_handles_external_failure() -> None:
     assert result["created"] == 0
     assert result["total_from_hubspot"] == 0
     assert "error" in result
+
+
+@override_settings(NOVO_STAGE_SYNC_ENABLED=False)
+def test_sync_novo_stage_stops_before_external_or_database_access() -> None:
+    with patch.object(auto_assign_service, "get_hubspot_client") as get_client:
+        result = auto_assign_service.sync_novo_stage_tickets()
+
+    assert result == {
+        "created": 0,
+        "skipped": 0,
+        "already_assigned": 0,
+        "total_from_hubspot": 0,
+        "disabled": True,
+    }
+    get_client.assert_not_called()
 
 
 @pytest.mark.django_db

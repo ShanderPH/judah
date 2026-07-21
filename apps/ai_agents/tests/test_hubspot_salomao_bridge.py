@@ -348,6 +348,7 @@ async def test_hydrate_ticket_context_success(monkeypatch) -> None:
             "hs_pipeline": "support",
             "hs_pipeline_stage": "new",
             "hs_ticket_priority": "HIGH",
+            "codigo_de_igreja_local___ticket": "T35120",
         },
         "associations": {
             "contacts": {"results": [{"id": "contact-1"}, {}]},
@@ -374,9 +375,10 @@ async def test_hydrate_ticket_context_success(monkeypatch) -> None:
         context = await hydrate_ticket_context("ticket-1")
 
     assert context["subject"] == "Ajuda"
+    assert context["church_id"] == "T35120"
     assert context["contact_ids"] == ["contact-1"]
-    assert context["thread_ids"] == ["thread-2", "thread-1"]
-    assert [message["id"] for message in context["conversation_history"]] == ["early", "late"]
+    assert context["thread_ids"] == ["thread-2"]
+    assert [message["id"] for message in context["conversation_history"]] == ["late"]
     assert context["errors"] == []
     hydrate_image.assert_awaited_once()
 
@@ -478,10 +480,20 @@ async def test_hydrate_thread_context_success_and_mock(monkeypatch) -> None:
         "associatedContactId": "contact-1",
         "originalChannelId": "CHAT",
     }
+    ticket = {
+        "properties": {
+            "subject": "Caso N2",
+            "hs_pipeline": "634240100",
+            "hs_pipeline_stage": "1060950862",
+            "codigo_de_igreja_local___ticket": "35120",
+        },
+        "associations": {},
+    }
     client = MagicMock()
     with (
         patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
         patch.object(hubspot, "_fetch_thread", new=AsyncMock(return_value=thread)),
+        patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)),
         patch.object(
             hubspot,
             "_fetch_conversation_history",
@@ -494,6 +506,9 @@ async def test_hydrate_thread_context_success_and_mock(monkeypatch) -> None:
     assert context["ticket_id"] == "ticket-1"
     assert context["contact_ids"] == ["contact-1"]
     assert context["originating_channel"] == "CHAT"
+    assert context["church_id"] == "35120"
+    assert context["pipeline"] == "634240100"
+    assert context["pipeline_stage"] == "1060950862"
 
     with patch.object(hubspot, "USE_MOCK_HUBSPOT", True):
         mocked = await hydrate_thread_context("thread-mock")

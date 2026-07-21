@@ -9,6 +9,7 @@ import pytest
 from django.test import override_settings
 from django.utils import timezone
 
+from apps.ai_agents.models import ConversationInstance
 from apps.support.models import (
     Agent,
     AgentDailyTimeLog,
@@ -479,6 +480,46 @@ class TestEnqueueNewTicket:
         result.refresh_from_db()
         assert result.queue_status == NewConversation.QueueStatus.FAILED
         assert result.failure_code == "predeploy_queue_cleared"
+
+
+# ---------------------------------------------------------------------------
+# Conversation lifecycle assignment tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_matchmaker_assignment_updates_each_queued_conversation_instance() -> None:
+    agent = _make_agent("Ana", 123)
+    first = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:assigned-first",
+        hubspot_thread_id="assigned-first",
+        hubspot_ticket_id="ticket-assigned-shared",
+        state=ConversationInstance.State.QUEUE_PENDING,
+    )
+    second = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:assigned-second",
+        hubspot_thread_id="assigned-second",
+        hubspot_ticket_id="ticket-assigned-shared",
+        state=ConversationInstance.State.QUEUE_PENDING,
+    )
+    waiting = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:assigned-waiting",
+        hubspot_thread_id="assigned-waiting",
+        hubspot_ticket_id="ticket-assigned-shared",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+
+    from apps.support.matchmaker_service import _transition_assigned_lifecycle
+
+    _transition_assigned_lifecycle("ticket-assigned-shared", agent)
+
+    first.refresh_from_db()
+    second.refresh_from_db()
+    waiting.refresh_from_db()
+    assert first.state == second.state == ConversationInstance.State.HUMAN_ASSIGNED
+    assert first.assigned_agent_id == second.assigned_agent_id == "123"
+    assert waiting.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert waiting.assigned_agent_id is None
 
 
 # ---------------------------------------------------------------------------

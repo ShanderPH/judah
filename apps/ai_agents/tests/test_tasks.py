@@ -213,7 +213,7 @@ def test_thread_task_coalesces_busy_and_cross_ticket_followups() -> None:
         run_salomao_v1_thread_pipeline_task.run("thread-1")
 
     ticket_busy_client.set.assert_any_call(
-        "salomao:supervisor:pending:ticket-1",
+        "salomao:supervisor:thread-pending:thread-1",
         "1",
         ex=600,
     )
@@ -278,7 +278,10 @@ def test_handoff_task_hydrates_thread_and_ticket() -> None:
             "apps.ai_agents.tasks.asyncio.run",
             return_value={"ticket_id": "ticket-1", "thread_ids": ["thread-1"]},
         ),
-        patch("apps.ai_agents.services.execution.ensure_conversation_instance", return_value=instance),
+        patch(
+            "apps.ai_agents.services.execution.ensure_conversation_instance",
+            return_value=instance,
+        ) as ensure_instance,
         patch(
             "apps.ai_agents.services.hubspot.build_conversation_context_from_hubspot_context",
             return_value=conversation_context,
@@ -287,14 +290,21 @@ def test_handoff_task_hydrates_thread_and_ticket() -> None:
     ):
         request_human_handoff_task.run(thread_id="thread-1", reason="risk")
     handoff.assert_called_once()
+    assert ensure_instance.call_args.kwargs["session_id"] == "hubspot-thread-thread-1"
 
     with (
         patch(
             "apps.ai_agents.services.hubspot.hydrate_ticket_context",
             new=Mock(return_value="ticket-coro"),
         ),
-        patch("apps.ai_agents.tasks.asyncio.run", return_value={"ticket_id": "ticket-2"}),
-        patch("apps.ai_agents.services.execution.ensure_conversation_instance", return_value=instance),
+        patch(
+            "apps.ai_agents.tasks.asyncio.run",
+            return_value={"ticket_id": "ticket-2", "thread_ids": ["thread-2"]},
+        ),
+        patch(
+            "apps.ai_agents.services.execution.ensure_conversation_instance",
+            return_value=instance,
+        ) as ensure_instance,
         patch(
             "apps.ai_agents.services.hubspot.build_conversation_context_from_hubspot_context",
             return_value=conversation_context,
@@ -303,6 +313,7 @@ def test_handoff_task_hydrates_thread_and_ticket() -> None:
     ):
         request_human_handoff_task.run(ticket_id="ticket-2", reason="risk")
     handoff.assert_called_once()
+    assert ensure_instance.call_args.kwargs["session_id"] == "hubspot-thread-thread-2"
 
 
 def test_handoff_task_retries_invalid_request() -> None:

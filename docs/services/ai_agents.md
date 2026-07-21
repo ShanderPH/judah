@@ -94,7 +94,11 @@ Custo e consumo de tokens por execução.
 
 ## Lifecycle deterministico
 
-- `ConversationInstance`: instancia persistida da state machine de atendimento.
+- `ConversationInstance`: instância persistida da state machine de atendimento. Cada
+  `hubspot_thread_id` identifica exatamente uma conversa e possui estado, sessão,
+  eventos, execuções e auditorias independentes. Um mesmo ticket pode conter várias
+  instâncias de conversa. Eventos que possuem apenas `ticket_id` usam um registro de
+  escopo do ticket sem `thread_id` e nunca reutilizam uma conversa arbitrária.
 - `ConversationEvent`: ledger append-only de eventos normalizados a partir de webhooks HubSpot.
 - `ConversationStateTransition`: trilha auditavel de toda mudanca de estado.
 - `AgentRun`: snapshot de execucao de agente/modelo com entrada, saida, tokens, latencia, custo e status.

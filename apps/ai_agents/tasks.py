@@ -246,12 +246,14 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
                 )
             )
             if not ticket_lock_acquired:
-                client.set(ticket_pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
+                # Keep the retry attached to this exact conversation. A
+                # ticket-level follow-up could hydrate a different thread.
+                client.set(pending_key, "1", ex=_IDEMPOTENCY_TTL_SECONDS)
                 logger.info(
                     "supervisor_thread_ticket_busy",
                     thread_id=thread_id,
                     ticket_id=ticket_id,
-                    followup_queued=True,
+                    followup_queued="thread",
                 )
                 succeeded = True
                 return
@@ -325,14 +327,15 @@ def request_human_handoff_task(
     try:
         if thread_id:
             context = asyncio.run(hydrate_thread_context(str(thread_id)))
-            session_id = (
-                f"hubspot-ticket-{context.get('ticket_id')}"
-                if context.get("ticket_id")
-                else f"hubspot-thread-{thread_id}"
-            )
+            session_id = f"hubspot-thread-{thread_id}"
         elif ticket_id:
             context = asyncio.run(hydrate_ticket_context(str(ticket_id)))
-            session_id = f"hubspot-ticket-{ticket_id}"
+            hydrated_thread_ids = context.get("thread_ids") or []
+            session_id = (
+                f"hubspot-thread-{hydrated_thread_ids[0]}"
+                if hydrated_thread_ids
+                else f"hubspot-ticket-{ticket_id}"
+            )
         else:
             raise ValueError("thread_id or ticket_id is required for human handoff.")
 

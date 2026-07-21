@@ -45,6 +45,7 @@ from apps.ai_agents.services.hubspot import (
     hydrate_thread_context,
     hydrate_ticket_context,
 )
+from apps.ai_agents.services.instance_identity import find_conversation_instance
 from apps.ai_agents.services.lifecycle import (
     InvalidStateTransitionError,
     LifecycleEngine,
@@ -114,11 +115,10 @@ def _record_hubspot_turn_audit(
         logger.warning("hubspot_turn_audit_schema_missing", ticket_id=ticket_id, session_id=session_id)
         return
     thread_ids = context.get("thread_ids") or []
-    instance = None
-    if thread_ids:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
-    if instance is None and ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    instance = find_conversation_instance(
+        thread_id=str(thread_ids[0]) if thread_ids else None,
+        ticket_id=ticket_id,
+    )
     if instance is None:
         return
 
@@ -168,12 +168,14 @@ def _record_hubspot_turn_audit(
             status=AgentRun.Status.SUCCEEDED,
         )
 
+    thread_id = str(thread_ids[0]) if thread_ids else ""
+    effective_ticket_id = str(ticket_id or context.get("ticket_id") or "")
     effects = (
-        ("update_ticket_stage_active", active_stage_result, "updated"),
-        ("send_thread_reply", reply_result, "sent"),
-        ("update_ticket_stage_final", final_stage_result, "updated"),
+        ("update_ticket_stage_active", active_stage_result, "updated", "hubspot_ticket", effective_ticket_id),
+        ("send_thread_reply", reply_result, "sent", "hubspot_thread", thread_id),
+        ("update_ticket_stage_final", final_stage_result, "updated", "hubspot_ticket", effective_ticket_id),
     )
-    for tool_name, effect_result, success_field in effects:
+    for tool_name, effect_result, success_field, external_object_type, external_object_id in effects:
         succeeded = bool(effect_result.get(success_field))
         engine.record_tool_call(
             instance=instance,
@@ -183,8 +185,8 @@ def _record_hubspot_turn_audit(
             input_payload={"ticket_id": ticket_id, "session_id": session_id},
             output_payload=effect_result,
             status=ToolCallAuditLog.Status.SUCCEEDED if succeeded else ToolCallAuditLog.Status.FAILED,
-            external_object_type="hubspot_ticket" if "stage" in tool_name else "hubspot_thread",
-            external_object_id=str(ticket_id or (thread_ids[0] if thread_ids else "")),
+            external_object_type=external_object_type,
+            external_object_id=external_object_id,
         )
 
     if handoff_reason:
@@ -347,13 +349,10 @@ def _advance_lifecycle_for_hubspot_context(
 ) -> None:
     """Best-effort lifecycle transition for async HubSpot worker paths."""
     thread_ids = context.get("thread_ids") or []
-    instance = None
-    if thread_ids:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_ids[0])).first()
-    if instance is None and ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
-    if instance is None and context.get("ticket_id"):
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(context["ticket_id"])).first()
+    instance = find_conversation_instance(
+        thread_id=str(thread_ids[0]) if thread_ids else None,
+        ticket_id=ticket_id or context.get("ticket_id"),
+    )
     if instance is None:
         return
 
@@ -427,6 +426,19 @@ def _prepare_instance_for_supervisor(instance: ConversationInstance) -> None:
 
 
 @sync_to_async
+def _resume_waiting_instance_for_customer_message(instance: ConversationInstance) -> None:
+    """Start a new AI turn when a customer replies to a waiting conversation."""
+    instance.refresh_from_db()
+    if instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER:
+        LifecycleEngine().transition(
+            instance,
+            ConversationInstance.State.CONTEXT_HYDRATING,
+            reason="New customer message resumed context hydration.",
+            actor_type="supervisor_worker",
+        )
+
+
+@sync_to_async
 def _mark_pipeline_failure(
     *,
     ticket_id: str | None = None,
@@ -434,11 +446,7 @@ def _mark_pipeline_failure(
     error: Exception,
 ) -> None:
     """Correlate uncaught worker failures with the lifecycle retry budget."""
-    instance = None
-    if thread_id:
-        instance = ConversationInstance.objects.filter(hubspot_thread_id=str(thread_id)).first()
-    if instance is None and ticket_id:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+    instance = find_conversation_instance(thread_id=thread_id, ticket_id=ticket_id)
     if instance is not None and instance.state != ConversationInstance.State.FAILED_RETRYABLE:
         mark_retryable_failure(instance, error)
 
@@ -524,6 +532,10 @@ async def _run_supervisor_for_hubspot_context(
         logger.info("supervisor_hubspot_channel_requires_handoff", ticket_id=ticket_id, session_id=session_id)
         return
 
+    # A previous successful reply intentionally leaves the instance waiting
+    # for the customer. A genuine new incoming message starts another turn and
+    # must re-enter hydration before the supervisor can send its next reply.
+    await _resume_waiting_instance_for_customer_message(instance)
     await _advance_lifecycle_for_hubspot_context(
         context,
         ticket_id,
@@ -615,6 +627,7 @@ async def _run_supervisor_pipeline(
     enforce_ai_pipeline: bool = False,
 ) -> None:
     """Hydrate and execute the Supervisor, propagating failures to Celery."""
+    context: dict[str, Any] = {}
     try:
         context = await hydrate_ticket_context(ticket_id)
         if context.get("errors") and not context.get("subject"):
@@ -631,7 +644,8 @@ async def _run_supervisor_pipeline(
             )
             return
 
-        session_id = f"hubspot-ticket-{ticket_id}"
+        thread_ids = context.get("thread_ids") or []
+        session_id = f"hubspot-thread-{thread_ids[0]}" if thread_ids else f"hubspot-ticket-{ticket_id}"
 
         await _run_supervisor_for_hubspot_context(
             context,
@@ -640,7 +654,12 @@ async def _run_supervisor_pipeline(
             is_off_hours=is_off_hours,
         )
     except Exception as exc:
-        await _mark_pipeline_failure(ticket_id=ticket_id, error=exc)
+        thread_ids = context.get("thread_ids") or []
+        await _mark_pipeline_failure(
+            ticket_id=ticket_id,
+            thread_id=str(thread_ids[0]) if thread_ids else None,
+            error=exc,
+        )
         logger.error(
             "supervisor_pipeline_failed",
             ticket_id=ticket_id,
@@ -663,7 +682,7 @@ async def _run_salomao_v1_thread_pipeline(
             raise RuntimeError(f"HubSpot thread context hydration failed: {context['errors']}")
 
         ticket_id = context.get("ticket_id") or None
-        session_id = f"hubspot-ticket-{ticket_id}" if ticket_id else f"hubspot-thread-{thread_id}"
+        session_id = f"hubspot-thread-{thread_id}"
 
         await _run_supervisor_for_hubspot_context(
             context,

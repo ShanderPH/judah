@@ -21,6 +21,7 @@ from apps.ai_agents.models import (
     ToolCallAuditLog,
 )
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
+from apps.ai_agents.services.instance_identity import find_conversation_instance, ticket_scope_instances
 
 logger = structlog.get_logger(__name__)
 
@@ -545,7 +546,7 @@ class LifecycleEngine:
         return instance
 
     def transition_by_ticket(self, ticket_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+        instance = find_conversation_instance(ticket_id=str(ticket_id))
         if instance is None:
             return False
         self.transition(instance, to_state, reason=reason, actor_id=actor_id)
@@ -660,7 +661,9 @@ class LifecycleEngine:
         if event.hubspot_thread_id:
             lookup = {"hubspot_thread_id": event.hubspot_thread_id}
         elif event.hubspot_ticket_id:
-            lookup = {"hubspot_ticket_id": event.hubspot_ticket_id}
+            instance = ticket_scope_instances(event.hubspot_ticket_id).select_for_update().first()
+            if instance is not None:
+                return instance, False
 
         if lookup:
             instance = ConversationInstance.objects.filter(**lookup).select_for_update().first()

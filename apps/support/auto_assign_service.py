@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -521,6 +522,16 @@ def sync_novo_stage_tickets() -> dict:
         Dict with ``created``, ``skipped``, ``already_assigned``,
         ``total_from_hubspot`` counts.
     """
+    if not settings.NOVO_STAGE_SYNC_ENABLED:
+        logger.info("sync_novo_stage_tickets_disabled")
+        return {
+            "created": 0,
+            "skipped": 0,
+            "already_assigned": 0,
+            "total_from_hubspot": 0,
+            "disabled": True,
+        }
+
     logger.info("sync_novo_stage_tickets_start")
 
     try:

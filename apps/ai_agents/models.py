@@ -15,7 +15,7 @@ class AgentSession(models.Model):
         HEIMDALL = "heimdall", "Heimdall"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session_id = models.CharField(max_length=100, unique=True, db_index=True)
+    session_id = models.CharField(max_length=255, unique=True, db_index=True)
     agent_type = models.CharField(max_length=20, choices=AgentType.choices, default=AgentType.SALOMAO)
     user_identifier = models.CharField(max_length=255, blank=True, db_index=True)
     channel = models.CharField(max_length=50, blank=True)
@@ -90,7 +90,7 @@ class TokenTrackingLog(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session_id = models.CharField(max_length=100, db_index=True)
+    session_id = models.CharField(max_length=255, db_index=True)
     ticket_id = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     model_name = models.CharField(max_length=100)
     prompt_tokens = models.IntegerField(default=0)
@@ -150,7 +150,7 @@ class ConversationInstance(models.Model):
     last_event_id = models.CharField(max_length=255, blank=True)
     last_message_id = models.CharField(max_length=255, blank=True)
     assigned_agent_id = models.CharField(max_length=100, null=True, blank=True)
-    ai_session_id = models.CharField(max_length=100, blank=True)
+    ai_session_id = models.CharField(max_length=255, blank=True)
     opened_at = models.DateTimeField(auto_now_add=True, db_index=True)
     last_activity_at = models.DateTimeField(null=True, blank=True, db_index=True)
     closed_at = models.DateTimeField(null=True, blank=True)
@@ -169,11 +169,6 @@ class ConversationInstance(models.Model):
                 fields=["hubspot_thread_id"],
                 condition=Q(hubspot_thread_id__isnull=False) & ~Q(hubspot_thread_id=""),
                 name="unique_conversation_instance_thread",
-            ),
-            models.UniqueConstraint(
-                fields=["hubspot_ticket_id"],
-                condition=Q(hubspot_ticket_id__isnull=False) & ~Q(hubspot_ticket_id=""),
-                name="unique_conversation_instance_ticket",
             ),
         ]
         indexes = [  # noqa: RUF012
