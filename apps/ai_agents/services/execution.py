@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -37,6 +38,31 @@ def _text_fingerprint(text: str) -> dict[str, Any]:
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "length": len(text),
     }
+
+
+def _latest_incoming_turn_id(context: dict[str, Any]) -> str:
+    """Return a stable identifier for the latest customer message.
+
+    Ticket-property webhooks do not include HubSpot's message ID. The hydrated
+    conversation history does, so use it as the canonical turn identity. A
+    deterministic fingerprint keeps separate turns distinct when a channel
+    omits the ID while still deduplicating retries of the same turn.
+    """
+    for message in reversed(context.get("conversation_history") or []):
+        if str(message.get("direction") or "").upper() != "INCOMING":
+            continue
+        if message.get("id"):
+            return str(message["id"])
+        fingerprint = {
+            "thread_id": message.get("thread_id"),
+            "created_at": message.get("created_at"),
+            "sender": message.get("sender"),
+            "text": message.get("text"),
+            "attachments": message.get("attachments") or [],
+        }
+        serialized = json.dumps(fingerprint, sort_keys=True, default=str, ensure_ascii=False)
+        return f"sha256:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -116,6 +142,7 @@ def _refresh_conversation_identity(
         "pipeline_id": str(context.get("pipeline") or "") or None,
         "pipeline_stage_id": str(context.get("pipeline_stage") or "") or None,
         "ai_session_id": session_id,
+        "last_message_id": _latest_incoming_turn_id(context),
     }
     for field, value in values.items():
         if value in (None, ""):
@@ -516,11 +543,13 @@ async def apply_supervisor_result(
         return
 
     if can_reply and decision.final_response:
-        reply_key = (
-            f"{decision.hubspot_action.idempotency_key}:{instance.last_message_id or instance.last_event_id}"
-            if decision.hubspot_action is not None
-            else f"reply:{instance.pk}:{instance.last_message_id or instance.last_event_id}"
-        )
+        turn_id = instance.last_message_id or instance.last_event_id
+        if not turn_id:
+            raise RuntimeError("Cannot send a HubSpot reply without a customer turn identifier.")
+        # A customer turn may reach Judah through both a stage event and a
+        # customer-message event. Keep one canonical reply key independent of
+        # which agent path produced the answer.
+        reply_key = f"reply:{instance.pk}:{turn_id}"
         reply_result = await send_reply_with_audit(
             instance=instance,
             context=context,
