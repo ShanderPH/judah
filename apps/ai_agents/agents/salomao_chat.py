@@ -17,19 +17,15 @@ from apps.ai_agents.contracts import (
     SalomaoChatDraft,
     TriageDecision,
 )
+from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
 from apps.integrations.salomao_v1 import SalomaoV1ChatResult, SalomaoV1Client, is_salomao_v1_configured
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
 
-_CURRENT_CUSTOMER_MESSAGE_MARKER = "Mensagem atual do cliente:"
-
-
 def _current_customer_message(message: str) -> str:
     """Extract the current customer turn from Judah's HubSpot envelope."""
-    if _CURRENT_CUSTOMER_MESSAGE_MARKER not in message:
-        return message.strip()
-    return message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1].strip()
+    return extract_current_customer_turn(message)
 
 
 def _safe_context(value: ConversationContext | dict[str, Any] | None) -> ConversationContext | None:
@@ -75,6 +71,7 @@ def build_salomao_chat_prompt(
     current_message = _current_customer_message(message)
     parts = [
         "Atendimento InChurch via JUDAH",
+        "Quando o turno atual trouxer mensagens consecutivas numeradas, trate todas como uma unica fala: conecte os fragmentos, preserve a ordem e responda a intencao completa, nao apenas a ultima linha.",
         "",
         "Diretrizes de condução da conversa:",
         "- Leia a mensagem atual junto com todo o histórico recente. Considere como conhecidos os dados que o cliente já informou e nunca faça a mesma pergunta de novo.",

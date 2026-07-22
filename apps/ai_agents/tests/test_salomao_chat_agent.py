@@ -91,6 +91,21 @@ def _conversation_context() -> ConversationContext:
     )
 
 
+def test_salomao_chat_prompt_extracts_grouped_customer_turn() -> None:
+    prompt = build_salomao_chat_prompt(
+        message=(
+            "Atendimento HubSpot\nTicket: 456\nHistorico recente:\n"
+            "[OUTGOING] Como posso ajudar?\n\n"
+            "Turno atual do cliente (mensagens consecutivas, em ordem):\n"
+            "1. Tenho interesse\n2. nos planos e valores"
+        )
+    )
+
+    assert "Mensagem atual:\n1. Tenho interesse\n2. nos planos e valores" in prompt
+    assert "responda a intencao completa" in prompt
+    assert "Atendimento HubSpot\nTicket: 456" not in prompt
+
+
 @override_settings(SALOMAO_V1_BASE_URL="http://salomao.local")
 async def test_salomao_chat_tool_returns_structured_draft() -> None:
     tool = SalomaoChatTool(

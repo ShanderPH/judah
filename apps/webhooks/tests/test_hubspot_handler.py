@@ -71,10 +71,10 @@ class TestHandleHubspotEvent:
             {"objectId": "77", "threadId": "thread-77", "channel": "whatsapp", "direction": "INCOMING"},
         )
 
-        with patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.delay") as mock_delay:
+        with patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn") as mock_schedule:
             handle_hubspot_event(event)
 
-        mock_delay.assert_called_once_with("thread-77")
+        mock_schedule.assert_called_once_with("thread-77")
 
     def test_unknown_event_logs_only(self) -> None:
         event = _event("something.weird", {"objectId": "1"})
@@ -169,11 +169,15 @@ class TestHandleHubspotEvent:
             patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
             patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
             patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
-            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+            patch("apps.ai_agents.tasks.schedule_supervisor_customer_turn") as mock_schedule,
         ):
             handle_hubspot_event(event)
 
-        mock_delay.assert_called_once_with("ticket-ai", False, True, True)
+        mock_schedule.assert_called_once_with(
+            "ticket-ai",
+            is_off_hours=False,
+            enforce_ai_pipeline=True,
+        )
 
     @override_settings(
         AI_ROUTING_ENABLED=True,
@@ -189,10 +193,10 @@ class TestHandleHubspotEvent:
             },
         )
 
-        with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
+        with patch("apps.ai_agents.tasks.schedule_supervisor_customer_turn") as mock_schedule:
             handle_hubspot_event(event)
 
-        mock_delay.assert_not_called()
+        mock_schedule.assert_not_called()
 
     @override_settings(HUBSPOT_AI_TRIAGE_STAGE_ID="ai-triage")
     def test_active_ai_stage_does_not_dispatch_duplicate_turn(self) -> None:

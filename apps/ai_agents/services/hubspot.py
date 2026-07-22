@@ -30,6 +30,11 @@ from django.conf import settings
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
+from apps.ai_agents.services.conversation_turn import (
+    CURRENT_CUSTOMER_TURN_MARKER,
+    current_incoming_turn,
+    current_incoming_turn_text,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -695,33 +700,32 @@ async def hydrate_thread_context(
 
 
 def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
-    history = context.get("conversation_history") or []
-    usable = [
-        message
-        for message in history
-        if (
-            (message.get("text") or "").strip()
-            or any(_looks_like_image_attachment(a) for a in message.get("attachments") or [] if isinstance(a, dict))
-        )
-    ]
-    if not usable:
-        return None
-    latest = usable[-1]
-    return latest if (latest.get("direction") or "").upper() == "INCOMING" else None
+    turn = current_incoming_turn(context)
+    return turn[-1] if turn else None
 
 
 def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | None:
-    """Build the text Judah sends to Salomao v1 from HubSpot chat context."""
+    """Build a prompt whose current turn groups consecutive customer messages."""
     latest = _latest_incoming_message(context)
     if not latest:
         return None
 
+    history = context.get("conversation_history") or []
+    last_outgoing_index = max(
+        (
+            index
+            for index, message in enumerate(history)
+            if str(message.get("direction") or "").upper() == "OUTGOING"
+        ),
+        default=-1,
+    )
     history_lines = [
         f"[{message.get('direction')}] {message.get('text')}"
-        for message in context.get("conversation_history", [])
+        for message in history[: last_outgoing_index + 1]
         if message.get("text")
     ]
-    history_block = "\n".join(history_lines[-12:])
+    history_block = "\n".join(history_lines[-12:]) or "(sem mensagens anteriores)"
+    current_turn = current_incoming_turn_text(context)
     ticket_id = context.get("ticket_id") or "(sem ticket associado)"
     subject = context.get("subject") or "(sem assunto)"
 
@@ -730,7 +734,7 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
         f"Ticket: {ticket_id}\n"
         f"Assunto: {subject}\n\n"
         f"Historico recente:\n{history_block}\n\n"
-        f"Mensagem atual do cliente:\n{latest.get('text') or '[Imagem enviada pelo cliente]'}"
+        f"{CURRENT_CUSTOMER_TURN_MARKER}\n{current_turn}"
     )
 
 
@@ -813,8 +817,23 @@ def _recipient_from_sender(sender: dict[str, Any]) -> dict[str, Any]:
 
 def _format_inline_markdown(value: str) -> str:
     """Render the small, safe Markdown subset used in Salomao replies."""
-    escaped = html.escape(value, quote=True)
     placeholders: dict[str, str] = {}
+
+    def preserve_link(match: re.Match[str]) -> str:
+        raw_url = match.group(2).strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return match.group(0)
+        key = f"\x00LINK{len(placeholders)}\x00"
+        label = html.escape(match.group(1), quote=False)
+        safe_url = html.escape(raw_url, quote=True)
+        placeholders[key] = (
+            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+        )
+        return key
+
+    value = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", preserve_link, value)
+    escaped = html.escape(value, quote=True)
 
     def preserve_code(match: re.Match[str]) -> str:
         key = f"\x00CODE{len(placeholders)}\x00"

@@ -396,6 +396,12 @@ def test_handoff_policy_does_not_escalate_normal_product_questions_or_mild_frust
     assert _deterministic_handoff_trigger("Vou denunciar isso no Procon") == "severe_aggression"
     assert _deterministic_handoff_trigger("Vou cancelar o contrato") == "severe_aggression"
     assert _deterministic_handoff_trigger("Vou cancelar meu evento para criar outro") is None
+    grouped_turn = (
+        "Atendimento HubSpot\nHistorico recente:\n[INCOMING] Quero falar com um humano\n\n"
+        "Turno atual do cliente (mensagens consecutivas, em ordem):\n"
+        "1. Obrigado\n2. Como criar um evento?"
+    )
+    assert _deterministic_handoff_trigger(grouped_turn) is None
 
 
 def test_integrated_chain_uses_salomao_v1_for_high_priority() -> None:

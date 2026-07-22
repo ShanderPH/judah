@@ -55,7 +55,28 @@ def test_build_salomao_prompt_uses_latest_incoming_message() -> None:
     assert prompt is not None
     assert "Ticket: 123" in prompt
     assert "Assunto: Ajuda no evento" in prompt
-    assert "Mensagem atual do cliente:\nMeu evento nao aparece no app." in prompt
+    assert "Turno atual do cliente (mensagens consecutivas, em ordem):\nMeu evento nao aparece no app." in prompt
+
+
+def test_build_salomao_prompt_groups_consecutive_customer_messages() -> None:
+    context = {
+        "ticket_id": "123",
+        "subject": "Planos",
+        "conversation_history": [
+            {"direction": "OUTGOING", "text": "Como posso ajudar?", "id": "m1"},
+            {"direction": "INCOMING", "text": "Tenho interesse", "id": "m2"},
+            {"direction": "INCOMING", "text": "nos planos e valores", "id": "m3"},
+            {"direction": "INCOMING", "text": "para minha igreja", "id": "m4"},
+        ],
+    }
+
+    prompt = build_salomao_prompt_from_hubspot_context(context)
+
+    assert prompt is not None
+    assert "1. Tenho interesse" in prompt
+    assert "2. nos planos e valores" in prompt
+    assert "3. para minha igreja" in prompt
+    assert prompt.index("1. Tenho interesse") < prompt.index("3. para minha igreja")
 
 
 def test_build_salomao_prompt_skips_when_no_incoming_message() -> None:
@@ -98,7 +119,7 @@ def test_build_salomao_prompt_accepts_image_without_caption() -> None:
     prompt = build_salomao_prompt_from_hubspot_context(context)
 
     assert prompt is not None
-    assert "Mensagem atual do cliente:\n[Imagem enviada pelo cliente]" in prompt
+    assert "Turno atual do cliente (mensagens consecutivas, em ordem):\n[Imagem enviada pelo cliente]" in prompt
 
 
 async def test_fetch_history_keeps_hubspot_attachments() -> None:
@@ -590,6 +611,19 @@ def test_markdown_to_hubspot_rich_text_escapes_raw_html() -> None:
     assert "&lt;script&gt;" in rendered
     assert "<code>código</code>" in rendered
     assert "<em>ênfase</em>" in rendered
+
+
+def test_markdown_to_hubspot_rich_text_renders_safe_links() -> None:
+    rendered = hubspot.markdown_to_hubspot_rich_text(
+        "[Formulário](https://form.typeform.com/to/S7EC8j4N)"
+    )
+
+    assert (
+        '<a href="https://form.typeform.com/to/S7EC8j4N" target="_blank" '
+        'rel="noopener noreferrer">Formulário</a>'
+    ) in rendered
+    unsafe = hubspot.markdown_to_hubspot_rich_text("[Clique](javascript:alert(1))")
+    assert "<a " not in unsafe
 
 
 @pytest.mark.asyncio

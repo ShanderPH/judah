@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -19,6 +18,10 @@ from apps.ai_agents.agents.base import DEFAULT_MINI_MODEL_ID
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
+from apps.ai_agents.services.conversation_turn import (
+    current_incoming_turn_audit,
+    latest_incoming_message_id,
+)
 from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.instance_identity import conversation_idempotency_key, find_conversation_instance
 from apps.ai_agents.services.lifecycle import LifecycleEngine
@@ -38,31 +41,6 @@ def _text_fingerprint(text: str) -> dict[str, Any]:
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "length": len(text),
     }
-
-
-def _latest_incoming_turn_id(context: dict[str, Any]) -> str:
-    """Return a stable identifier for the latest customer message.
-
-    Ticket-property webhooks do not include HubSpot's message ID. The hydrated
-    conversation history does, so use it as the canonical turn identity. A
-    deterministic fingerprint keeps separate turns distinct when a channel
-    omits the ID while still deduplicating retries of the same turn.
-    """
-    for message in reversed(context.get("conversation_history") or []):
-        if str(message.get("direction") or "").upper() != "INCOMING":
-            continue
-        if message.get("id"):
-            return str(message["id"])
-        fingerprint = {
-            "thread_id": message.get("thread_id"),
-            "created_at": message.get("created_at"),
-            "sender": message.get("sender"),
-            "text": message.get("text"),
-            "attachments": message.get("attachments") or [],
-        }
-        serialized = json.dumps(fingerprint, sort_keys=True, default=str, ensure_ascii=False)
-        return f"sha256:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
-    return ""
 
 
 @dataclass(frozen=True)
@@ -142,7 +120,7 @@ def _refresh_conversation_identity(
         "pipeline_id": str(context.get("pipeline") or "") or None,
         "pipeline_stage_id": str(context.get("pipeline_stage") or "") or None,
         "ai_session_id": session_id,
-        "last_message_id": _latest_incoming_turn_id(context),
+        "last_message_id": latest_incoming_message_id(context),
     }
     for field, value in values.items():
         if value in (None, ""):
@@ -150,6 +128,13 @@ def _refresh_conversation_identity(
         if getattr(instance, field) != value:
             setattr(instance, field, value)
             update_fields.append(field)
+    turn_audit = current_incoming_turn_audit(context)
+    if turn_audit is not None:
+        metadata = dict(instance.metadata or {})
+        if metadata.get("latest_customer_turn") != turn_audit:
+            metadata["latest_customer_turn"] = turn_audit
+            instance.metadata = metadata
+            update_fields.append("metadata")
     if update_fields:
         instance.save(update_fields=[*update_fields, "updated_at"])
 

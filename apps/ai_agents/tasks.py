@@ -13,7 +13,10 @@ against duplicate execution when HubSpot retries the same webhook.
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from functools import lru_cache
+from typing import Any
 
 import redis
 import structlog
@@ -34,6 +37,16 @@ _THREAD_LOCK_KEY_PREFIX = "salomao:supervisor:thread"
 _PENDING_KEY_PREFIX = "salomao:supervisor:pending"
 _THREAD_PENDING_KEY_PREFIX = "salomao:supervisor:thread-pending"
 _STAGE_TRIGGER_KEY_PREFIX = "salomao:supervisor:stage-trigger"
+_MESSAGE_BATCH_TOKEN_KEY_PREFIX = "salomao:message-batch:token"
+_MESSAGE_BATCH_STARTED_KEY_PREFIX = "salomao:message-batch:started"
+_MESSAGE_BATCH_TTL_SECONDS = 300
+_CLAIM_MESSAGE_BATCH_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    redis.call('del', KEYS[1], KEYS[2])
+    return 1
+end
+return 0
+"""
 
 
 @lru_cache(maxsize=4)
@@ -55,6 +68,120 @@ def _redis_client() -> redis.Redis:
     return _shared_lock_client(redis_url, max_connections)
 
 
+def _message_batch_windows() -> tuple[float, float]:
+    """Return bounded quiet and maximum wait windows for customer bursts."""
+    quiet_seconds = max(
+        0.5,
+        min(float(getattr(settings, "SALOMAO_MESSAGE_QUIET_SECONDS", 4.0)), 30.0),
+    )
+    max_wait_seconds = max(
+        quiet_seconds,
+        min(float(getattr(settings, "SALOMAO_MESSAGE_MAX_WAIT_SECONDS", 12.0)), 60.0),
+    )
+    return quiet_seconds, max_wait_seconds
+
+
+def _decode_redis_value(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _schedule_customer_message_batch(
+    *,
+    scope: str,
+    identifier: str,
+    task: Any,  # Celery's decorated task proxy has no useful static protocol.
+    args: tuple[object, ...],
+) -> str | None:
+    """Schedule only the newest task after a short customer-message pause."""
+    quiet_seconds, max_wait_seconds = _message_batch_windows()
+    now = time.time()
+    token = uuid.uuid4().hex
+    token_key = f"{_MESSAGE_BATCH_TOKEN_KEY_PREFIX}:{scope}:{identifier}"
+    started_key = f"{_MESSAGE_BATCH_STARTED_KEY_PREFIX}:{scope}:{identifier}"
+
+    coordinated = False
+    countdown = quiet_seconds
+    try:
+        client = _redis_client()
+        client.set(started_key, f"{now:.6f}", nx=True, ex=_MESSAGE_BATCH_TTL_SECONDS)
+        started_raw = _decode_redis_value(client.get(started_key))
+        try:
+            started_at = float(started_raw)
+        except (TypeError, ValueError):
+            started_at = now
+        client.set(token_key, token, ex=_MESSAGE_BATCH_TTL_SECONDS)
+        countdown = max(0.0, min(quiet_seconds, started_at + max_wait_seconds - now))
+        coordinated = True
+        logger.info(
+            "salomao_customer_message_batched",
+            scope=scope,
+            identifier=identifier,
+            countdown_seconds=round(countdown, 3),
+            max_wait_seconds=max_wait_seconds,
+        )
+    except redis.RedisError as exc:
+        # HubSpot remains the durable message store. If coordination is down,
+        # delayed tasks and the existing per-conversation locks still prevent
+        # loss and most duplicate processing.
+        logger.warning(
+            "salomao_customer_message_batch_degraded",
+            scope=scope,
+            identifier=identifier,
+            countdown_seconds=quiet_seconds,
+            error=str(exc),
+        )
+    if coordinated:
+        task.apply_async(
+            args=args,
+            kwargs={"message_batch_token": token},
+            countdown=countdown,
+        )
+    else:
+        task.apply_async(args=args, countdown=countdown)
+    return token if coordinated else None
+
+
+def _claim_customer_message_batch(
+    *,
+    scope: str,
+    identifier: str,
+    token: str | None,
+) -> tuple[bool, redis.Redis | None]:
+    """Atomically allow only the newest delayed task to process a burst."""
+    if not token:
+        return True, None
+    token_key = f"{_MESSAGE_BATCH_TOKEN_KEY_PREFIX}:{scope}:{identifier}"
+    started_key = f"{_MESSAGE_BATCH_STARTED_KEY_PREFIX}:{scope}:{identifier}"
+    try:
+        client = _redis_client()
+        claimed = bool(
+            client.eval(
+                _CLAIM_MESSAGE_BATCH_SCRIPT,
+                2,
+                token_key,
+                started_key,
+                token,
+            )
+        )
+    except redis.RedisError as exc:
+        logger.warning(
+            "salomao_customer_message_batch_claim_degraded",
+            scope=scope,
+            identifier=identifier,
+            error=str(exc),
+        )
+        return True, None
+    if not claimed:
+        logger.info(
+            "salomao_customer_message_batch_superseded",
+            scope=scope,
+            identifier=identifier,
+        )
+    return claimed, client
+
+
 @shared_task(
     bind=True,
     max_retries=3,
@@ -67,6 +194,7 @@ def run_supervisor_pipeline_task(
     is_off_hours: bool = False,
     enforce_ai_pipeline: bool = False,
     queue_if_busy: bool = False,
+    message_batch_token: str | None = None,
 ) -> None:
     """Run the Salomão supervisor pipeline for a HubSpot ticket.
 
@@ -80,9 +208,17 @@ def run_supervisor_pipeline_task(
     pending_key = f"{_PENDING_KEY_PREFIX}:{ticket_id}"
     stage_trigger_key = f"{_STAGE_TRIGGER_KEY_PREFIX}:{ticket_id}"
 
+    claimed, batch_client = _claim_customer_message_batch(
+        scope="ticket",
+        identifier=ticket_id,
+        token=message_batch_token,
+    )
+    if not claimed:
+        return
+
     client: redis.Redis | None
     try:
-        client = _redis_client()
+        client = batch_client or _redis_client()
         if not queue_if_busy:
             first_stage_trigger = bool(
                 client.set(
@@ -180,7 +316,11 @@ def run_supervisor_pipeline_task(
     default_retry_delay=30,
     name="ai_agents.run_salomao_v1_thread_pipeline_task",
 )
-def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
+def run_salomao_v1_thread_pipeline_task(
+    self,
+    thread_id: str,
+    message_batch_token: str | None = None,
+) -> None:
     """Run the Supervisor for a HubSpot conversation thread.
 
     This is used by ``conversation.newMessage`` webhooks. The task re-fetches
@@ -192,9 +332,17 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
     lock_key = f"{_THREAD_LOCK_KEY_PREFIX}:{thread_id}"
     pending_key = f"{_THREAD_PENDING_KEY_PREFIX}:{thread_id}"
 
+    claimed, batch_client = _claim_customer_message_batch(
+        scope="thread",
+        identifier=thread_id,
+        token=message_batch_token,
+    )
+    if not claimed:
+        return
+
     client: redis.Redis | None
     try:
-        client = _redis_client()
+        client = batch_client or _redis_client()
         acquired = bool(client.set(lock_key, "1", nx=True, ex=_IDEMPOTENCY_TTL_SECONDS))
     except redis.RedisError as exc:
         logger.warning(
@@ -301,6 +449,33 @@ def run_salomao_v1_thread_pipeline_task(self, thread_id: str) -> None:
                 thread_id=thread_id,
                 ticket_id=ticket_id,
             )
+
+
+def schedule_supervisor_customer_turn(
+    ticket_id: str,
+    *,
+    is_off_hours: bool,
+    enforce_ai_pipeline: bool = True,
+) -> str | None:
+    """Debounce and schedule a ticket-backed customer message turn."""
+    ticket_id = str(ticket_id)
+    return _schedule_customer_message_batch(
+        scope="ticket",
+        identifier=ticket_id,
+        task=run_supervisor_pipeline_task,
+        args=(ticket_id, is_off_hours, enforce_ai_pipeline, True),
+    )
+
+
+def schedule_salomao_thread_customer_turn(thread_id: str) -> str | None:
+    """Debounce and schedule a conversation-thread customer message turn."""
+    thread_id = str(thread_id)
+    return _schedule_customer_message_batch(
+        scope="thread",
+        identifier=thread_id,
+        task=run_salomao_v1_thread_pipeline_task,
+        args=(thread_id,),
+    )
 
 
 @shared_task(
@@ -460,4 +635,6 @@ __all__ = [
     "run_lifecycle_watchdog_task",
     "run_salomao_v1_thread_pipeline_task",
     "run_supervisor_pipeline_task",
+    "schedule_salomao_thread_customer_turn",
+    "schedule_supervisor_customer_turn",
 ]
