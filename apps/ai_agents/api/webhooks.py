@@ -29,6 +29,7 @@ from ninja import Router, Schema
 from apps.ai_agents.agents.supervisor import SalomaoResponse, SalomaoSupervisorAgent
 from apps.ai_agents.contracts import SupervisorDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, TokenTrackingLog, ToolCallAuditLog
+from apps.ai_agents.services.commercial_contact import handle_commercial_contact_from_hubspot_context
 from apps.ai_agents.services.content_safety import assess_customer_content
 from apps.ai_agents.services.execution import (
     apply_supervisor_result,
@@ -71,6 +72,29 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 router = Router()
+
+
+def _deterministic_response(*, session_id: str, message: str, policy: str) -> SalomaoResponse:
+    """Build a zero-token response produced by a deterministic policy."""
+    final_response = message.rstrip()
+    trace = [f"{policy}: OK", "supervisor: candidate_resolved"]
+    return SalomaoResponse(
+        session_id=session_id,
+        message=final_response,
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=trace,
+        tokens_used=0,
+        model_name=policy,
+        latency_ms=0,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response=final_response,
+            trace_summary=trace,
+            confidence=1.0,
+        ),
+    )
 
 
 def _hubspot_turn_source(context: dict[str, Any], *, session_id: str) -> str:
@@ -579,25 +603,36 @@ async def _run_supervisor_for_hubspot_context(
     # webhook, not conversation.newMessage. The hydrated history is the
     # authoritative signal: when its latest usable item is incoming, run the
     # deterministic case lookup regardless of which webhook woke the worker.
+    commercial_reply = (
+        handle_commercial_contact_from_hubspot_context(safe_context) if incoming_prompt else None
+    )
+    if commercial_reply is not None:
+        result = _deterministic_response(
+            session_id=session_id,
+            message=commercial_reply,
+            policy="commercial_contact",
+        )
+        await apply_supervisor_result(
+            instance=instance,
+            context=safe_context,
+            conversation_context=conversation_context,
+            message=message,
+            result=result,
+        )
+        logger.info(
+            "hubspot_commercial_contact_completed",
+            ticket_id=ticket_id,
+            session_id=session_id,
+            outcome="candidate_resolved",
+        )
+        return
+
     protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if incoming_prompt else None
     if protocol_reply is not None:
-        final_response = protocol_reply.rstrip()
-        result = SalomaoResponse(
+        result = _deterministic_response(
             session_id=session_id,
-            message=final_response,
-            sources=[],
-            requires_human_handoff=False,
-            handoff_reason=None,
-            agent_trace=["protocol_lookup: OK", "supervisor: candidate_resolved"],
-            tokens_used=0,
-            model_name="protocol_lookup",
-            latency_ms=0,
-            decision=SupervisorDecision(
-                outcome="candidate_resolved",
-                final_response=final_response,
-                trace_summary=["protocol_lookup: OK", "supervisor: candidate_resolved"],
-                confidence=1.0,
-            ),
+            message=protocol_reply,
+            policy="protocol_lookup",
         )
         await apply_supervisor_result(
             instance=instance,

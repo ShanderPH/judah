@@ -47,6 +47,7 @@ from apps.ai_agents.contracts import (
     SupervisorDecision,
     TriageDecision,
 )
+from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
 from apps.ai_agents.services.guardrails import apply_output_guardrails
 from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
@@ -55,7 +56,6 @@ logger = structlog.get_logger(__name__)
 FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, assistente virtual da inChurch."
 GREETING_CLARIFICATION = "Como posso ajudar hoje? Conte brevemente o que você precisa."
 
-_CURRENT_CUSTOMER_MESSAGE_MARKER = "Mensagem atual do cliente:"
 _LEADING_ASSISTANT_GREETING_RE = re.compile(
     r"^\s*(?:(?:ol[áa]|oi|bom\s+dia|boa\s+tarde|boa\s+noite)\s*[!,.?:;\-]*\s*)"
     r"(?:(?:👋\s*)?eu\s+sou\s+o\s+salom[aã]o[^\n.!?]*inchurch(?:\.\.\.|[.!?])?\s*)?",
@@ -123,9 +123,7 @@ _SEVERE_THREAT_PATTERNS = (
 
 def _current_customer_message(message: str) -> str:
     """Extract only the current customer turn from a provider envelope."""
-    if _CURRENT_CUSTOMER_MESSAGE_MARKER in message:
-        return message.rsplit(_CURRENT_CUSTOMER_MESSAGE_MARKER, maxsplit=1)[-1].strip()
-    return message.strip()
+    return extract_current_customer_turn(message)
 
 
 def _normalize_policy_text(message: str) -> str:

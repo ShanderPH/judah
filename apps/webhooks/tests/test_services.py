@@ -182,7 +182,7 @@ class TestProcessWebhookEvent:
         assert event.processed is False
         assert event.retry_count == 1
 
-    @patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.delay")
+    @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
     def test_lifecycle_ai_route_controls_dispatch(self, mock_pipeline) -> None:
         event = WebhookEvent.objects.create(
             event_type="conversation.newMessage",

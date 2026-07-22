@@ -125,6 +125,35 @@ def test_hydration_tracks_latest_incoming_message_as_turn_identity() -> None:
     )
 
     assert instance.last_message_id == "incoming-2"
+    assert instance.metadata["latest_customer_turn"]["message_count"] == 1
+    assert instance.metadata["latest_customer_turn"]["message_ids"] == ["incoming-2"]
+
+
+@pytest.mark.django_db
+def test_hydration_audits_consecutive_messages_as_one_customer_turn() -> None:
+    instance = ensure_conversation_instance(
+        context={
+            "ticket_id": "ticket-batch",
+            "thread_ids": ["thread-batch"],
+            "conversation_history": [
+                {"id": "outgoing-1", "direction": "OUTGOING", "text": "Como posso ajudar?"},
+                {"id": "incoming-1", "direction": "INCOMING", "text": "Tenho interesse"},
+                {"id": "incoming-2", "direction": "INCOMING", "text": "nos planos e valores"},
+            ],
+        },
+        ticket_id="ticket-batch",
+        session_id="hubspot-thread-thread-batch",
+    )
+
+    assert instance.last_message_id == "incoming-2"
+    assert instance.metadata["latest_customer_turn"] == {
+        "message_count": 2,
+        "message_ids": ["incoming-1", "incoming-2"],
+        "first_message_id": "incoming-1",
+        "last_message_id": "incoming-2",
+        "first_created_at": None,
+        "last_created_at": None,
+    }
 
 
 @pytest.mark.django_db

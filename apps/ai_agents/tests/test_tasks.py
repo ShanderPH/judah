@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import redis
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
@@ -15,7 +16,109 @@ from apps.ai_agents.tasks import (
     run_lifecycle_watchdog_task,
     run_salomao_v1_thread_pipeline_task,
     run_supervisor_pipeline_task,
+    schedule_salomao_thread_customer_turn,
+    schedule_supervisor_customer_turn,
 )
+
+
+@override_settings(
+    SALOMAO_MESSAGE_QUIET_SECONDS=4.0,
+    SALOMAO_MESSAGE_MAX_WAIT_SECONDS=12.0,
+)
+def test_customer_message_scheduler_waits_for_quiet_window_and_caps_burst() -> None:
+    client = Mock()
+    client.get.return_value = b"100.000000"
+    with (
+        patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks.time.time", return_value=101.0),
+        patch("apps.ai_agents.tasks.uuid.uuid4", return_value=SimpleNamespace(hex="newest-token")),
+        patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.apply_async") as enqueue,
+    ):
+        token = schedule_salomao_thread_customer_turn("thread-1")
+
+    assert token == "newest-token"
+    client.set.assert_any_call(
+        "salomao:message-batch:started:thread:thread-1",
+        "101.000000",
+        nx=True,
+        ex=300,
+    )
+    client.set.assert_any_call(
+        "salomao:message-batch:token:thread:thread-1",
+        "newest-token",
+        ex=300,
+    )
+    enqueue.assert_called_once_with(
+        args=("thread-1",),
+        kwargs={"message_batch_token": "newest-token"},
+        countdown=4.0,
+    )
+
+    client.reset_mock()
+    client.get.return_value = b"100.000000"
+    with (
+        patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks.time.time", return_value=111.5),
+        patch("apps.ai_agents.tasks.uuid.uuid4", return_value=SimpleNamespace(hex="last-token")),
+        patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.apply_async") as enqueue,
+    ):
+        schedule_supervisor_customer_turn("ticket-1", is_off_hours=False)
+
+    enqueue.assert_called_once_with(
+        args=("ticket-1", False, True, True),
+        kwargs={"message_batch_token": "last-token"},
+        countdown=0.5,
+    )
+
+
+@override_settings(SALOMAO_MESSAGE_QUIET_SECONDS=4.0)
+def test_customer_message_scheduler_degrades_without_dropping_turn() -> None:
+    with (
+        patch("apps.ai_agents.tasks._redis_client", side_effect=redis.RedisError("offline")),
+        patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.apply_async") as enqueue,
+    ):
+        token = schedule_salomao_thread_customer_turn("thread-1")
+
+    assert token is None
+    enqueue.assert_called_once_with(args=("thread-1",), countdown=4.0)
+
+
+def test_superseded_message_batch_stops_before_hydration() -> None:
+    client = Mock()
+    client.eval.return_value = 0
+    with (
+        patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch(
+            "apps.ai_agents.services.hubspot.hydrate_thread_context",
+            new=AsyncMock(),
+        ) as hydrate,
+    ):
+        run_salomao_v1_thread_pipeline_task.run("thread-1", message_batch_token="old-token")
+
+    hydrate.assert_not_awaited()
+    client.eval.assert_called_once()
+
+
+def test_newest_message_batch_claim_runs_pipeline() -> None:
+    client = Mock()
+    client.eval.return_value = 1
+    client.set.return_value = True
+    client.delete.return_value = 0
+    context = {"ticket_id": ""}
+    with (
+        patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch(
+            "apps.ai_agents.services.hubspot.hydrate_thread_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks._run_salomao_v1_thread_pipeline",
+            new=AsyncMock(),
+        ) as pipeline,
+    ):
+        run_salomao_v1_thread_pipeline_task.run("thread-1", message_batch_token="newest-token")
+
+    pipeline.assert_awaited_once_with("thread-1", context=context)
 
 
 def test_supervisor_task_success_duplicate_and_lock_failure() -> None:

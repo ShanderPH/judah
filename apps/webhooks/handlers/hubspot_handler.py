@@ -207,12 +207,16 @@ def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -
         logger.info("hubspot_ticket_ai_rollout_skipped", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
-    from apps.ai_agents.tasks import run_supervisor_pipeline_task
+    from apps.ai_agents.tasks import run_supervisor_pipeline_task, schedule_supervisor_customer_turn
     from apps.ai_agents.utils.business_rules import is_business_hours, is_quinta_fire, off_hours_reason
 
     is_off_hours = bool(off_hours_reason() or is_quinta_fire() or not is_business_hours())
     if trigger == "customer_message":
-        run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True, True)
+        schedule_supervisor_customer_turn(
+            hubspot_ticket_id,
+            is_off_hours=is_off_hours,
+            enforce_ai_pipeline=True,
+        )
     else:
         run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
     logger.info(
@@ -299,7 +303,7 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         logger.info("hubspot_conversation_ai_rollout_skipped", object_id=object_id)
         return
 
-    from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task
+    from apps.ai_agents.tasks import schedule_salomao_thread_customer_turn
 
     thread_id = (
         payload.get("threadId")
@@ -308,7 +312,7 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         or object_id
     )
 
-    run_salomao_v1_thread_pipeline_task.delay(str(thread_id))
+    schedule_salomao_thread_customer_turn(str(thread_id))
     logger.info("hubspot_conversation_supervisor_dispatched", thread_id=str(thread_id), object_id=object_id)
 
 

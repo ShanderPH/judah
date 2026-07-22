@@ -74,6 +74,8 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
             request_human_handoff_task,
             run_salomao_v1_thread_pipeline_task,
             run_supervisor_pipeline_task,
+            schedule_salomao_thread_customer_turn,
+            schedule_supervisor_customer_turn,
         )
 
         thread_id = lifecycle.instance.hubspot_thread_id
@@ -89,12 +91,27 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
                     else "AI routing is disabled; deterministic human fallback applied."
                 ),
             )
-        elif thread_id:
-            run_salomao_v1_thread_pipeline_task.delay(thread_id)
-        elif ticket_id:
-            run_supervisor_pipeline_task.delay(ticket_id, False)
         else:
-            raise ValueError(f"Route {route} has no thread or ticket identifier.")
+            event_type = str(event.event_type or "").lower()
+            is_customer_message = event_type == "conversation.newmessage" or (
+                event_type == "ticket.propertychange"
+                and str(event.property_name or "") == "hs_last_message_from_visitor"
+                and str(event.property_value or "").lower() == "true"
+            )
+            if thread_id and is_customer_message:
+                schedule_salomao_thread_customer_turn(thread_id)
+            elif ticket_id and is_customer_message:
+                schedule_supervisor_customer_turn(
+                    ticket_id,
+                    is_off_hours=False,
+                    enforce_ai_pipeline=True,
+                )
+            elif thread_id:
+                run_salomao_v1_thread_pipeline_task.delay(thread_id)
+            elif ticket_id:
+                run_supervisor_pipeline_task.delay(ticket_id, False)
+            else:
+                raise ValueError(f"Route {route} has no thread or ticket identifier.")
         return
 
     # Operational HubSpot events outside the conversation workflow still use
