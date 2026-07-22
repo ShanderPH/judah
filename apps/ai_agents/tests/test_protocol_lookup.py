@@ -5,13 +5,17 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from django.utils import timezone
 
 from apps.ai_agents.services.protocol_lookup import (
     SUPPORT_N2_OPEN_STAGE_IDS,
+    DjangoProtocolRepository,
     HubSpotProtocolClient,
     ProtocolConversationHandler,
     ProtocolLookupError,
 )
+from apps.support.models import Ticket
+from apps.webhooks.models import WebhookEvent
 
 
 def _response(request: httpx.Request, payload: dict, status_code: int = 200) -> httpx.Response:
@@ -97,6 +101,31 @@ async def test_get_ticket_not_found_is_customer_safe() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage_id",
+    ["1028692851", "1208927005", "1368995876", "1368995712", "1368986534"],
+)
+async def test_get_ticket_hides_non_tracking_stages(stage_id: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(
+            request,
+            {
+                "id": "46667856488",
+                "properties": {
+                    "subject": "Caso encerrado",
+                    "hs_pipeline": "634240100",
+                    "hs_pipeline_stage": stage_id,
+                },
+            },
+        )
+
+    client = HubSpotProtocolClient(access_token="test", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ProtocolLookupError, match="casos em acompanhamento"):
+        await client.get_ticket("46667856488")
+
+
+@pytest.mark.asyncio
 async def test_church_lookup_filters_closed_n2_stages_and_paginates() -> None:
     request_bodies: list[dict] = []
 
@@ -163,6 +192,78 @@ async def test_church_lookup_filters_closed_n2_stages_and_paginates() -> None:
     assert "suporte__area_com_erro" in request_bodies[0]["properties"]
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_staging_hubspot_falls_back_to_supabase_ticket_mirror() -> None:
+    await Ticket.objects.acreate(
+        ticket_id="46667856488",
+        ticket_church="S3428-T30540// Igreja Mananciais",
+        category="Bug Report",
+        priority="P2-M\u00e9dio",
+        status="RESOLVED",
+        affected_module="M\u00f3dulo de Pessoas",
+        affected_functionality="Pessoas | Membros",
+        created_at=timezone.now(),
+    )
+    await WebhookEvent.objects.acreate(
+        event_type="ticket.propertyChange",
+        event_id="stage-open",
+        object_id="46667856488",
+        property_name="hs_pipeline_stage",
+        property_value="1110524173",
+        payload={},
+    )
+    transport = httpx.MockTransport(lambda request: _response(request, {}, 404))
+    client = HubSpotProtocolClient(
+        access_token="sandbox-token",
+        transport=transport,
+        local_repository=DjangoProtocolRepository(),
+    )
+
+    ticket = await client.get_ticket("46667856488")
+
+    assert ticket.name == "M\u00f3dulo de Pessoas \u2014 Pessoas | Membros"
+    assert ticket.status == "Em triagem pelo time t\u00e9cnico"
+    assert ticket.priority == "M\u00e9dia"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_staging_hubspot_falls_back_to_open_church_cases_only() -> None:
+    for protocol, stage_id in (
+        ("39580297219", "1110524173"),
+        ("46793834757", "1028692851"),
+    ):
+        await Ticket.objects.acreate(
+            ticket_id=protocol,
+            ticket_church="S4491-T35120// Igreja Esperan\u00e7a",
+            category="Bug Report",
+            priority="P2-M\u00e9dio",
+            status="RESOLVED",
+            affected_module="M\u00f3dulo de Pessoas",
+            affected_functionality="Pessoas | Membros",
+            created_at=timezone.now(),
+        )
+        await WebhookEvent.objects.acreate(
+            event_type="ticket.propertyChange",
+            event_id=f"stage-{protocol}",
+            object_id=protocol,
+            property_name="hs_pipeline_stage",
+            property_value=stage_id,
+            payload={},
+        )
+    transport = httpx.MockTransport(lambda request: _response(request, {"results": []}))
+    client = HubSpotProtocolClient(
+        access_token="sandbox-token",
+        transport=transport,
+        local_repository=DjangoProtocolRepository(),
+    )
+
+    tickets = await client.list_open_tickets_for_church("35120")
+
+    assert [ticket.protocol for ticket in tickets] == ["39580297219"]
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.ticket_queries: list[str] = []
@@ -211,12 +312,12 @@ async def test_status_intent_asks_for_identifier() -> None:
     response = await handler.handle(_context("Quero acompanhar meu chamado"))
 
     assert response is not None
-    assert "informe o protocolo" in response
-    assert "ID num\u00e9rico da igreja" in response
+    assert "n\u00famero do protocolo" in response
+    assert "ID da igreja local" in response
 
 
 @pytest.mark.asyncio
-async def test_status_intent_uses_contextual_church_id() -> None:
+async def test_status_intent_asks_before_using_contextual_church_id() -> None:
     client = FakeClient()
     handler = ProtocolConversationHandler(client=client)
     context = _context("Quero saber como est\u00e1 meu protocolo")
@@ -224,9 +325,23 @@ async def test_status_intent_uses_contextual_church_id() -> None:
 
     response = await handler.handle(context)
 
-    assert client.church_queries == ["35120"]
-    assert response is not None
-    assert "protocolo" in response
+    assert client.ticket_queries == []
+    assert client.church_queries == []
+    assert response == handler.REQUEST_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_reported_case_question_asks_for_protocol_or_church_id() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+
+    response = await handler.handle(_context("quero saber sobre o caso que reportei"))
+
+    assert client.ticket_queries == []
+    assert client.church_queries == []
+    assert response == handler.REQUEST_MESSAGE
+    assert "um caso espec\u00edfico" in response
+    assert "todos os casos em acompanhamento" in response
 
 
 @pytest.mark.asyncio
@@ -331,6 +446,20 @@ async def test_numeric_followup_queries_protocol() -> None:
 
 
 @pytest.mark.asyncio
+async def test_five_digit_followup_after_identifier_question_queries_church() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    history = [{"direction": "OUTGOING", "text": handler.REQUEST_MESSAGE}]
+
+    response = await handler.handle(_context("35120", history=history))
+
+    assert client.ticket_queries == []
+    assert client.church_queries == ["35120"]
+    assert response is not None
+    assert "igreja 35120" in response
+
+
+@pytest.mark.asyncio
 async def test_ticket_response_keeps_required_fields_when_priority_is_missing() -> None:
     from apps.ai_agents.services.protocol_lookup import TicketSummary
 
@@ -431,11 +560,11 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypatch) -> None:
+async def test_ticket_property_pipeline_uses_protocol_lookup_for_incoming_history(monkeypatch) -> None:
     from apps.ai_agents.agents.supervisor import SalomaoResponse
     from apps.ai_agents.api import webhooks
 
-    lookup = AsyncMock()
+    lookup = AsyncMock(return_value="Resposta de protocolo")
     apply_result = AsyncMock()
     advance = AsyncMock()
     record_usage = AsyncMock()
@@ -475,9 +604,58 @@ async def test_ticket_property_pipeline_does_not_repeat_protocol_lookup(monkeypa
         require_incoming=False,
     )
 
-    lookup.assert_not_awaited()
-    supervisor_factory.assert_called_once()
+    lookup.assert_awaited_once_with(context)
+    supervisor_factory.assert_not_called()
     apply_result.assert_awaited_once()
+    assert apply_result.await_args.kwargs["result"].message == "Resposta de protocolo"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_duplicate_ticket_property_turn_stops_before_lookup_or_model(monkeypatch) -> None:
+    from apps.ai_agents.api import webhooks
+    from apps.ai_agents.models import ConversationInstance, ToolCallAuditLog
+
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:thread-duplicate",
+        hubspot_thread_id="thread-duplicate",
+        hubspot_ticket_id="ticket-duplicate",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_message_id="message-duplicate",
+        ai_session_id="hubspot-thread-thread-duplicate",
+    )
+    await ToolCallAuditLog.objects.acreate(
+        instance=instance,
+        tool_name="send_thread_reply",
+        idempotency_key=f"reply:{instance.pk}:message-duplicate",
+        status=ToolCallAuditLog.Status.SUCCEEDED,
+        output={"sent": True, "message_id": "out-duplicate"},
+    )
+    lookup = AsyncMock()
+    supervisor = Mock()
+    monkeypatch.setattr(webhooks, "handle_protocol_lookup_from_hubspot_context", lookup)
+    monkeypatch.setattr(webhooks, "SalomaoSupervisorAgent", supervisor)
+
+    await webhooks._run_supervisor_for_hubspot_context(
+        {
+            "ticket_id": "ticket-duplicate",
+            "originating_channel": "chat",
+            "thread_ids": ["thread-duplicate"],
+            "conversation_history": [
+                {
+                    "id": "message-duplicate",
+                    "direction": "INCOMING",
+                    "text": "quero saber sobre o caso que reportei",
+                }
+            ],
+        },
+        session_id="hubspot-thread-thread-duplicate",
+        ticket_id="ticket-duplicate",
+        require_incoming=False,
+    )
+
+    lookup.assert_not_awaited()
+    supervisor.assert_not_called()
 
 
 @pytest.mark.django_db(transaction=True)

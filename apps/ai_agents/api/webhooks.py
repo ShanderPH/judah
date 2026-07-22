@@ -426,6 +426,21 @@ def _prepare_instance_for_supervisor(instance: ConversationInstance) -> None:
 
 
 @sync_to_async
+def _waiting_turn_already_has_reply(instance: ConversationInstance) -> bool:
+    """Avoid invoking agents again for a customer turn already answered."""
+    instance.refresh_from_db()
+    turn_id = instance.last_message_id or instance.last_event_id
+    if instance.state != ConversationInstance.State.WAITING_FOR_CUSTOMER or not turn_id:
+        return False
+    return ToolCallAuditLog.objects.filter(
+        instance=instance,
+        tool_name="send_thread_reply",
+        idempotency_key=f"reply:{instance.pk}:{turn_id}",
+        status=ToolCallAuditLog.Status.SUCCEEDED,
+    ).exists()
+
+
+@sync_to_async
 def _resume_waiting_instance_for_customer_message(instance: ConversationInstance) -> None:
     """Start a new AI turn when a customer replies to a waiting conversation."""
     instance.refresh_from_db()
@@ -467,11 +482,21 @@ async def _run_supervisor_for_hubspot_context(
     )
     await _prepare_instance_for_supervisor(instance)
 
-    if require_incoming and not build_salomao_prompt_from_hubspot_context(context):
+    incoming_prompt = build_salomao_prompt_from_hubspot_context(context)
+    if require_incoming and not incoming_prompt:
         logger.info(
             "supervisor_hubspot_no_new_incoming_message",
             ticket_id=ticket_id,
             session_id=session_id,
+        )
+        return
+
+    if incoming_prompt and await _waiting_turn_already_has_reply(instance):
+        logger.info(
+            "supervisor_hubspot_turn_already_replied",
+            ticket_id=ticket_id,
+            session_id=session_id,
+            message_id=instance.last_message_id or None,
         )
         return
 
@@ -550,7 +575,11 @@ async def _run_supervisor_for_hubspot_context(
     )
     await sync_to_async(instance.refresh_from_db)()
 
-    protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if require_incoming else None
+    # Staging currently receives customer turns through a ticket-property
+    # webhook, not conversation.newMessage. The hydrated history is the
+    # authoritative signal: when its latest usable item is incoming, run the
+    # deterministic case lookup regardless of which webhook woke the worker.
+    protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if incoming_prompt else None
     if protocol_reply is not None:
         final_response = protocol_reply.rstrip()
         result = SalomaoResponse(

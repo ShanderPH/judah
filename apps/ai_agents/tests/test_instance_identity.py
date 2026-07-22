@@ -106,3 +106,63 @@ def test_existing_thread_instance_is_hydrated_without_changing_identity() -> Non
     assert hydrated.hubspot_ticket_id == "ticket-hydrated"
     assert hydrated.hubspot_contact_id == "contact-hydrated"
     assert hydrated.pipeline_id == "pipeline-1"
+
+
+@pytest.mark.django_db
+def test_hydration_tracks_latest_incoming_message_as_turn_identity() -> None:
+    instance = ensure_conversation_instance(
+        context={
+            "ticket_id": "ticket-turn",
+            "thread_ids": ["thread-turn"],
+            "conversation_history": [
+                {"id": "incoming-1", "direction": "INCOMING", "text": "Primeira"},
+                {"id": "outgoing-1", "direction": "OUTGOING", "text": "Resposta"},
+                {"id": "incoming-2", "direction": "INCOMING", "text": "Segunda"},
+            ],
+        },
+        ticket_id="ticket-turn",
+        session_id="hubspot-thread-thread-turn",
+    )
+
+    assert instance.last_message_id == "incoming-2"
+
+
+@pytest.mark.django_db
+def test_hydration_fingerprints_distinct_turns_when_hubspot_omits_message_id() -> None:
+    base_context = {
+        "ticket_id": "ticket-fingerprint",
+        "thread_ids": ["thread-fingerprint"],
+        "conversation_history": [
+            {
+                "direction": "INCOMING",
+                "text": "Primeira",
+                "sender": "visitor-1",
+                "created_at": "2026-07-22T12:00:00Z",
+            }
+        ],
+    }
+    instance = ensure_conversation_instance(
+        context=base_context,
+        ticket_id="ticket-fingerprint",
+        session_id="hubspot-thread-thread-fingerprint",
+    )
+    first_turn_id = instance.last_message_id
+
+    base_context["conversation_history"].append(
+        {
+            "direction": "INCOMING",
+            "text": "Segunda",
+            "sender": "visitor-1",
+            "created_at": "2026-07-22T12:01:00Z",
+        }
+    )
+    ensure_conversation_instance(
+        context=base_context,
+        ticket_id="ticket-fingerprint",
+        session_id="hubspot-thread-thread-fingerprint",
+    )
+    instance.refresh_from_db()
+
+    assert first_turn_id.startswith("sha256:")
+    assert instance.last_message_id.startswith("sha256:")
+    assert instance.last_message_id != first_turn_id

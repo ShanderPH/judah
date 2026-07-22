@@ -97,6 +97,82 @@ async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_each_customer_message_has_one_independent_reply() -> None:
+    instance = await sync_to_async(_instance)()
+
+    def response(text: str) -> SalomaoResponse:
+        return SalomaoResponse(
+            session_id="hubspot-ticket-ticket-1",
+            message=text,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=[],
+            tokens_used=1,
+            model_name="test-model",
+            latency_ms=1,
+            decision=SupervisorDecision(
+                outcome="candidate_resolved",
+                final_response=text,
+                confidence=0.9,
+            ),
+        )
+
+    sender = AsyncMock(
+        side_effect=[
+            {"sent": True, "message_id": "out-1"},
+            {"sent": True, "message_id": "out-2"},
+        ]
+    )
+    with patch(
+        "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+        new=sender,
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Primeira",
+            result=response("Resposta da primeira"),
+        )
+
+        instance.state = ConversationInstance.State.AI_SERVICE_RUNNING
+        instance.last_message_id = "message-2"
+        await sync_to_async(instance.save)(update_fields=["state", "last_message_id", "updated_at"])
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Segunda",
+            result=response("Resposta da segunda"),
+        )
+
+        # A retry of the second turn must reuse its successful audit rather
+        # than publish the same answer twice.
+        instance.state = ConversationInstance.State.AI_SERVICE_RUNNING
+        await sync_to_async(instance.save)(update_fields=["state", "updated_at"])
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Segunda",
+            result=response("Resposta da segunda"),
+        )
+
+    assert sender.await_count == 2
+    keys = await sync_to_async(list)(
+        ToolCallAuditLog.objects.filter(instance=instance, tool_name="send_thread_reply")
+        .order_by("created_at")
+        .values_list("idempotency_key", flat=True)
+    )
+    assert keys == [
+        f"reply:{instance.pk}:message-1",
+        f"reply:{instance.pk}:message-2",
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
