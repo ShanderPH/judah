@@ -236,6 +236,14 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
 
                 old_status = agent.status_enum
                 old_eligibility = agent.eligibility_state
+                old_material_state = (
+                    agent.status_enum,
+                    agent.eligibility_state,
+                    agent.eligibility_reason,
+                    agent.remote_availability_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
                 raw_hash = _raw_state_hash(item or {})
                 remote_status = ""
                 decision = EligibilityDecision(False, EligibilityReason.MISSING_OBSERVATION)
@@ -295,7 +303,16 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     new_status = Agent.StatusEnum.ONLINE if decision.eligible else Agent.StatusEnum.AWAY
                 else:
                     new_status = Agent.StatusEnum.ONLINE if remote_status == "available" else Agent.StatusEnum.AWAY
-                agent.availability_revision += 1
+                new_material_state = (
+                    new_status,
+                    decision.state,
+                    decision.reason.value,
+                    remote_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
+                if new_material_state != old_material_state:
+                    agent.availability_revision += 1
                 agent.availability_fencing_token = fencing_token
                 agent.availability_writer_id = writer_id
                 agent.availability_observed_at = now

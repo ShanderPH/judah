@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 
 import structlog
 from django.conf import settings
@@ -39,12 +40,27 @@ LIVE_STATES = (
 )
 
 
+class ReservationReason(StrEnum):
+    """Exhaustive database reservation outcomes."""
+
+    RESERVED = "reserved"
+    EXISTING_ATTEMPT = "existing_attempt"
+    COMPLETED_SAME_CYCLE = "completed_same_cycle"
+    LEGACY_CYCLE_AMBIGUOUS = "legacy_cycle_ambiguous"
+    STALE_CYCLE = "skipped_stale_cycle"
+    QUEUE_EMPTY_OR_CLAIMED = "queue_empty_or_claimed"
+    NO_ELIGIBLE_CANDIDATE = "no_eligible_candidate"
+    CANDIDATE_CHANGED = "candidate_changed"
+
+
 @dataclass(frozen=True, slots=True)
 class Reservation:
     """Result of a database reservation attempt."""
 
     attempt: AssignmentAttempt | None
-    reason: str
+    reason: ReservationReason | str
+    queue_row_id: uuid.UUID | None = None
+    cycle_id: uuid.UUID | None = None
 
 
 def _attempt_scope(queue_row: NewConversation) -> Q:
@@ -121,7 +137,11 @@ def _verify_candidates() -> list[tuple[Agent, str]]:
     return verified
 
 
-def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
+def reserve_next_assignment(
+    ticket_id: str | None = None,
+    *,
+    exclude_queue_row_ids: set[uuid.UUID] | None = None,
+) -> Reservation:
     """Claim the oldest ready row and reserve one verified agent atomically."""
     from apps.support.eligibility_service import evaluate_persisted_agent
 
@@ -139,13 +159,15 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
     )
     if ticket_id is not None:
         ready = ready.filter(hubspot_ticket_id=ticket_id)
+    if exclude_queue_row_ids:
+        ready = ready.exclude(pk__in=exclude_queue_row_ids)
     if not ready.exists():
-        return Reservation(None, "queue_empty_or_claimed")
+        return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
 
     candidates = _verify_candidates()
     if not candidates:
-        _defer_without_candidate(ticket_id)
-        return Reservation(None, "no_eligible_candidate")
+        deferred_id = _defer_without_candidate(ticket_id, exclude_queue_row_ids)
+        return Reservation(None, ReservationReason.NO_ELIGIBLE_CANDIDATE, deferred_id)
 
     for candidate, reason in candidates:
         with transaction.atomic():
@@ -163,12 +185,40 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
             )
             if ticket_id is not None:
                 ready = ready.filter(hubspot_ticket_id=ticket_id)
+            if exclude_queue_row_ids:
+                ready = ready.exclude(pk__in=exclude_queue_row_ids)
             queue_row = ready.select_for_update(skip_locked=True).order_by("entered_queue_at", "id").first()
             if queue_row is None:
-                return Reservation(None, "queue_empty_or_claimed")
+                return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
 
             if queue_row.cycle_id is not None and _lock_assignable_cycle(queue_row) is None:
-                return Reservation(None, "skipped_stale_cycle")
+                queue_row.queue_status = NewConversation.QueueStatus.FAILED
+                queue_row.failure_code = "stale_cycle"
+                queue_row.failure_message = "Queue row belongs to a non-queued cycle."
+                queue_row.save(update_fields=["queue_status", "failure_code", "failure_message", "updated_at"])
+                return Reservation(
+                    None,
+                    ReservationReason.STALE_CYCLE,
+                    queue_row.pk,
+                    queue_row.cycle_id,
+                )
+
+            if queue_row.cycle_id is None:
+                historical_completed = AssignmentAttempt.objects.select_for_update().filter(
+                    ticket_id=queue_row.hubspot_ticket_id,
+                    state=AssignmentAttempt.State.COMPLETED,
+                )
+                if historical_completed.exists():
+                    queue_row.queue_status = NewConversation.QueueStatus.FAILED
+                    queue_row.failure_code = "legacy_cycle_ambiguous"
+                    queue_row.failure_message = "Legacy row cannot be linked to a completed assignment safely."
+                    queue_row.save(update_fields=["queue_status", "failure_code", "failure_message", "updated_at"])
+                    return Reservation(
+                        None,
+                        ReservationReason.LEGACY_CYCLE_AMBIGUOUS,
+                        queue_row.pk,
+                        None,
+                    )
 
             completed = (
                 AssignmentAttempt.objects.select_for_update()
@@ -176,7 +226,17 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                 .first()
             )
             if completed is not None:
-                return Reservation(completed, "completed")
+                # The effect was finalized for this exact cycle. Consume only
+                # the residual queue projection; never report a new effect.
+                queue_row_id = queue_row.pk
+                cycle_id = queue_row.cycle_id
+                queue_row.delete()
+                return Reservation(
+                    completed,
+                    ReservationReason.COMPLETED_SAME_CYCLE,
+                    queue_row_id,
+                    cycle_id,
+                )
 
             existing = (
                 AssignmentAttempt.objects.select_for_update()
@@ -184,17 +244,14 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                 .first()
             )
             if existing is not None:
-                return Reservation(existing, "existing_attempt")
+                return Reservation(
+                    existing,
+                    ReservationReason.EXISTING_ATTEMPT,
+                    queue_row.pk,
+                    queue_row.cycle_id,
+                )
 
             locked_agent = Agent.objects.select_for_update().get(pk=candidate.pk)
-            if locked_agent.availability_revision != candidate.availability_revision:
-                logger.info(
-                    "assignment_candidate_rejected",
-                    agent_id=str(candidate.pk),
-                    reason="eligibility_revision_changed",
-                    source="database",
-                )
-                continue
             final_decision = evaluate_persisted_agent(locked_agent, database_now)
             eligible_now = (
                 final_decision.eligible
@@ -266,9 +323,14 @@ def reserve_next_assignment(ticket_id: str | None = None) -> Reservation:
                 agent_id=str(locked_agent.pk),
                 eligibility_revision=attempt.eligibility_revision,
             )
-            return Reservation(attempt, "reserved")
-    _defer_without_candidate(ticket_id)
-    return Reservation(None, "candidate_changed")
+            return Reservation(
+                attempt,
+                ReservationReason.RESERVED,
+                queue_row.pk,
+                queue_row.cycle_id,
+            )
+    deferred_id = _defer_without_candidate(ticket_id, exclude_queue_row_ids)
+    return Reservation(None, ReservationReason.CANDIDATE_CHANGED, deferred_id)
 
 
 def reserve_manual_assignment(
@@ -366,7 +428,10 @@ def reserve_manual_assignment(
         return Reservation(attempt, "reserved")
 
 
-def _defer_without_candidate(ticket_id: str | None) -> None:
+def _defer_without_candidate(
+    ticket_id: str | None,
+    exclude_queue_row_ids: set[uuid.UUID] | None = None,
+) -> uuid.UUID | None:
     """Back off a queue row without blocking later ready tickets."""
     now = timezone.now()
     rows = NewConversation.objects.filter(
@@ -378,9 +443,11 @@ def _defer_without_candidate(ticket_id: str | None) -> None:
     )
     if ticket_id is not None:
         rows = rows.filter(hubspot_ticket_id=ticket_id)
+    if exclude_queue_row_ids:
+        rows = rows.exclude(pk__in=exclude_queue_row_ids)
     row = rows.order_by("entered_queue_at", "id").first()
     if row is None:
-        return
+        return None
     row.queue_status = NewConversation.QueueStatus.QUEUED
     row.assignment_attempts += 1
     row.last_assignment_attempt_at = now
@@ -398,6 +465,7 @@ def _defer_without_candidate(ticket_id: str | None) -> None:
             "updated_at",
         ]
     )
+    return row.pk
 
 
 def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:

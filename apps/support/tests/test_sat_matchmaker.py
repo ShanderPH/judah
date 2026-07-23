@@ -318,13 +318,14 @@ class TestMatchmakerDrainQueue:
 
         result = matchmaker_drain_queue()
 
-        assert result == {
-            "assigned": 1,
-            "remaining": 0,
-            "total_pending": 2,
-            "quarantined": 1,
-            "deferred": 0,
-        }
+        assert result["assigned"] == 1
+        assert result["remaining"] == 0
+        assert result["total_pending"] == 2
+        assert result["quarantined"] == 1
+        assert result["deferred"] == 0
+        assert result["processed"] == 2
+        assert result["converged"] == 0
+        assert result["systemic_failures"] == 0
         stale = NewConversation.objects.get(hubspot_ticket_id="STALE")
         assert stale.queue_status == NewConversation.QueueStatus.FAILED
         assert stale.failure_code == "hubspot_ticket_not_found"

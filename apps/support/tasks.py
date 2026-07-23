@@ -205,28 +205,18 @@ def task_matchmaker_drain_queue() -> dict:
       - SAT heartbeat when an agent comes online
       - Celery Beat safety net (every 60 seconds)
 
-    Uses a Redis lock to prevent overlapping drains.
+    PostgreSQL row claims and ``SKIP LOCKED`` serialize overlapping drains.
     """
     from apps.support.agent_sync_service import is_business_hours
     from apps.support.matchmaker_service import matchmaker_drain_queue
-    from apps.support.owned_cache_lock import OwnedCacheLock
 
     if not is_business_hours():
         return {"skipped_off_hours": True}
 
     # Redis lock — prevent overlapping drains
-    lock_key = "matchmaker_drain_lock"
-    lock = OwnedCacheLock(lock_key, timeout=60)
-    if not lock.acquire():
-        logger.debug("task_matchmaker_drain_queue_locked")
-        return {"skipped_locked": True}
-
-    try:
-        result = matchmaker_drain_queue()
-        logger.info("task_matchmaker_drain_queue_done", **result)
-        return result
-    finally:
-        lock.release()
+    result = matchmaker_drain_queue()
+    logger.info("task_matchmaker_drain_queue_done", **result)
+    return result
 
 
 @shared_task(name="support.task_repair_assignment_attempts")
@@ -350,9 +340,24 @@ def task_handle_owner_change(
         prev_owner_int = _safe_parse_owner_id(previous_owner_id)
         new_owner_int = _safe_parse_owner_id(new_owner_id)
 
-        # Skip if no valid previous owner (initial assignment, not a reassignment)
+        # Initial and out-of-order owner events are confirmed against HubSpot;
+        # they may need to consume a still-queued local projection.
         if prev_owner_int is None:
-            return
+            from apps.integrations.hubspot.client import get_hubspot_client
+            from apps.support.models import AssignedConversation
+
+            existing_owner = (
+                AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id)
+                .values_list("hubspot_owner_id", flat=True)
+                .first()
+            )
+            if existing_owner == new_owner_int:
+                return
+
+            current = get_hubspot_client().get_ticket_details(hubspot_ticket_id)
+            new_owner_int = _safe_parse_owner_id(current.get("owner_id"))
+            if new_owner_int is None:
+                return
         # Skip if no actual change
         if prev_owner_int == new_owner_int:
             return
@@ -390,7 +395,7 @@ def task_handle_owner_change(
 
 def _do_handle_owner_change(
     hubspot_ticket_id: str,
-    prev_owner_int: int,
+    prev_owner_int: int | None,
     new_owner_int: int | None,
 ) -> None:
     """Internal: perform owner change adjustments after the dedup lock is held."""
@@ -399,7 +404,15 @@ def _do_handle_owner_change(
     from django.db import transaction
 
     from apps.support.availability_runtime import require_routing_writer_authority
-    from apps.support.models import Agent, AssignedConversation, ConversationReassignment
+    from apps.support.models import (
+        Agent,
+        AssignedConversation,
+        AssignmentAttempt,
+        AssignmentLog,
+        ConversationReassignment,
+        NewConversation,
+        SupportConversationCycle,
+    )
     from apps.support.queue_service import decrement_agent_chat_count, increment_agent_chat_count
 
     require_routing_writer_authority("task_handle_owner_change")
@@ -412,7 +425,7 @@ def _do_handle_owner_change(
 
     now = timezone.now()
 
-    from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first()
+    from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first() if prev_owner_int is not None else None
     to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first() if new_owner_int is not None else None
 
     # Calculate time with previous agent
@@ -421,6 +434,85 @@ def _do_handle_owner_change(
         assigned_conv = (
             AssignedConversation.objects.select_for_update().filter(hubspot_ticket_id=hubspot_ticket_id).first()
         )
+        if assigned_conv is None and new_owner_int is not None:
+            queue_row = (
+                NewConversation.objects.select_for_update(of=("self",))
+                .filter(
+                    hubspot_ticket_id=hubspot_ticket_id,
+                    queue_status__in=(NewConversation.QueueStatus.PENDING, NewConversation.QueueStatus.QUEUED),
+                )
+                .first()
+            )
+            if queue_row is not None:
+                live_attempt = (
+                    AssignmentAttempt.objects.select_for_update()
+                    .filter(
+                        queue_row=queue_row,
+                        state__in=(
+                            AssignmentAttempt.State.RESERVED,
+                            AssignmentAttempt.State.EXTERNAL_APPLIED,
+                            AssignmentAttempt.State.COMPENSATING,
+                            AssignmentAttempt.State.RETRYABLE,
+                            AssignmentAttempt.State.REPAIR_REQUIRED,
+                        ),
+                    )
+                    .first()
+                )
+                if live_attempt is not None and live_attempt.desired_hubspot_owner_id == new_owner_int:
+                    from apps.support.durable_assignment_service import finalize_assignment_attempt
+
+                    if live_attempt.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
+                        finalize_assignment_attempt(live_attempt.pk)
+                        return
+                if live_attempt is not None:
+                    from apps.support.durable_assignment_service import compensate_assignment_attempt
+
+                    compensate_assignment_attempt(
+                        live_attempt.pk,
+                        retryable=False,
+                        error_code="hubspot_manual_owner_observed",
+                    )
+                wait_seconds = Decimal(str(round((now - queue_row.entered_queue_at).total_seconds(), 2)))
+                assigned_conv = AssignedConversation.objects.create(
+                    hubspot_ticket_id=hubspot_ticket_id,
+                    cycle_id=queue_row.cycle_id,
+                    agent=to_agent,
+                    hubspot_owner_id=new_owner_int,
+                    agent_name=to_agent.name if to_agent else "",
+                    pipeline_id=queue_row.pipeline_id,
+                    entered_queue_at=queue_row.entered_queue_at,
+                    assigned_at=now,
+                    queue_wait_seconds=wait_seconds,
+                    contact_name=queue_row.contact_name,
+                    contact_email=queue_row.contact_email,
+                    priority=queue_row.priority,
+                    subject=queue_row.subject,
+                )
+                AssignmentLog.objects.create(
+                    ticket_id=hubspot_ticket_id,
+                    cycle_id=queue_row.cycle_id,
+                    agent=to_agent,
+                    agent_name=to_agent.name if to_agent else "",
+                    hubspot_owner_id=new_owner_int,
+                    assignment_type="manual",
+                    assigned_by="hubspot_manual",
+                    pipeline_id=queue_row.pipeline_id,
+                    entered_queue_at=queue_row.entered_queue_at,
+                    queue_wait_seconds=wait_seconds,
+                )
+                if to_agent:
+                    increment_agent_chat_count(to_agent)
+                if queue_row.cycle_id:
+                    SupportConversationCycle.objects.filter(
+                        pk=queue_row.cycle_id,
+                        state=SupportConversationCycle.State.QUEUED,
+                    ).update(state=SupportConversationCycle.State.ASSIGNED, updated_at=now)
+                queue_row.delete()
+                logger.info(
+                    "task_owner_change_queued_converged",
+                    cycle_id=str(assigned_conv.cycle_id) if assigned_conv.cycle_id else None,
+                )
+                return
         if assigned_conv is None or assigned_conv.hubspot_owner_id != prev_owner_int:
             logger.info(
                 "task_owner_change_stale_cycle",
