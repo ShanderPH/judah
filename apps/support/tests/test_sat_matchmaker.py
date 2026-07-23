@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from apps.support.models import (
     Agent,
+    AgentAvailabilityDecision,
     AgentDailyTimeLog,
     AgentStatusHistory,
     AssignedConversation,
@@ -105,11 +106,21 @@ class TestSATHeartbeat:
 
         from apps.support.sat_service import sat_heartbeat
 
+        first_result = sat_heartbeat()
+        agent.refresh_from_db()
+        first_revision = agent.availability_revision
+        first_observed_at = agent.availability_observed_at
+        decision_count = AgentAvailabilityDecision.objects.filter(agent=agent).count()
+
         result = sat_heartbeat()
 
         assert result["status_changes"] == 0
+        assert first_result["status_changes"] == 0
         agent.refresh_from_db()
         assert agent.sat_last_heartbeat_at is not None
+        assert agent.availability_observed_at >= first_observed_at
+        assert agent.availability_revision == first_revision
+        assert AgentAvailabilityDecision.objects.filter(agent=agent).count() == decision_count
 
 
 @pytest.mark.django_db
@@ -318,13 +329,14 @@ class TestMatchmakerDrainQueue:
 
         result = matchmaker_drain_queue()
 
-        assert result == {
-            "assigned": 1,
-            "remaining": 0,
-            "total_pending": 2,
-            "quarantined": 1,
-            "deferred": 0,
-        }
+        assert result["assigned"] == 1
+        assert result["remaining"] == 0
+        assert result["total_pending"] == 2
+        assert result["quarantined"] == 1
+        assert result["deferred"] == 0
+        assert result["processed"] == 2
+        assert result["converged"] == 0
+        assert result["systemic_failures"] == 0
         stale = NewConversation.objects.get(hubspot_ticket_id="STALE")
         assert stale.queue_status == NewConversation.QueueStatus.FAILED
         assert stale.failure_code == "hubspot_ticket_not_found"

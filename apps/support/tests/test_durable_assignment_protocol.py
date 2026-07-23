@@ -28,6 +28,7 @@ from apps.support.models import (
     AssignmentAttempt,
     AssignmentLog,
     NewConversation,
+    SupportConversationCycle,
 )
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -154,7 +155,7 @@ def test_not_found_quarantines_and_releases_capacity() -> None:
     assert queue_row.queue_status == NewConversation.QueueStatus.FAILED
 
 
-def test_revision_change_rejects_reservation_without_capacity_leak() -> None:
+def test_revision_only_change_preserves_materially_eligible_candidate() -> None:
     agent = _agent()
     _queue()
     stale_candidate = Agent.objects.get(pk=agent.pk)
@@ -167,9 +168,71 @@ def test_revision_change_rejects_reservation_without_capacity_leak() -> None:
         reservation = reserve_next_assignment("9001")
 
     agent.refresh_from_db()
-    assert reservation.attempt is None
+    assert reservation.attempt is not None
+    assert reservation.attempt.eligibility_revision == 5
+    assert agent.current_simultaneous_chats == 1
+    assert AssignmentAttempt.objects.count() == 1
+
+
+def test_completed_same_cycle_consumes_residual_queue_without_new_effect() -> None:
+    now = timezone.now()
+    agent = _agent()
+    cycle = SupportConversationCycle.objects.create(
+        cycle_key="completed-same-cycle",
+        source_account_id="test-account",
+        hubspot_ticket_id="9001",
+        entered_stage_at=now - timedelta(minutes=2),
+        opened_at=now - timedelta(minutes=2),
+    )
+    queue_row = _queue()
+    queue_row.cycle = cycle
+    queue_row.save(update_fields=["cycle", "updated_at"])
+    queue_row_id = queue_row.pk
+    completed = AssignmentAttempt.objects.create(
+        idempotency_key="4d07dfd1-3cd5-456a-86d7-f47713ea48bb",
+        ticket_id="9001",
+        cycle=cycle,
+        queue_row=queue_row,
+        selected_agent=agent,
+        eligibility_revision=agent.availability_revision,
+        desired_hubspot_owner_id=agent.hubspot_owner_id,
+        decision_reason="eligible",
+        reserved_at=now,
+        state=AssignmentAttempt.State.COMPLETED,
+    )
+
+    with patch("apps.support.durable_assignment_service._verify_candidates", return_value=[(agent, "eligible")]):
+        reservation = reserve_next_assignment("9001")
+
+    assert reservation.attempt == completed
+    assert reservation.reason == "completed_same_cycle"
+    assert not NewConversation.objects.filter(pk=queue_row_id).exists()
     assert agent.current_simultaneous_chats == 0
-    assert AssignmentAttempt.objects.count() == 0
+
+
+def test_legacy_completed_attempt_quarantines_ambiguous_row() -> None:
+    now = timezone.now()
+    agent = _agent()
+    queue_row = _queue()
+    AssignmentAttempt.objects.create(
+        idempotency_key="50daeeef-d135-47a7-8f8c-c5b1df05f736",
+        ticket_id="9001",
+        selected_agent=agent,
+        eligibility_revision=agent.availability_revision,
+        desired_hubspot_owner_id=agent.hubspot_owner_id,
+        decision_reason="historical",
+        reserved_at=now - timedelta(days=1),
+        state=AssignmentAttempt.State.COMPLETED,
+    )
+
+    with patch("apps.support.durable_assignment_service._verify_candidates", return_value=[(agent, "eligible")]):
+        reservation = reserve_next_assignment("9001")
+
+    queue_row.refresh_from_db()
+    assert reservation.reason == "legacy_cycle_ambiguous"
+    assert queue_row.queue_status == NewConversation.QueueStatus.FAILED
+    assert queue_row.failure_code == "legacy_cycle_ambiguous"
+    assert agent.current_simultaneous_chats == 0
 
 
 def test_manual_provider_rejection_has_no_false_local_success() -> None:

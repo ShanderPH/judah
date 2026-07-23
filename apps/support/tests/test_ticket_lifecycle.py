@@ -247,6 +247,51 @@ class TestHandleOwnerChange:
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 0
 
+    def test_initial_manual_owner_consumes_queued_projection_idempotently(self):
+        agent = _make_agent("ManualAgent", owner_id=201, chats=0)
+        queue_row = NewConversation.objects.create(
+            hubspot_ticket_id="T013-QUEUED",
+            entered_queue_at=timezone.now() - timedelta(minutes=3),
+        )
+        queue_row_id = queue_row.pk
+
+        from apps.support.tasks import _do_handle_owner_change
+
+        _do_handle_owner_change("T013-QUEUED", None, 201)
+        _do_handle_owner_change("T013-QUEUED", None, 201)
+
+        assert not NewConversation.objects.filter(pk=queue_row_id).exists()
+        assert AssignedConversation.objects.filter(hubspot_ticket_id="T013-QUEUED").count() == 1
+        agent.refresh_from_db()
+        assert agent.current_simultaneous_chats == 1
+
+    def test_manual_owner_compensates_live_reservation_without_capacity_duplication(self):
+        agent = _make_agent("ReservedAgent", owner_id=202, chats=0)
+        NewConversation.objects.create(
+            hubspot_ticket_id="T013-RACE",
+            entered_queue_at=timezone.now() - timedelta(minutes=2),
+            automatic_assignment_eligible=True,
+        )
+        from apps.support.durable_assignment_service import reserve_next_assignment
+        from apps.support.models import AssignmentAttempt
+        from apps.support.tasks import _do_handle_owner_change
+
+        with patch(
+            "apps.support.durable_assignment_service._verify_candidates",
+            return_value=[(agent, "eligible")],
+        ):
+            reservation = reserve_next_assignment("T013-RACE")
+        assert reservation.attempt is not None
+
+        _do_handle_owner_change("T013-RACE", None, 202)
+
+        reservation.attempt.refresh_from_db()
+        agent.refresh_from_db()
+        assert reservation.attempt.state == AssignmentAttempt.State.COMPENSATED
+        assert agent.current_simultaneous_chats == 1
+        assert AssignedConversation.objects.filter(hubspot_ticket_id="T013-RACE").count() == 1
+        assert not NewConversation.objects.filter(hubspot_ticket_id="T013-RACE").exists()
+
     def test_skips_when_owner_unchanged(self):
         """Same previous and new owner — no-op."""
         agent = _make_agent("Agent", owner_id=100, chats=1)

@@ -16,7 +16,7 @@ from apps.support.availability_runtime import (
     is_authoritative_availability_runtime,
     may_assign,
 )
-from apps.support.models import Agent, AssignmentAttempt
+from apps.support.models import Agent, AssignmentAttempt, NewConversation
 
 # (label, model name, ticket column) of every projection that can reference a
 # conversation cycle after migration 0020.
@@ -151,6 +151,35 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     checks["stuck_attempts"] = stuck_attempts
     if stuck_attempts:
         reasons.append("assignment_attempts_stuck")
+
+    now = timezone.now()
+    ready_queue = NewConversation.objects.filter(
+        automatic_assignment_eligible=True,
+        queue_status__in=(NewConversation.QueueStatus.PENDING, NewConversation.QueueStatus.QUEUED),
+    ).filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=now))
+    checks["ready_queue_depth"] = ready_queue.count()
+    oldest_ready = ready_queue.order_by("entered_queue_at").values_list("entered_queue_at", flat=True).first()
+    checks["oldest_ready_age_seconds"] = (
+        max(0, int((now - oldest_ready).total_seconds())) if oldest_ready is not None else 0
+    )
+    poisoned = NewConversation.objects.filter(queue_status=NewConversation.QueueStatus.FAILED)
+    checks["poisoned_queue_rows"] = {
+        row["failure_code"] or "unclassified": row["count"]
+        for row in poisoned.values("failure_code").annotate(count=Count("id"))
+    }
+    checks["expired_claims"] = (
+        NewConversation.objects.filter(
+            claim_expires_at__lte=now,
+        )
+        .exclude(claim_owner_token="")
+        .count()
+    )
+    checks["completed_attempt_queue_conflicts"] = AssignmentAttempt.objects.filter(
+        state=AssignmentAttempt.State.COMPLETED,
+        queue_row__isnull=False,
+    ).count()
+    if checks["poisoned_queue_rows"]:
+        reasons.append("assignment_queue_poisoned_rows")
 
     with connection.cursor() as cursor:
         cursor.execute("SELECT current_user, current_setting('application_name', true)")

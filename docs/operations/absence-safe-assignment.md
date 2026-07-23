@@ -240,3 +240,41 @@ without dispatch must be recovered before proceeding.
 Enforcement must not be used as a probe. Set
 `CONVERSATION_CYCLES_ENFORCED=true` only after the readiness contract is already
 green and the specific canary/enforcement approval has been recorded.
+
+## Resilient queue recovery
+
+Use the following order for an assignment incident. All commands in the first
+stage are read-only; do not drain or repair until the aggregate baseline has
+been reviewed.
+
+```powershell
+railway.cmd whoami
+railway.cmd status --json
+railway.cmd logs --service API
+railway.cmd logs --service Celery-Worker
+uv run python manage.py profile_legacy_cycles
+uv run python manage.py backfill_conversation_cycles --dry-run --limit 100 --report cycle-dry-run.json
+```
+
+Readiness must account for `ready_queue_depth`, `oldest_ready_age_seconds`,
+`poisoned_queue_rows`, `completed_attempt_queue_conflicts`, `expired_claims`
+and `conversation_cycles.queued_without_dispatch`. A poisoned row degrades the
+component but is isolated; a missing durable migration, unavailable database,
+or stuck durable attempt is unhealthy and stops owner effects.
+
+For an individually approved recovery, classify the row before processing:
+
+- completed attempt for the same cycle: consume the residual queue projection
+  as `converged_completed`, without another HubSpot owner call;
+- legacy row without proven cycle identity: quarantine with
+  `legacy_cycle_ambiguous`; never invent an entry timestamp;
+- owner already present in HubSpot: converge the local queue/cycle as
+  `hubspot_manual`, without overwriting the owner;
+- transient provider failure: retain the row with a bounded retry timestamp;
+- permanent item failure: quarantine only that row and continue the drain.
+
+Stop immediately if `assigned > total_pending`, a queue row repeats in one
+drain, owner or capacity diverges, durable repairs increase unexpectedly, or
+API/worker/beat do not run the same commit. Queue cleanup must preserve attempts,
+cycles, assignment logs and owner history. Production dry-run, repair, drain,
+flags and deploy each require their own explicit authorization.

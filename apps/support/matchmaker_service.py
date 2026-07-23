@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 import structlog
 from django.conf import settings
@@ -32,6 +35,34 @@ class AssignmentOutcome(StrEnum):
     NON_RETRYABLE_EXTERNAL_ERROR = "non_retryable_external_error"
 
 
+class QueueItemOutcome(StrEnum):
+    """Typed terminal outcome for one queue selection."""
+
+    ASSIGNED_NEW_EFFECT = "assigned_new_effect"
+    CONVERGED_COMPLETED = "converged_completed"
+    CONVERGED_EXTERNAL_OWNER = "converged_external_owner"
+    QUARANTINED_LEGACY_AMBIGUOUS = "quarantined_legacy_ambiguous"
+    QUARANTINED_STALE_CYCLE = "quarantined_stale_cycle"
+    QUARANTINED_PERMANENT_PROVIDER_ERROR = "quarantined_permanent_provider_error"
+    DEFERRED_NO_AGENT = "deferred_no_agent"
+    DEFERRED_CANDIDATE_CHANGED = "deferred_candidate_changed"
+    DEFERRED_PROVIDER_TRANSIENT = "deferred_provider_transient"
+    CLAIMED_ELSEWHERE = "claimed_elsewhere"
+    QUEUE_EMPTY = "queue_empty"
+    SYSTEMIC_FAILURE = "systemic_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class QueueItemResult:
+    """PII-free result used by drains and aggregate telemetry."""
+
+    outcome: QueueItemOutcome
+    queue_row_id: uuid.UUID | None
+    cycle_id: str | None
+    made_progress: bool
+    effect_applied: bool = False
+
+
 def _active_queue():
     """Return post-rollout queue rows that have not been quarantined."""
     return NewConversation.objects.filter(
@@ -43,8 +74,12 @@ def _active_queue():
     )
 
 
-def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
-    """Reserve and converge the requested or oldest ready queue row."""
+def process_queue_item(
+    ticket_id: str | None = None,
+    *,
+    exclude_queue_row_ids: set[uuid.UUID] | None = None,
+) -> QueueItemResult:
+    """Process one distinct queue row and return an exhaustive result."""
     from apps.support.availability_runtime import log_runtime_rejection, may_assign
     from apps.support.durable_assignment_service import (
         execute_assignment_attempt,
@@ -53,21 +88,64 @@ def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
 
     if not may_assign():
         log_runtime_rejection("matchmaker_assign_next")
-        return AssignmentOutcome.NO_AGENT
-    reservation = reserve_next_assignment(ticket_id)
+        return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, None, None, False)
+    reservation = reserve_next_assignment(ticket_id, exclude_queue_row_ids=exclude_queue_row_ids)
+    row_id = reservation.queue_row_id
+    cycle_id = str(reservation.cycle_id) if reservation.cycle_id else None
     if reservation.attempt is None:
         if reservation.reason == "queue_empty_or_claimed":
-            return AssignmentOutcome.QUEUE_EMPTY
-        return AssignmentOutcome.NO_AGENT
-    if reservation.reason == "completed":
-        return AssignmentOutcome.ASSIGNED
+            return QueueItemResult(QueueItemOutcome.QUEUE_EMPTY, None, None, False)
+        if reservation.reason == "legacy_cycle_ambiguous":
+            return QueueItemResult(QueueItemOutcome.QUARANTINED_LEGACY_AMBIGUOUS, row_id, cycle_id, True)
+        if reservation.reason == "skipped_stale_cycle":
+            return QueueItemResult(QueueItemOutcome.QUARANTINED_STALE_CYCLE, row_id, cycle_id, True)
+        if reservation.reason == "candidate_changed":
+            return QueueItemResult(QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED, row_id, cycle_id, False)
+        return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, row_id, cycle_id, False)
+    if reservation.reason == "completed_same_cycle":
+        return QueueItemResult(QueueItemOutcome.CONVERGED_COMPLETED, row_id, cycle_id, True)
+    effect_pending = reservation.attempt.state == "reserved"
     outcome = execute_assignment_attempt(reservation.attempt.pk)
-    try:
-        return AssignmentOutcome(outcome)
-    except ValueError:
-        if outcome == "repair_required":
-            return AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR
-        return AssignmentOutcome.LOCKED
+    mapping = {
+        "assigned": QueueItemOutcome.ASSIGNED_NEW_EFFECT,
+        "stale_ticket": QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
+        "skipped_stale_cycle": QueueItemOutcome.QUARANTINED_STALE_CYCLE,
+        "retryable_external_error": QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT,
+        "repair_required": QueueItemOutcome.SYSTEMIC_FAILURE,
+    }
+    typed = mapping.get(outcome, QueueItemOutcome.CLAIMED_ELSEWHERE)
+    if outcome == "assigned" and not effect_pending:
+        typed = QueueItemOutcome.CONVERGED_COMPLETED
+    return QueueItemResult(
+        typed,
+        row_id,
+        cycle_id,
+        typed
+        in {
+            QueueItemOutcome.ASSIGNED_NEW_EFFECT,
+            QueueItemOutcome.CONVERGED_COMPLETED,
+            QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
+            QueueItemOutcome.QUARANTINED_STALE_CYCLE,
+        },
+        typed == QueueItemOutcome.ASSIGNED_NEW_EFFECT,
+    )
+
+
+def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
+    """Compatibility facade for single-item callers."""
+    result = process_queue_item(ticket_id)
+    mapping = {
+        QueueItemOutcome.ASSIGNED_NEW_EFFECT: AssignmentOutcome.ASSIGNED,
+        QueueItemOutcome.CONVERGED_COMPLETED: AssignmentOutcome.ASSIGNED,
+        QueueItemOutcome.QUEUE_EMPTY: AssignmentOutcome.QUEUE_EMPTY,
+        QueueItemOutcome.DEFERRED_NO_AGENT: AssignmentOutcome.NO_AGENT,
+        QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED: AssignmentOutcome.NO_AGENT,
+        QueueItemOutcome.QUARANTINED_STALE_CYCLE: AssignmentOutcome.STALE_TICKET,
+        QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR: AssignmentOutcome.STALE_TICKET,
+        QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT: AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR,
+        QueueItemOutcome.SYSTEMIC_FAILURE: AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR,
+    }
+    return mapping.get(result.outcome, AssignmentOutcome.LOCKED)
 
 
 def matchmaker_drain_queue() -> dict:
@@ -105,43 +183,60 @@ def matchmaker_drain_queue() -> dict:
             "deferred": 0,
         }
 
-    assigned = 0
-    processed = 0
-    quarantined = 0
-    deferred = 0
-    while processed < total_pending + 5:
-        outcome = matchmaker_assign_next()
-        if outcome == AssignmentOutcome.ASSIGNED:
-            assigned += 1
-            processed += 1
-            continue
-        if outcome == AssignmentOutcome.STALE_TICKET:
-            quarantined += 1
-            processed += 1
-            continue
-        if outcome in (
-            AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR,
-            AssignmentOutcome.NON_RETRYABLE_EXTERNAL_ERROR,
-        ):
-            deferred += 1
-        break
+    counts: dict[str, int] = {
+        "assigned": 0,
+        "converged": 0,
+        "quarantined": 0,
+        "deferred": 0,
+        "claimed_elsewhere": 0,
+        "systemic_failures": 0,
+    }
+    seen_queue_row_ids: set[uuid.UUID] = set()
+    no_progress = 0
+    while len(seen_queue_row_ids) < total_pending:
+        result = process_queue_item(exclude_queue_row_ids=seen_queue_row_ids)
+        if result.queue_row_id is not None:
+            seen_queue_row_ids.add(result.queue_row_id)
+        if result.outcome == QueueItemOutcome.QUEUE_EMPTY:
+            break
+        if result.outcome == QueueItemOutcome.SYSTEMIC_FAILURE:
+            counts["systemic_failures"] += 1
+            break
+        if result.outcome == QueueItemOutcome.ASSIGNED_NEW_EFFECT:
+            counts["assigned"] += 1
+        elif result.outcome in {QueueItemOutcome.CONVERGED_COMPLETED, QueueItemOutcome.CONVERGED_EXTERNAL_OWNER}:
+            counts["converged"] += 1
+        elif result.outcome.value.startswith("quarantined_"):
+            counts["quarantined"] += 1
+        elif result.outcome.value.startswith("deferred_"):
+            counts["deferred"] += 1
+        elif result.outcome == QueueItemOutcome.CLAIMED_ELSEWHERE:
+            counts["claimed_elsewhere"] += 1
+        if not result.made_progress:
+            no_progress += 1
+            if result.queue_row_id is None:
+                logger.warning("queue_drain_no_progress", outcome=result.outcome.value)
+                break
 
     remaining = _active_queue().count()
     logger.info(
         "matchmaker_drain_done",
         total_pending=total_pending,
-        assigned=assigned,
+        **counts,
         remaining=remaining,
-        quarantined=quarantined,
-        deferred=deferred,
+        processed=len(seen_queue_row_ids),
+        no_progress=no_progress,
     )
-    return {
-        "assigned": assigned,
+    result: dict[str, Any] = {
         "remaining": remaining,
         "total_pending": total_pending,
-        "quarantined": quarantined,
-        "deferred": deferred,
+        "processed": len(seen_queue_row_ids),
+        "no_progress": no_progress,
+        **counts,
     }
+    if counts["assigned"] > total_pending:
+        raise AssertionError("assigned cannot exceed total_pending")
+    return result
 
 
 def enqueue_new_ticket(

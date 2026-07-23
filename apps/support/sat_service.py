@@ -236,6 +236,14 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
 
                 old_status = agent.status_enum
                 old_eligibility = agent.eligibility_state
+                old_material_state = (
+                    agent.status_enum,
+                    agent.eligibility_state,
+                    agent.eligibility_reason,
+                    agent.remote_availability_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
                 raw_hash = _raw_state_hash(item or {})
                 remote_status = ""
                 decision = EligibilityDecision(False, EligibilityReason.MISSING_OBSERVATION)
@@ -295,7 +303,17 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     new_status = Agent.StatusEnum.ONLINE if decision.eligible else Agent.StatusEnum.AWAY
                 else:
                     new_status = Agent.StatusEnum.ONLINE if remote_status == "available" else Agent.StatusEnum.AWAY
-                agent.availability_revision += 1
+                new_material_state = (
+                    new_status,
+                    decision.state,
+                    decision.reason.value,
+                    remote_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
+                material_state_changed = new_material_state != old_material_state
+                if material_state_changed:
+                    agent.availability_revision += 1
                 agent.availability_fencing_token = fencing_token
                 agent.availability_writer_id = writer_id
                 agent.availability_observed_at = now
@@ -351,21 +369,22 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 # rewrite legacy timestamp-without-time-zone columns such as
                 # last_assignment_at and corrupt the fair-queue ordering.
                 agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
-                AgentAvailabilityDecision.objects.create(
-                    agent=agent,
-                    revision=agent.availability_revision,
-                    old_status=old_status,
-                    new_status=new_status,
-                    remote_status=remote_status,
-                    raw_state_hash=raw_hash,
-                    observed_at=now,
-                    eligibility_state=decision.state,
-                    eligibility_reason=decision.reason.value,
-                    task_id=task_id,
-                    writer_id=writer_id,
-                    runtime_environment=environment,
-                    fencing_token=fencing_token,
-                )
+                if material_state_changed:
+                    AgentAvailabilityDecision.objects.create(
+                        agent=agent,
+                        revision=agent.availability_revision,
+                        old_status=old_status,
+                        new_status=new_status,
+                        remote_status=remote_status,
+                        raw_state_hash=raw_hash,
+                        observed_at=now,
+                        eligibility_state=decision.state,
+                        eligibility_reason=decision.reason.value,
+                        task_id=task_id,
+                        writer_id=writer_id,
+                        runtime_environment=environment,
+                        fencing_token=fencing_token,
+                    )
 
             if agents_came_online:
                 from apps.support.tasks import task_matchmaker_drain_queue
