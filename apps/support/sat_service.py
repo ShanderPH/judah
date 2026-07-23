@@ -311,7 +311,8 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     agent.auto_assign_enabled,
                     agent.is_active,
                 )
-                if new_material_state != old_material_state:
+                material_state_changed = new_material_state != old_material_state
+                if material_state_changed:
                     agent.availability_revision += 1
                 agent.availability_fencing_token = fencing_token
                 agent.availability_writer_id = writer_id
@@ -368,21 +369,22 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 # rewrite legacy timestamp-without-time-zone columns such as
                 # last_assignment_at and corrupt the fair-queue ordering.
                 agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
-                AgentAvailabilityDecision.objects.create(
-                    agent=agent,
-                    revision=agent.availability_revision,
-                    old_status=old_status,
-                    new_status=new_status,
-                    remote_status=remote_status,
-                    raw_state_hash=raw_hash,
-                    observed_at=now,
-                    eligibility_state=decision.state,
-                    eligibility_reason=decision.reason.value,
-                    task_id=task_id,
-                    writer_id=writer_id,
-                    runtime_environment=environment,
-                    fencing_token=fencing_token,
-                )
+                if material_state_changed:
+                    AgentAvailabilityDecision.objects.create(
+                        agent=agent,
+                        revision=agent.availability_revision,
+                        old_status=old_status,
+                        new_status=new_status,
+                        remote_status=remote_status,
+                        raw_state_hash=raw_hash,
+                        observed_at=now,
+                        eligibility_state=decision.state,
+                        eligibility_reason=decision.reason.value,
+                        task_id=task_id,
+                        writer_id=writer_id,
+                        runtime_environment=environment,
+                        fencing_token=fencing_token,
+                    )
 
             if agents_came_online:
                 from apps.support.tasks import task_matchmaker_drain_queue
