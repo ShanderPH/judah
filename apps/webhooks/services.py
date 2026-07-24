@@ -3,6 +3,7 @@
 import structlog
 
 from apps.webhooks.models import DeadLetterQueue, WebhookEvent
+from common.idempotency import canonical_event_key
 
 logger = structlog.get_logger(__name__)
 
@@ -27,24 +28,19 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
         "property_value": payload.get("propertyValue") or payload.get("property_value"),
         "payload": payload,
     }
-    if provider_event_id:
-        deduplication_key = f"{source}:{event_type}:{provider_event_id}"
-        event, created = WebhookEvent.objects.get_or_create(
-            deduplication_key=deduplication_key,
-            defaults={
-                "event_type": event_type,
-                "event_id": provider_event_id,
-                **defaults,
-            },
-        )
-    else:
-        event = WebhookEvent.objects.create(
-            deduplication_key=None,
-            event_type=event_type,
-            event_id="",
+    deduplication_key = canonical_event_key(
+        source=source,
+        event_type=event_type,
+        payload=payload,
+    )
+    event, created = WebhookEvent.objects.get_or_create(
+        deduplication_key=deduplication_key,
+        defaults={
+            "event_type": event_type,
+            "event_id": provider_event_id,
             **defaults,
-        )
-        created = True
+        },
+    )
     logger.info(
         "webhook_event_recorded",
         event_id=event.pk,
@@ -178,7 +174,10 @@ def process_webhook_event(event_id) -> bool:
                         route=lifecycle.decision.route,
                         event_created=lifecycle.event_created,
                     )
-                    if lifecycle.event_created:
+                    if lifecycle.event_created or lifecycle.event.processing_status in {
+                        lifecycle.event.ProcessingStatus.PENDING,
+                        lifecycle.event.ProcessingStatus.FAILED,
+                    }:
                         _dispatch_hubspot_lifecycle(event, lifecycle)
                     else:
                         logger.info(

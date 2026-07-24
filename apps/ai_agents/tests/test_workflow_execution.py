@@ -173,7 +173,7 @@ async def test_each_customer_message_has_one_independent_reply() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
+async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -214,10 +214,6 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
             new=AsyncMock(side_effect=route_handoff),
         ),
-        patch(
-            "apps.support.tasks.task_matchmaker_drain_queue.delay",
-            side_effect=RuntimeError("redis temporarily unavailable"),
-        ) as drain,
     ):
         await apply_supervisor_result(
             instance=instance,
@@ -231,15 +227,14 @@ async def test_handoff_builds_package_and_enters_matchmaker_queue() -> None:
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
     assert "handoff_package" in instance.metadata
     assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
-    queued = await NewConversation.objects.aget(hubspot_ticket_id="ticket-1")
-    assert queued.pipeline_id == "636459134"
+    assert instance.metadata["human_handoff_dispatch"]["queue_admission"] == "hubspot_stage_webhook"
+    assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
     assert await sync_to_async(
         ToolCallAuditLog.objects.filter(
             instance=instance,
             tool_name="assign_ticket_to_human_queue",
         ).exists
     )()
-    drain.assert_called_once()
     assert effects == ["reply", "route"]
 
 
@@ -301,7 +296,6 @@ async def test_handoff_notifies_before_hubspot_route_and_leaves_retryable_failur
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
             new=successful_retry,
         ),
-        patch("apps.support.tasks.task_matchmaker_drain_queue.delay"),
     ):
         await apply_supervisor_result(
             instance=instance,
@@ -315,7 +309,7 @@ async def test_handoff_notifies_before_hubspot_route_and_leaves_retryable_failur
     successful_retry.assert_awaited_once()
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
-    assert await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
+    assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
 
 
 @pytest.mark.django_db(transaction=True)

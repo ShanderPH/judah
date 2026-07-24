@@ -525,33 +525,6 @@ def test_matchmaker_assignment_updates_each_queued_conversation_instance() -> No
     assert waiting.assigned_agent_id is None
 
 
-@pytest.mark.django_db
-def test_ai_handoff_is_idempotently_admitted_to_durable_queue() -> None:
-    from apps.support.matchmaker_service import enqueue_handoff_ticket
-
-    first = enqueue_handoff_ticket(
-        "ticket-handoff",
-        pipeline_id="support",
-        priority="HIGH",
-        subject="Atendimento humano",
-        contact_name="Maria",
-        contact_email="maria@example.com",
-    )
-    first.queue_status = NewConversation.QueueStatus.FAILED
-    first.failure_code = "provider_error"
-    first.failure_message = "temporary"
-    first.save(update_fields=["queue_status", "failure_code", "failure_message"])
-
-    second = enqueue_handoff_ticket("ticket-handoff", subject="Atendimento humano atualizado")
-
-    assert second.pk == first.pk
-    assert NewConversation.objects.filter(hubspot_ticket_id="ticket-handoff").count() == 1
-    assert second.automatic_assignment_eligible is True
-    assert second.queue_status == NewConversation.QueueStatus.PENDING
-    assert second.failure_code == ""
-    assert second.failure_message == ""
-
-
 # ---------------------------------------------------------------------------
 # Webhook Handler Tests (async dispatch)
 # ---------------------------------------------------------------------------

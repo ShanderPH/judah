@@ -144,7 +144,9 @@ async def test_fetch_history_keeps_hubspot_attachments() -> None:
     assert history[0]["attachments"][0]["fileId"] == "42"
 
 
-async def test_download_image_attachment_detects_image_and_encodes_base64() -> None:
+async def test_download_image_attachment_detects_image_and_encodes_base64(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("Authorization") in {None, ""}
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "application/octet-stream"})
@@ -162,7 +164,9 @@ async def test_download_image_attachment_detects_image_and_encodes_base64() -> N
     assert mime_type == "image/png"
 
 
-async def test_download_image_attachment_resolves_private_file_id() -> None:
+async def test_download_image_attachment_resolves_private_file_id(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/files/v3/files/42/signed-url":
             return httpx.Response(200, json={"url": "https://cdn.hubspotusercontent.com/private.png"})
@@ -175,7 +179,14 @@ async def test_download_image_attachment_resolves_private_file_id() -> None:
     assert mime_type == "image/png"
 
 
-async def test_download_image_attachment_rejects_oversized_content() -> None:
+async def test_download_image_attachment_requires_url_or_file_id() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        await _download_image_attachment(MagicMock(), {})
+
+
+async def test_download_image_attachment_rejects_oversized_content(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Length": "100"})
 
@@ -188,7 +199,9 @@ async def test_download_image_attachment_rejects_oversized_content() -> None:
             )
 
 
-async def test_download_image_attachment_rejects_non_image_content() -> None:
+async def test_download_image_attachment_rejects_non_image_content(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not an image")
 
@@ -288,6 +301,97 @@ def test_auth_headers_and_image_helpers(monkeypatch) -> None:
     assert _is_allowed_attachment_url("https://cdn.hubspotusercontent-eu1.net/file")
     assert not _is_allowed_attachment_url("http://api.hubapi.com/file")
     assert not _is_allowed_attachment_url("https://example.com/file")
+    assert not _is_allowed_attachment_url("https://hubspotusercontent.attacker.example/file")
+    assert not _is_allowed_attachment_url("https://cdn.hubspotusercontent-evil.net/file")
+    assert not _is_allowed_attachment_url("https://api.hubapi.com.attacker.example/file")
+
+
+@pytest.mark.asyncio
+async def test_attachment_dns_must_resolve_only_to_public_addresses(monkeypatch) -> None:
+    def public_dns(*_args, **_kwargs):
+        return [(2, 1, 6, "", ("8.8.8.8", 443))]
+
+    monkeypatch.setattr(hubspot.socket, "getaddrinfo", public_dns)
+    await hubspot._validate_public_attachment_url("https://cdn.hubspotusercontent.com/image.png")
+
+    def private_dns(*_args, **_kwargs):
+        return [(2, 1, 6, "", ("127.0.0.1", 443))]
+
+    monkeypatch.setattr(hubspot.socket, "getaddrinfo", private_dns)
+    with pytest.raises(ValueError, match="non-public"):
+        await hubspot._validate_public_attachment_url("https://cdn.hubspotusercontent.com/image.png")
+
+
+@pytest.mark.asyncio
+async def test_attachment_redirect_target_is_revalidated(monkeypatch) -> None:
+    def public_dns(*_args, **_kwargs):
+        return [(2, 1, 6, "", ("8.8.8.8", 443))]
+
+    monkeypatch.setattr(hubspot.socket, "getaddrinfo", public_dns)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://attacker.example/private.png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="not trusted"):
+            await _download_image_attachment(
+                client,
+                {"url": "https://cdn.hubspotusercontent.com/image.png"},
+            )
+
+
+@pytest.mark.asyncio
+async def test_attachment_dns_resolution_failures_are_rejected(monkeypatch) -> None:
+    def failed_dns(*_args, **_kwargs):
+        raise OSError("dns unavailable")
+
+    monkeypatch.setattr(hubspot.socket, "getaddrinfo", failed_dns)
+    with pytest.raises(ValueError, match="could not be resolved"):
+        await hubspot._validate_public_attachment_url("https://cdn.hubspotusercontent.com/image.png")
+
+    monkeypatch.setattr(hubspot.socket, "getaddrinfo", lambda *_args, **_kwargs: [])
+    with pytest.raises(ValueError, match="did not resolve"):
+        await hubspot._validate_public_attachment_url("https://cdn.hubspotusercontent.com/image.png")
+
+
+@pytest.mark.asyncio
+async def test_attachment_allows_revalidated_redirect_between_trusted_hosts(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={"Location": "https://cdn.hubspotusercontent-eu1.net/final.png"},
+            )
+        return httpx.Response(200, content=PNG_BYTES)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        encoded, mime_type = await _download_image_attachment(
+            client,
+            {"url": "https://cdn.hubspotusercontent.com/image.png"},
+        )
+
+    assert len(requests) == 2
+    assert base64.b64decode(encoded) == PNG_BYTES
+    assert mime_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_attachment_redirect_without_location_is_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="redirect limit"):
+            await _download_image_attachment(
+                client,
+                {"url": "https://cdn.hubspotusercontent.com/image.png"},
+            )
 
 
 def test_attachment_and_recipient_helpers() -> None:
@@ -315,6 +419,11 @@ def test_attachment_and_recipient_helpers() -> None:
         "deliveryIdentifiers": [{"type": "PHONE_NUMBER", "value": "123"}],
     }
 
+    assert hubspot._parse_restored_thread_ids(["12", "", 34]) == ["12", "34"]
+    assert hubspot._parse_restored_thread_ids(None) == []
+    assert hubspot._parse_restored_thread_ids('["56", "78"]') == ["56", "78"]
+    assert hubspot._parse_restored_thread_ids("threads: 90 and 12") == ["90", "12"]
+
 
 @pytest.mark.asyncio
 async def test_resolve_attachment_url_variants() -> None:
@@ -330,14 +439,17 @@ async def test_resolve_attachment_url_variants() -> None:
 
 
 @pytest.mark.asyncio
-async def test_download_rejects_untrusted_and_streamed_oversized_content() -> None:
+async def test_download_rejects_untrusted_and_streamed_oversized_content(monkeypatch) -> None:
     client = MagicMock()
     with pytest.raises(ValueError, match="not trusted"):
         await _download_image_attachment(client, {"url": "https://example.com/image.png"})
 
+    monkeypatch.setattr(hubspot, "_validate_public_attachment_url", AsyncMock())
+
     class StreamResponse:
         def __init__(self) -> None:
             self.headers: dict[str, str] = {}
+            self.is_redirect = False
 
         def raise_for_status(self) -> None:
             return None

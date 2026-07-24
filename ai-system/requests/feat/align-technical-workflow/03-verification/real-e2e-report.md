@@ -1,8 +1,8 @@
 # Real production E2E report
 
-Date: 2026-07-16  
-Environment: Railway production services and isolated HubSpot test ticket  
-Trace: `CODEX-E2E-1784218268027`  
+Date: 2026-07-16
+Environment: Railway production services and isolated HubSpot test ticket
+Trace: `CODEX-E2E-1784218268027`
 HubSpot ticket: `46813120557` (archived after the test)
 
 ## Scope and safety
@@ -45,8 +45,8 @@ pending queue row, or assigned-conversation row for the test ticket.
 - `16:13:42Z`: audited HubSpot effects completed.
 - `16:16:23Z`: cleanup close event processed; lifecycle reached `CLOSED`.
 
-Observed queue delay before AI execution: approximately 86 seconds.  
-Supervisor execution latency: 34.63 seconds.  
+Observed queue delay before AI execution: approximately 86 seconds.
+Supervisor execution latency: 34.63 seconds.
 Tokens: 3,070 prompt + 276 completion = 3,346.
 
 ## Supervisor output

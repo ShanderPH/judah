@@ -189,3 +189,45 @@ class TestFullReadinessPath:
 
         assert "conversation_cycle_legacy_rows" in readiness["reasons"]
         assert "conversation_cycle_dispatch_missing" in readiness["reasons"]
+
+
+def test_full_readiness_contract_without_postgresql_server(monkeypatch) -> None:
+    """Exercise the complete readiness contract on the fast local test lane."""
+    original_cursor = connection.cursor
+
+    def portable_cursor(*args, **kwargs):
+        real_cursor = original_cursor(*args, **kwargs)
+
+        class CursorProxy:
+            special_query = False
+
+            def execute(self, sql, params=None):
+                if str(sql).startswith("SELECT current_user"):
+                    self.special_query = True
+                    return None
+                return real_cursor.execute(sql, params)
+
+            def fetchone(self):
+                if self.special_query:
+                    return ("test-role", "judah:local-test:pytest")
+                return real_cursor.fetchone()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                real_cursor.close()
+
+            def __getattr__(self, name):
+                return getattr(real_cursor, name)
+
+        return CursorProxy()
+
+    monkeypatch.setattr(connection, "cursor", portable_cursor)
+
+    readiness = evaluate_assignment_readiness()
+
+    assert readiness["state"] in {"healthy", "degraded", "unhealthy"}
+    assert readiness["checks"]["writer_role"] == "test-role"
+    assert readiness["checks"]["application_name_configured"] is True
+    assert "conversation_cycles" in readiness["checks"]

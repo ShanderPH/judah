@@ -9,7 +9,6 @@ from typing import Any
 
 import structlog
 from django.conf import settings
-from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.support.conversation_cycle_service import CycleClassification, open_or_get_cycle
@@ -22,44 +21,6 @@ _ATTACHABLE_CYCLE_CLASSIFICATIONS = (
     CycleClassification.CREATED,
     CycleClassification.DUPLICATE,
 )
-
-
-def enqueue_handoff_ticket(
-    hubspot_ticket_id: str,
-    pipeline_id: str = "",
-    priority: str = "",
-    subject: str = "",
-    contact_name: str = "",
-    contact_email: str = "",
-) -> NewConversation:
-    """Place an AI-to-human handoff in the canonical support queue.
-
-    The handoff path has already made the explicit routing decision, so the
-    durable assignment rollout must treat this row as eligible. Repeated calls
-    reset a failed/deferred row instead of creating duplicate queue entries.
-    """
-    conversation, _created = NewConversation.objects.update_or_create(
-        hubspot_ticket_id=str(hubspot_ticket_id),
-        defaults={
-            "pipeline_id": pipeline_id,
-            "priority": priority,
-            "subject": subject,
-            "contact_name": contact_name,
-            "contact_email": contact_email,
-            "entered_queue_at": timezone.now(),
-            "queue_status": NewConversation.QueueStatus.PENDING,
-            "assignment_attempts": 0,
-            "last_assignment_attempt_at": None,
-            "next_assignment_attempt_at": None,
-            "failure_code": "",
-            "failure_message": "",
-            "automatic_assignment_eligible": True,
-            "claim_owner_token": "",
-            "claim_expires_at": None,
-            "claimed_at": None,
-        },
-    )
-    return conversation
 
 
 class AssignmentOutcome(StrEnum):

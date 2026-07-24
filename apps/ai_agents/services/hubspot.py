@@ -6,7 +6,7 @@ para o dicionário que o `SalomaoSupervisorAgent` consome — espelhando os
 nós `Get Full Ticket Data` e `Get Conversation History` do fluxo N8N.
 
 Decisões:
-- `httpx.AsyncClient` com HTTP/2 desabilitado (compat) e `follow_redirects=True`.
+- `httpx.AsyncClient` com HTTP/2 desabilitado (compat) e redirects explÃ­citos.
 - Token vindo apenas de `os.getenv("HUBSPOT_ACCESS_TOKEN")`, sem Django ORM,
   mantendo o módulo utilizável em background tasks e workers sem app-ready.
 - Qualquer falha de rede é logada e convertida em dicionário-erro parcial
@@ -18,11 +18,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import html
+import ipaddress
 import json
 import os
 import re
+import socket
 from typing import Any, Literal, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import structlog
@@ -42,6 +44,18 @@ HUBSPOT_API_BASE = "https://api.hubapi.com"
 ConversationChannel = Literal["hubspot", "webchat_central", "api"]
 SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
 DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+MAX_ATTACHMENT_REDIRECTS = 3
+ALLOWED_ATTACHMENT_HOST_SUFFIXES = (
+    "hubspotusercontent.com",
+    "hubspotusercontent-na1.net",
+    "hubspotusercontent-eu1.net",
+    "hubspotusercontent-ap1.net",
+    "hubspotusercontent00.net",
+    "hubspotusercontent10.net",
+    "hubspotusercontent20.net",
+    "hubspotusercontent30.net",
+    "hubspotusercontent40.net",
+)
 DEFAULT_TICKET_CHURCH_PROPERTY = "codigo_de_igreja_local___ticket"
 TICKET_CHURCH_PROPERTY = (
     str(getattr(settings, "HUBSPOT_TICKET_CHURCH_PROPERTY", "")).strip() or DEFAULT_TICKET_CHURCH_PROPERTY
@@ -263,11 +277,39 @@ async def _resolve_attachment_url(client: httpx.AsyncClient, attachment: dict[st
 def _is_allowed_attachment_url(url: str) -> bool:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not hostname:
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
         return False
-    if hostname in {"hubapi.com", "hubspot.com"} or hostname.endswith((".hubapi.com", ".hubspot.com")):
+    if hostname == "api.hubapi.com":
         return True
-    return any(label.startswith("hubspotusercontent") for label in hostname.split("."))
+    return any(hostname == suffix or hostname.endswith(f".{suffix}") for suffix in ALLOWED_ATTACHMENT_HOST_SUFFIXES)
+
+
+async def _validate_public_attachment_url(url: str) -> None:
+    """Reject untrusted hosts and DNS answers that can reach private networks."""
+    if not _is_allowed_attachment_url(url):
+        raise ValueError("HubSpot attachment URL is missing or is not trusted.")
+
+    hostname = urlparse(url).hostname or ""
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            records = await asyncio.to_thread(
+                socket.getaddrinfo,
+                hostname,
+                443,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise ValueError("HubSpot attachment host could not be resolved.") from exc
+        addresses = {record[4][0] for record in records}
+    else:
+        addresses = {str(literal_ip)}
+
+    if not addresses:
+        raise ValueError("HubSpot attachment host did not resolve to an address.")
+    if any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise ValueError("HubSpot attachment host resolved to a non-public address.")
 
 
 async def _download_image_attachment(
@@ -277,24 +319,41 @@ async def _download_image_attachment(
     max_bytes: int = DEFAULT_IMAGE_MAX_BYTES,
 ) -> tuple[str, str]:
     url = await _resolve_attachment_url(client, attachment)
-    if not url or not _is_allowed_attachment_url(url):
+    if not url:
         raise ValueError("HubSpot attachment URL is missing or is not trusted.")
 
-    content = bytearray()
-    async with client.stream("GET", url, headers={"Authorization": ""}) as response:
-        response.raise_for_status()
-        content_length = response.headers.get("content-length")
-        if content_length and int(content_length) > max_bytes:
-            raise ValueError("HubSpot image attachment exceeds the configured size limit.")
-        async for chunk in response.aiter_bytes():
-            content.extend(chunk)
-            if len(content) > max_bytes:
-                raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+    current_url = url
+    for redirect_count in range(MAX_ATTACHMENT_REDIRECTS + 1):
+        await _validate_public_attachment_url(current_url)
+        content = bytearray()
+        async with client.stream(
+            "GET",
+            current_url,
+            headers={"Authorization": ""},
+            follow_redirects=False,
+        ) as response:
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location or redirect_count == MAX_ATTACHMENT_REDIRECTS:
+                    raise ValueError("HubSpot attachment exceeded the redirect limit.")
+                current_url = urljoin(current_url, location)
+                continue
 
-    mime_type = _image_mime_type(bytes(content))
-    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-        raise ValueError("HubSpot attachment is not a supported image.")
-    return base64.b64encode(content).decode("ascii"), mime_type
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+
+        mime_type = _image_mime_type(bytes(content))
+        if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+            raise ValueError("HubSpot attachment is not a supported image.")
+        return base64.b64encode(content).decode("ascii"), mime_type
+
+    raise ValueError("HubSpot attachment exceeded the redirect limit.")
 
 
 async def _hydrate_latest_incoming_image(client: httpx.AsyncClient, context: dict[str, Any]) -> None:
@@ -533,7 +592,7 @@ async def hydrate_ticket_context(
     headers = _auth_headers()
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as client:
         try:
             ticket = await _fetch_ticket(client, ticket_id)
         except httpx.HTTPStatusError as exc:
@@ -648,7 +707,7 @@ async def hydrate_thread_context(
         "errors": errors,
     }
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as client:
         try:
             thread = await _fetch_thread(client, thread_id)
             context["threads"].append(thread)

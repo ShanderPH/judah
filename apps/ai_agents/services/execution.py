@@ -299,10 +299,10 @@ def request_human_handoff(
     ai_summary: str,
     agent_run: AgentRun | None = None,
 ) -> dict[str, Any]:
-    """Move the ticket to human support and persist it in Matchmaker.
+    """Move the ticket to human support through HubSpot's canonical stage.
 
-    Return only after HubSpot accepted the human-support route and the local
-    queue row exists, so callers never promise a transfer before it happened.
+    The authoritative NOVO-stage webhook owns cycle creation and queue
+    admission. This path must not create a competing cycle-less projection.
     """
     engine = LifecycleEngine()
     if instance.state != ConversationInstance.State.HUMAN_HANDOFF_REQUESTED:
@@ -362,8 +362,6 @@ def request_human_handoff(
     if prepared.should_execute:
         try:
             from apps.ai_agents.services.hubspot import update_hubspot_ticket_route
-            from apps.support.matchmaker_service import enqueue_handoff_ticket
-            from apps.support.tasks import task_matchmaker_drain_queue
 
             support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
             support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
@@ -377,31 +375,15 @@ def request_human_handoff(
                     f"HubSpot rejected the human-support route: {route_result.get('reason') or 'unknown error'}"
                 )
 
-            queue_row = enqueue_handoff_ticket(
-                str(ticket_id),
-                pipeline_id=support_pipeline_id,
-                priority=package.get("priority") or "",
-                subject=ai_summary[:255],
-            )
             output = {
-                "queued": True,
-                "queue_id": str(queue_row.pk),
+                "queued": False,
+                "queue_admission": "hubspot_stage_webhook",
                 "ticket_id": str(ticket_id),
                 "pipeline_id": support_pipeline_id,
                 "stage_id": support_stage_id,
                 "route_updated": True,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
-            try:
-                task_matchmaker_drain_queue.delay()
-            except Exception as exc:
-                # The durable queue row and HubSpot human route already exist;
-                # Beat will retry the drain if Redis dispatch is degraded.
-                logger.warning(
-                    "human_handoff_matchmaker_dispatch_deferred",
-                    ticket_id=str(ticket_id),
-                    error=str(exc),
-                )
         except Exception as exc:
             _finish_tool_call(
                 prepared.audit_id,
@@ -411,8 +393,8 @@ def request_human_handoff(
             )
             raise
 
-    if not output.get("queued") or not output.get("route_updated"):
-        raise RuntimeError("Human handoff did not complete its durable routing effects.")
+    if not output.get("route_updated"):
+        raise RuntimeError("Human handoff did not complete its HubSpot routing effect.")
 
     engine.update_metadata(instance, human_handoff_dispatch=output)
 
@@ -420,7 +402,7 @@ def request_human_handoff(
         engine.transition(
             instance,
             ConversationInstance.State.QUEUE_PENDING,
-            reason="Human handoff package enqueued for Matchmaker.",
+            reason="HubSpot accepted the human route; awaiting canonical NOVO-stage queue admission.",
             actor_type="system",
         )
     return {**package, "dispatch": output}

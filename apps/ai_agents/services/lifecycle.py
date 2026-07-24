@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -22,6 +20,7 @@ from apps.ai_agents.models import (
 )
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
 from apps.ai_agents.services.instance_identity import find_conversation_instance, ticket_scope_instances
+from common.idempotency import canonical_event_key
 
 logger = structlog.get_logger(__name__)
 
@@ -261,11 +260,8 @@ def _idempotency_key(
     message_id: str,
     payload: dict[str, Any],
 ) -> str:
-    fallback = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-    natural_id = source_event_id or message_id or fallback
-    return f"{source}:{event_type}:{natural_id}"
+    del object_id, occurred_at, source_event_id, message_id
+    return canonical_event_key(source=source, event_type=event_type, payload=payload)
 
 
 class EventNormalizer:
@@ -491,10 +487,6 @@ class LifecycleEngine:
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                     )
-            else:
-                lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE
-                lifecycle_event.save(update_fields=["processing_status"])
-
         return LifecycleRecordResult(
             instance=instance,
             event=lifecycle_event,

@@ -2,23 +2,82 @@
 
 from django.db import migrations, models
 
+_ROLLBACK_TICKET_KEY = "instance_identity_rollback_ticket_id"
+
 
 def normalize_thread_session_ids(apps, schema_editor) -> None:
-    """Give every existing thread its canonical, conversation-scoped session."""
+    """Restore preserved ticket links and give every thread its own session."""
     conversation_instance = apps.get_model("ai_agents", "ConversationInstance")
     pending = []
-    queryset = conversation_instance.objects.exclude(hubspot_thread_id__isnull=True).exclude(hubspot_thread_id="")
-    for instance in queryset.only("id", "hubspot_thread_id", "ai_session_id").iterator(chunk_size=500):
-        expected_session_id = f"hubspot-thread-{instance.hubspot_thread_id}"
-        if instance.ai_session_id == expected_session_id:
+    queryset = conversation_instance.objects.all()
+    for instance in queryset.only(
+        "id",
+        "hubspot_thread_id",
+        "hubspot_ticket_id",
+        "ai_session_id",
+        "metadata",
+    ).iterator(chunk_size=500):
+        changed = False
+        metadata = dict(instance.metadata or {})
+        rollback_ticket_id = metadata.pop(_ROLLBACK_TICKET_KEY, None)
+        if rollback_ticket_id:
+            instance.hubspot_ticket_id = str(rollback_ticket_id)
+            instance.metadata = metadata
+            changed = True
+
+        if instance.hubspot_thread_id:
+            expected_session_id = f"hubspot-thread-{instance.hubspot_thread_id}"
+            if instance.ai_session_id != expected_session_id:
+                instance.ai_session_id = expected_session_id
+                changed = True
+
+        if not changed:
             continue
-        instance.ai_session_id = expected_session_id
         pending.append(instance)
         if len(pending) == 500:
-            conversation_instance.objects.bulk_update(pending, ["ai_session_id"])
+            conversation_instance.objects.bulk_update(
+                pending,
+                ["hubspot_ticket_id", "ai_session_id", "metadata"],
+            )
             pending.clear()
     if pending:
-        conversation_instance.objects.bulk_update(pending, ["ai_session_id"])
+        conversation_instance.objects.bulk_update(
+            pending,
+            ["hubspot_ticket_id", "ai_session_id", "metadata"],
+        )
+
+
+def prepare_unique_ticket_rollback(apps, schema_editor) -> None:
+    """Preserve duplicate ticket links before the old unique rule returns.
+
+    Migration 0005 cannot represent multiple conversation threads for one
+    ticket. Extra rows are retained and their ticket link is stored in metadata
+    while the database constraint is active. Reapplying 0006 restores every
+    link after removing that constraint.
+    """
+    from django.db.models import Count
+
+    conversation_instance = apps.get_model("ai_agents", "ConversationInstance")
+    duplicates = (
+        conversation_instance.objects.exclude(hubspot_ticket_id__isnull=True)
+        .exclude(hubspot_ticket_id="")
+        .values("hubspot_ticket_id")
+        .annotate(total=Count("id"))
+        .filter(total__gt=1)
+    )
+    for duplicate in duplicates.iterator():
+        ticket_id = duplicate["hubspot_ticket_id"]
+        rows = conversation_instance.objects.filter(hubspot_ticket_id=ticket_id).order_by(
+            "-last_activity_at",
+            "-created_at",
+            "id",
+        )
+        for instance in rows[1:]:
+            metadata = dict(instance.metadata or {})
+            metadata[_ROLLBACK_TICKET_KEY] = ticket_id
+            instance.hubspot_ticket_id = None
+            instance.metadata = metadata
+            instance.save(update_fields=["hubspot_ticket_id", "metadata"])
 
 
 class Migration(migrations.Migration):
@@ -46,5 +105,5 @@ class Migration(migrations.Migration):
             name="session_id",
             field=models.CharField(db_index=True, max_length=255),
         ),
-        migrations.RunPython(normalize_thread_session_ids, migrations.RunPython.noop),
+        migrations.RunPython(normalize_thread_session_ids, prepare_unique_ticket_rollback),
     ]

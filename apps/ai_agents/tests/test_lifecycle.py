@@ -20,6 +20,7 @@ from apps.ai_agents.services.lifecycle import (
 )
 from apps.webhooks.models import WebhookEvent
 from apps.webhooks.services import process_webhook_event
+from common.idempotency import canonical_event_key
 
 
 def _conversation_event(**payload_overrides):
@@ -40,14 +41,19 @@ def _conversation_event(**payload_overrides):
 
 @pytest.mark.django_db
 def test_normalizer_extracts_conversation_message_identifiers() -> None:
-    normalized = EventNormalizer().normalize_webhook_event(_conversation_event())
+    event = _conversation_event()
+    normalized = EventNormalizer().normalize_webhook_event(event)
 
     assert normalized.event_type == "conversation_message_received"
     assert normalized.hubspot_thread_id == "thread-123"
     assert normalized.message_id == "msg-1"
     assert normalized.direction == "INCOMING"
     assert normalized.channel == "chat"
-    assert normalized.idempotency_key == "hubspot:conversation.newMessage:evt-1"
+    assert normalized.idempotency_key == canonical_event_key(
+        source="hubspot",
+        event_type="conversation.newMessage",
+        payload=event.payload,
+    )
 
 
 @pytest.mark.django_db
@@ -62,7 +68,7 @@ def test_lifecycle_records_and_deduplicates_conversation_events() -> None:
     assert first.instance.pk == second.instance.pk
     assert ConversationInstance.objects.count() == 1
     assert ConversationEvent.objects.count() == 1
-    assert ConversationEvent.objects.get().processing_status == ConversationEvent.ProcessingStatus.DUPLICATE
+    assert ConversationEvent.objects.get().processing_status == ConversationEvent.ProcessingStatus.PENDING
     first.instance.refresh_from_db()
     assert first.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
 
@@ -80,6 +86,19 @@ def test_lifecycle_uses_message_id_when_provider_event_id_is_missing() -> None:
     assert second.event_created is False
     assert ConversationInstance.objects.count() == 1
     assert ConversationEvent.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_lifecycle_keeps_distinct_events_when_hubspot_reuses_event_id() -> None:
+    first_event = _conversation_event(objectId="thread-first", messageId="msg-first")
+    second_event = _conversation_event(objectId="thread-second", messageId="msg-second")
+
+    first = record_lifecycle_for_webhook_event(first_event)
+    second = record_lifecycle_for_webhook_event(second_event)
+
+    assert first.event.pk != second.event.pk
+    assert first.event.idempotency_key != second.event.idempotency_key
+    assert ConversationEvent.objects.count() == 2
 
 
 @pytest.mark.django_db

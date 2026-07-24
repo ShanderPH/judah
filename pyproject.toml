@@ -64,6 +64,7 @@ omit = ["*/tests/*", "*/migrations/*"]
 [tool.coverage.report]
 # Verified local and CI floor; keep both runners aligned.
 fail_under = 90
+precision = 2
 show_missing = true
 
 [tool.mypy]
