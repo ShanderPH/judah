@@ -6,10 +6,10 @@ with support for business hours scheduling.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -32,7 +32,7 @@ _DEFAULT_BUSINESS_HOURS = {
 }
 
 
-def _get_business_hours_for_today() -> tuple[int, int] | None:
+def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int] | None:
     """Get today's business hours, considering special schedules and DB config.
 
     Priority:
@@ -43,8 +43,8 @@ def _get_business_hours_for_today() -> tuple[int, int] | None:
     Returns:
         (start_hour, end_hour) tuple, or None if closed today.
     """
-    now = timezone.localtime()
-    today = now.date()
+    local_now = timezone.localtime(now)
+    today = local_now.date()
 
     # 1. Check for special schedule override
     try:
@@ -72,15 +72,21 @@ def _get_business_hours_for_today() -> tuple[int, int] | None:
 
         config = BusinessHoursConfig.objects.filter(is_active=True).first()
         if config:
-            return config.get_hours_for_weekday(now.weekday())
+            from apps.ai_agents.utils.business_rules import is_holiday
+
+            weekday = 6 if is_holiday(local_now) else local_now.weekday()
+            return config.get_hours_for_weekday(weekday)
     except Exception:
         pass  # Table may not exist yet during migrations
 
     # 3. Fallback to hardcoded defaults
-    return _DEFAULT_BUSINESS_HOURS.get(now.weekday())
+    from apps.ai_agents.utils.business_rules import is_holiday
+
+    weekday = 6 if is_holiday(local_now) else local_now.weekday()
+    return _DEFAULT_BUSINESS_HOURS.get(weekday)
 
 
-def is_business_hours() -> bool:
+def is_business_hours(now: datetime | None = None) -> bool:
     """Check if current time is within business hours.
 
     Considers special schedules, database-configured hours, and default hours.
@@ -88,14 +94,14 @@ def is_business_hours() -> bool:
     Returns:
         True if within business hours, False otherwise.
     """
-    now = timezone.localtime()
-    hours = _get_business_hours_for_today()
+    local_now = timezone.localtime(now)
+    hours = _get_business_hours_for_today(local_now)
 
     if hours is None:
         return False
 
     start_hour, end_hour = hours
-    return start_hour <= now.hour < end_hour
+    return start_hour <= local_now.hour < end_hour
 
 
 def get_poll_interval_seconds() -> int:
@@ -119,10 +125,25 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
         Dict with ``agents_synced``, ``status_changes``, ``count_corrections``,
         ``api_calls_made`` keys.
     """
+    from apps.support.availability_runtime import (
+        is_authoritative_availability_runtime,
+        log_runtime_rejection,
+    )
+
+    if not is_authoritative_availability_runtime():
+        log_runtime_rejection("sync_all_agents_status_and_counts_optimized")
+        return {
+            "agents_synced": 0,
+            "status_changes": 0,
+            "count_corrections": 0,
+            "api_calls_made": 0,
+            "skipped_non_authoritative_runtime": True,
+        }
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from apps.integrations.hubspot.client import get_hubspot_client
-    from apps.support.models import Agent, AgentStatusHistory
+    from apps.support.models import Agent
 
     client = get_hubspot_client()
 
@@ -146,19 +167,10 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
             "api_calls_made": 0,
         }
 
-    # Staging disables availability writes but keeps ticket-count
-    # reconciliation operational.
+    # Availability is reconciled exclusively by sat_heartbeat(). This service
+    # only synchronizes load/count data so it cannot become a second status
+    # writer.
     api_calls_made = 0
-    availability_map: dict[str, str] = {}
-    if settings.AGENT_STATUS_SYNC_ENABLED:
-        api_calls_made = 1
-        try:
-            availability_data = client.get_all_owners_availability()
-            availability_map = {
-                item.get("email", "").lower(): item.get("status_enum", "away") for item in availability_data
-            }
-        except Exception as exc:
-            logger.warning("sync_all_agents_availability_fetch_failed", error=str(exc))
 
     # Fetch conversation counts in parallel (batched by agent)
     count_map: dict[int, int] = {}
@@ -212,31 +224,6 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
                     continue
 
                 updates = []
-                email_lower = (agent.agent_email or "").lower()
-
-                # Update status from availability map
-                if email_lower in availability_map:
-                    new_status = availability_map[email_lower]
-                    if agent.status_enum != new_status:
-                        old_status = agent.status_enum
-                        agent.status_enum = new_status
-                        updates.append("status_enum")
-                        status_changes += 1
-
-                        # Log status change
-                        AgentStatusHistory.objects.create(
-                            agent=agent,
-                            old_status=old_status,
-                            new_status=new_status,
-                            sync_source="hubspot_poll_optimized",
-                        )
-                        logger.info(
-                            "sync_agent_status_updated",
-                            agent=agent.name,
-                            old_status=old_status,
-                            new_status=new_status,
-                        )
-
                 # Update conversation count from HubSpot
                 if agent.hubspot_owner_id in count_map:
                     hubspot_count = count_map[agent.hubspot_owner_id]

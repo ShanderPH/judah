@@ -102,6 +102,9 @@ def create_agent(request, payload: CreateAgentRequest) -> tuple[int, Agent]:
     start in OFFLINE status with the SAT system controlling availability
     transitions afterwards.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_create_agent")
     if Agent.objects.filter(hubspot_owner_id=payload.hubspot_owner_id).exists():
         raise ConflictError(f"Agent with hubspot_owner_id={payload.hubspot_owner_id} already exists.")
     if Agent.objects.filter(agent_email__iexact=payload.agent_email).exists():
@@ -127,6 +130,9 @@ def create_agent(request, payload: CreateAgentRequest) -> tuple[int, Agent]:
 @require_manager_or_admin
 def update_agent(request, agent_id: str, payload: UpdateAgentRequest) -> Agent:
     """Partially update an agent (capacity, schedule flags, activation)."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_update_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -154,14 +160,6 @@ def update_agent(request, agent_id: str, payload: UpdateAgentRequest) -> Agent:
     if payload.is_active is not None:
         agent.is_active = payload.is_active
         updated_fields.append("is_active")
-    if payload.status_enum is not None:
-        if payload.status_enum not in Agent.StatusEnum.values:
-            raise ValidationError(
-                f"Invalid status '{payload.status_enum}'. Allowed: {', '.join(Agent.StatusEnum.values)}."
-            )
-        agent.status_enum = payload.status_enum
-        updated_fields.append("status_enum")
-
     if updated_fields:
         agent.updated_at = timezone.now()
         agent.save(update_fields=[*updated_fields, "updated_at"])
@@ -182,6 +180,9 @@ def inactivate_agent(request, agent_id: str) -> Agent:
     remain auditable. A new agent with the same email/owner cannot be
     re-created until the previous record is reactivated.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_inactivate_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -189,9 +190,8 @@ def inactivate_agent(request, agent_id: str) -> Agent:
 
     agent.is_active = False
     agent.auto_assign_enabled = False
-    agent.status_enum = Agent.StatusEnum.OFFLINE
     agent.updated_at = timezone.now()
-    agent.save(update_fields=["is_active", "auto_assign_enabled", "status_enum", "updated_at"])
+    agent.save(update_fields=["is_active", "auto_assign_enabled", "updated_at"])
     logger.info("agent_inactivated", agent_id=str(agent.id))
     return agent
 
@@ -204,6 +204,9 @@ def inactivate_agent(request, agent_id: str) -> Agent:
 @require_manager_or_admin
 def reactivate_agent(request, agent_id: str) -> Agent:
     """Reactivate a previously disabled agent."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_reactivate_agent")
     try:
         agent = Agent.objects.get(pk=agent_id)
     except Agent.DoesNotExist as err:
@@ -398,19 +401,26 @@ def reassignments_summary(request, days: int = 30) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _hubspot_assign(hubspot_ticket_id: str, owner_id: int) -> None:
+def _hubspot_assign(hubspot_ticket_id: str, owner_id: int) -> dict:
     """Best-effort HubSpot owner update — non-fatal on failure."""
-    try:
-        from apps.integrations.hubspot.client import get_hubspot_client
+    from apps.integrations.hubspot.client import get_hubspot_client
 
-        client = get_hubspot_client()
-        client.assign_ticket_owner(hubspot_ticket_id, owner_id)
-    except Exception as exc:
-        logger.warning(
-            "manual_assign_hubspot_sync_failed",
-            ticket_id=hubspot_ticket_id,
-            owner_id=owner_id,
-            error=str(exc),
+    return get_hubspot_client().assign_ticket_owner(hubspot_ticket_id, owner_id)
+
+
+def _ensure_agent_is_currently_eligible(agent: Agent) -> None:
+    """Reject manual assignment to an absent or stale agent."""
+    from django.conf import settings
+
+    if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        return
+    from apps.support.eligibility_service import evaluate_persisted_agent
+
+    decision = evaluate_persisted_agent(agent, timezone.now())
+    if not decision.eligible:
+        raise ValidationError(
+            f"Agent is not eligible for assignment ({decision.reason.value}). "
+            "Refresh availability from HubSpot before retrying."
         )
 
 
@@ -424,10 +434,15 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
     """Move a ticket from ``new_conversations`` directly to ``assigned_conversations``
     for the agent identified by ``agent_id`` regardless of the round-robin order.
     """
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_manual_assign")
     try:
         agent = Agent.objects.get(pk=payload.agent_id)
     except Agent.DoesNotExist as err:
         raise NotFoundError(f"Agent with id={payload.agent_id} not found.") from err
+
+    _ensure_agent_is_currently_eligible(agent)
 
     new_conv = NewConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
     already_assigned = AssignedConversation.objects.filter(hubspot_ticket_id=payload.hubspot_ticket_id).first()
@@ -437,45 +452,30 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
 
     if already_assigned:
         # Treat as a force-reassign for an already-assigned ticket.
-        return _force_reassign_internal(payload.hubspot_ticket_id, agent, reason="manual_assign_existing")
-
-    now = timezone.now()
-    wait_seconds: Decimal | None = None
-    if new_conv.entered_queue_at:
-        wait_seconds = Decimal(str(round((now - new_conv.entered_queue_at).total_seconds(), 2)))
-
-    _hubspot_assign(payload.hubspot_ticket_id, agent.hubspot_owner_id)
+        actor_email = getattr(getattr(request, "auth", None), "email", "admin")
+        return _force_reassign_internal(
+            payload.hubspot_ticket_id,
+            agent,
+            reason="manual_assign_existing",
+            actor_email=actor_email,
+        )
 
     actor_email = getattr(getattr(request, "auth", None), "email", "admin")
+    from apps.support.durable_assignment_service import (
+        execute_assignment_attempt,
+        reserve_manual_assignment,
+    )
 
-    with transaction.atomic():
-        AssignedConversation.objects.create(
-            hubspot_ticket_id=payload.hubspot_ticket_id,
-            agent=agent,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            agent_name=agent.name,
-            pipeline_id=new_conv.pipeline_id,
-            entered_queue_at=new_conv.entered_queue_at,
-            assigned_at=now,
-            queue_wait_seconds=wait_seconds,
-            contact_name=new_conv.contact_name,
-            contact_email=new_conv.contact_email,
-            priority=new_conv.priority,
-            subject=new_conv.subject,
-        )
-        AssignmentLog.objects.create(
-            ticket_id=payload.hubspot_ticket_id,
-            agent=agent,
-            agent_name=agent.name,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            assignment_type="manual",
-            assigned_by=actor_email,
-            pipeline_id=new_conv.pipeline_id,
-            entered_queue_at=new_conv.entered_queue_at,
-            queue_wait_seconds=wait_seconds,
-        )
-        increment_agent_chat_count(agent)
-        new_conv.delete()
+    reservation = reserve_manual_assignment(
+        ticket_id=payload.hubspot_ticket_id,
+        agent_id=agent.pk,
+        requested_by=actor_email,
+    )
+    if reservation.attempt is None:
+        raise ValidationError(f"Manual assignment could not be reserved ({reservation.reason}).")
+    outcome = execute_assignment_attempt(reservation.attempt.pk)
+    if outcome != "assigned":
+        raise ValidationError(f"HubSpot owner assignment was not confirmed ({outcome}).")
 
     logger.info(
         "manual_assign_success",
@@ -486,6 +486,7 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
     return {
         "success": True,
         "hubspot_ticket_id": payload.hubspot_ticket_id,
+        "cycle_id": str(reservation.attempt.cycle_id) if reservation.attempt.cycle_id else None,
         "agent_id": str(agent.id),
         "agent_name": agent.name,
         "detail": "Ticket assigned manually.",
@@ -499,6 +500,10 @@ def _force_reassign_internal(
     actor_email: str | None = None,
 ) -> dict:
     """Force-reassign a ticket already present in assigned_conversations."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("admin_force_reassign")
+    _ensure_agent_is_currently_eligible(target_agent)
     assigned = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if not assigned:
         raise NotFoundError(f"No assigned conversation for ticket {hubspot_ticket_id} — cannot force reassign.")
@@ -506,6 +511,7 @@ def _force_reassign_internal(
         return {
             "success": True,
             "hubspot_ticket_id": hubspot_ticket_id,
+            "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
             "agent_id": str(target_agent.id),
             "agent_name": target_agent.name,
             "detail": "Target agent already owns this ticket — no-op.",
@@ -517,11 +523,20 @@ def _force_reassign_internal(
     if assigned.assigned_at:
         duration_with_previous = Decimal(str(round((now - assigned.assigned_at).total_seconds(), 2)))
 
-    _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
-
     with transaction.atomic():
-        ConversationReassignment.objects.create(
+        assigned = AssignedConversation.objects.select_for_update().get(pk=assigned.pk)
+        if assigned.hubspot_owner_id == target_agent.hubspot_owner_id:
+            return {
+                "success": True,
+                "hubspot_ticket_id": hubspot_ticket_id,
+                "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
+                "agent_id": str(target_agent.id),
+                "agent_name": target_agent.name,
+                "detail": "Target agent already owns this ticket â€” no-op.",
+            }
+        reassignment = ConversationReassignment.objects.create(
             hubspot_ticket_id=hubspot_ticket_id,
+            cycle=assigned.cycle,
             from_agent=previous_agent,
             from_hubspot_owner_id=assigned.hubspot_owner_id,
             from_agent_name=assigned.agent_name,
@@ -530,8 +545,15 @@ def _force_reassign_internal(
             to_agent_name=target_agent.name,
             reassigned_at=now,
             time_with_previous_agent_seconds=duration_with_previous,
-            reassignment_source=reason or "admin_force_reassign",
+            reassignment_source=f"{reason or 'admin_force_reassign'}:reserved",
         )
+
+    _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
+
+    with transaction.atomic():
+        assigned = AssignedConversation.objects.select_for_update().get(pk=assigned.pk)
+        reassignment.reassignment_source = reason or "admin_force_reassign"
+        reassignment.save(update_fields=["reassignment_source"])
         assigned.agent = target_agent
         assigned.hubspot_owner_id = target_agent.hubspot_owner_id
         assigned.agent_name = target_agent.name
@@ -549,6 +571,7 @@ def _force_reassign_internal(
         )
         AssignmentLog.objects.create(
             ticket_id=hubspot_ticket_id,
+            cycle=assigned.cycle,
             agent=target_agent,
             agent_name=target_agent.name,
             hubspot_owner_id=target_agent.hubspot_owner_id,
@@ -571,6 +594,7 @@ def _force_reassign_internal(
     return {
         "success": True,
         "hubspot_ticket_id": hubspot_ticket_id,
+        "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
         "agent_id": str(target_agent.id),
         "agent_name": target_agent.name,
         "detail": "Ticket reassigned.",
@@ -599,6 +623,6 @@ def force_reassign(request, payload: ForceReassignRequest) -> dict:
     return _force_reassign_internal(
         payload.hubspot_ticket_id,
         target,
-        reason=payload.reason or "admin_force_reassign",
+        reason=payload.reason,
         actor_email=actor_email,
     )

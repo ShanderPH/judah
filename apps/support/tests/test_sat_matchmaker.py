@@ -6,12 +6,12 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import override_settings
 from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
 from apps.support.models import (
     Agent,
+    AgentAvailabilityDecision,
     AgentDailyTimeLog,
     AgentStatusHistory,
     AssignedConversation,
@@ -46,6 +46,7 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
         hubspot_ticket_id=ticket_id,
         pipeline_id="636459134",
         entered_queue_at=timezone.now() - timedelta(minutes=minutes_ago),
+        automatic_assignment_eligible=True,
     )
 
 
@@ -56,19 +57,6 @@ def _make_pending_ticket(ticket_id: str, minutes_ago: int = 5) -> NewConversatio
 
 @pytest.mark.django_db
 class TestSATHeartbeat:
-    @override_settings(AGENT_STATUS_SYNC_ENABLED=False)
-    @patch("apps.support.sat_service.is_business_hours")
-    @patch("apps.integrations.hubspot.client.get_hubspot_client")
-    def test_status_sync_disabled_skips_all_work(self, mock_client_fn, mock_bh):
-        from apps.support.sat_service import sat_heartbeat
-
-        result = sat_heartbeat()
-
-        assert result["skipped_status_sync_disabled"] is True
-        assert result["status_changes"] == 0
-        mock_bh.assert_not_called()
-        mock_client_fn.assert_not_called()
-
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     def test_skips_off_hours(self, mock_bh):
         from apps.support.sat_service import sat_heartbeat
@@ -119,11 +107,21 @@ class TestSATHeartbeat:
 
         from apps.support.sat_service import sat_heartbeat
 
+        first_result = sat_heartbeat()
+        agent.refresh_from_db()
+        first_revision = agent.availability_revision
+        first_observed_at = agent.availability_observed_at
+        decision_count = AgentAvailabilityDecision.objects.filter(agent=agent).count()
+
         result = sat_heartbeat()
 
         assert result["status_changes"] == 0
+        assert first_result["status_changes"] == 0
         agent.refresh_from_db()
         assert agent.sat_last_heartbeat_at is not None
+        assert agent.availability_observed_at >= first_observed_at
+        assert agent.availability_revision == first_revision
+        assert AgentAvailabilityDecision.objects.filter(agent=agent).count() == decision_count
 
 
 @pytest.mark.django_db
@@ -235,8 +233,8 @@ class TestSATResetDailyCounters:
 
 @pytest.mark.django_db
 class TestMatchmakerAssignNext:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_assigns_oldest_ticket_to_best_agent(self, mock_client_fn, mock_reconcile):
         agent = _make_agent("Agent1", 100, chats=0)
         _make_pending_ticket("T001", minutes_ago=10)
@@ -286,8 +284,8 @@ class TestMatchmakerAssignNext:
 
 @pytest.mark.django_db
 class TestMatchmakerDrainQueue:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_assigns_multiple_tickets(self, mock_client_fn, mock_reconcile):
         _make_agent("Agent1", 100, chats=0, max_chats=5)
         _make_agent("Agent2", 200, chats=0, max_chats=5)
@@ -313,8 +311,8 @@ class TestMatchmakerDrainQueue:
         assert result["assigned"] == 0
         assert result["total_pending"] == 0
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_quarantines_stale_head_and_assigns_next_ticket(self, mock_client_fn, mock_reconcile):
         from apps.integrations.hubspot.exceptions import HubSpotResourceNotFoundError
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -332,21 +330,22 @@ class TestMatchmakerDrainQueue:
 
         result = matchmaker_drain_queue()
 
-        assert result == {
-            "assigned": 1,
-            "remaining": 0,
-            "total_pending": 2,
-            "quarantined": 1,
-            "deferred": 0,
-        }
+        assert result["assigned"] == 1
+        assert result["remaining"] == 0
+        assert result["total_pending"] == 2
+        assert result["quarantined"] == 1
+        assert result["deferred"] == 0
+        assert result["processed"] == 2
+        assert result["converged"] == 0
+        assert result["systemic_failures"] == 0
         stale = NewConversation.objects.get(hubspot_ticket_id="STALE")
         assert stale.queue_status == NewConversation.QueueStatus.FAILED
         assert stale.failure_code == "hubspot_ticket_not_found"
         assert stale.assignment_attempts == 1
         assert not NewConversation.objects.filter(hubspot_ticket_id="VALID").exists()
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_defers_transient_provider_failure_with_backoff(self, mock_client_fn, mock_reconcile):
         from apps.integrations.hubspot.exceptions import HubSpotAPIError
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -387,6 +386,7 @@ class TestEnqueueNewTicket:
             "contact_name": "John",
             "contact_email": "john@test.com",
             "priority": "HIGH",
+            "entered_novo_at": "1711900000000",
         }
         mock_client_fn.return_value = mock_client
 
@@ -423,6 +423,7 @@ class TestEnqueueNewTicket:
             "pipeline": "636459134",
             "owner_id": "",
             "subject": "Test",
+            "entered_novo_at": "1711900000000",
         }
         mock_client_fn.return_value = mock_client
 
@@ -446,6 +447,7 @@ class TestEnqueueNewTicket:
             "id": "T001",
             "pipeline": "636459134",
             "owner_id": "",
+            "entered_novo_at": "1711900000000",
         }
 
         from apps.support.matchmaker_service import enqueue_new_ticket
@@ -470,6 +472,7 @@ class TestEnqueueNewTicket:
             "id": "T001",
             "pipeline": "636459134",
             "owner_id": "",
+            "entered_novo_at": "1711900000000",
         }
 
         from apps.support.matchmaker_service import enqueue_new_ticket
@@ -522,6 +525,33 @@ def test_matchmaker_assignment_updates_each_queued_conversation_instance() -> No
     assert waiting.assigned_agent_id is None
 
 
+@pytest.mark.django_db
+def test_ai_handoff_is_idempotently_admitted_to_durable_queue() -> None:
+    from apps.support.matchmaker_service import enqueue_handoff_ticket
+
+    first = enqueue_handoff_ticket(
+        "ticket-handoff",
+        pipeline_id="support",
+        priority="HIGH",
+        subject="Atendimento humano",
+        contact_name="Maria",
+        contact_email="maria@example.com",
+    )
+    first.queue_status = NewConversation.QueueStatus.FAILED
+    first.failure_code = "provider_error"
+    first.failure_message = "temporary"
+    first.save(update_fields=["queue_status", "failure_code", "failure_message"])
+
+    second = enqueue_handoff_ticket("ticket-handoff", subject="Atendimento humano atualizado")
+
+    assert second.pk == first.pk
+    assert NewConversation.objects.filter(hubspot_ticket_id="ticket-handoff").count() == 1
+    assert second.automatic_assignment_eligible is True
+    assert second.queue_status == NewConversation.QueueStatus.PENDING
+    assert second.failure_code == ""
+    assert second.failure_message == ""
+
+
 # ---------------------------------------------------------------------------
 # Webhook Handler Tests (async dispatch)
 # ---------------------------------------------------------------------------
@@ -529,13 +559,14 @@ def test_matchmaker_assignment_updates_each_queued_conversation_instance() -> No
 
 @pytest.mark.django_db
 class TestWebhookHandlerAsync:
+    @patch("apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback())
     @patch("apps.support.tasks.task_matchmaker_assign_single.delay")
-    def test_novo_handler_dispatches_task(self, mock_delay):
+    def test_novo_handler_dispatches_task(self, mock_delay, _mock_on_commit):
         from apps.webhooks.handlers.hubspot_handler import _handle_ticket_entered_novo
 
         _handle_ticket_entered_novo("T001", "1711900000000")
 
-        mock_delay.assert_called_once_with("T001", "1711900000000")
+        mock_delay.assert_called_once_with("T001", "1711900000000", "")
 
     @patch("apps.support.tasks.task_handle_ticket_closed.delay")
     def test_closed_handler_dispatches_task(self, mock_delay):
@@ -553,11 +584,3 @@ class TestWebhookHandlerAsync:
         _handle_ticket_owner_change("T001", "200", payload)
 
         mock_delay.assert_called_once_with("T001", "200", payload)
-
-    @patch("apps.support.tasks.task_handle_availability_change.delay")
-    def test_availability_handler_dispatches_task(self, mock_delay):
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
-
-        _handle_agent_availability_change("C001", "available", {"email": "test@test.com"})
-
-        mock_delay.assert_called_once_with("C001", "available", {"email": "test@test.com"})

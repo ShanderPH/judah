@@ -103,6 +103,7 @@ def test_queue_health_builds_diagnostics() -> None:
     with (
         patch("apps.support.queue_service.get_eligible_agents", return_value=[online]),
         patch("apps.support.queue_service.get_last_assigned_owner_id", return_value=10),
+        patch("apps.support.assignment_readiness.evaluate_assignment_readiness", return_value={}),
     ):
         result = api.get_queue_health(None)
 

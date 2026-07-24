@@ -1,4 +1,4 @@
-"""Tests for agent availability sync — SAT heartbeat and webhook handler."""
+"""Tests for SAT availability sync and ticket-triggered reconciliation."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from apps.support.models import Agent
-from apps.support.tasks import task_sat_heartbeat
+from apps.support.tasks import task_matchmaker_assign_single, task_sat_heartbeat
 
 
 def _make_agent(name: str, email: str, owner_id: int, status: str = "online") -> Agent:
@@ -93,41 +93,44 @@ class TestSATHeartbeatAgentStatus:
 
 
 @pytest.mark.django_db
-class TestHandleAgentAvailabilityChange:
-    """Tests for webhook-triggered availability changes (now async via Celery)."""
+class TestTicketWebhookAvailabilityReconciliation:
+    """A real ticket webhook must refresh Users API state before assignment."""
 
-    def test_dispatches_task_for_available(self) -> None:
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
+    @patch("apps.support.sat_service.sat_heartbeat")
+    @patch("apps.support.matchmaker_service.matchmaker_assign_next")
+    @patch("apps.support.matchmaker_service.enqueue_new_ticket")
+    def test_forces_uncached_users_read_before_assignment(
+        self,
+        mock_enqueue,
+        mock_assign,
+        mock_reconcile,
+    ) -> None:
+        mock_enqueue.return_value = object()
+        mock_reconcile.return_value = {
+            "agents_checked": 1,
+            "status_changes": 1,
+            "agents_came_online": 0,
+        }
+        mock_assign.return_value.value = "assigned"
 
-        with patch("apps.support.tasks.task_handle_availability_change.delay") as mock_delay:
-            _handle_agent_availability_change(
-                hubspot_contact_id="4",
-                availability_value="available",
-                payload={"email": "diego@test.com"},
-            )
+        assert task_matchmaker_assign_single("T001") is True
 
-        mock_delay.assert_called_once_with("4", "available", {"email": "diego@test.com"})
+        mock_reconcile.assert_called_once()
+        assert mock_reconcile.call_args.kwargs["force_refresh"] is True
+        mock_assign.assert_called_once_with("T001")
 
-    def test_dispatches_task_for_away(self) -> None:
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
+    @patch("apps.support.sat_service.sat_heartbeat")
+    @patch("apps.support.matchmaker_service.matchmaker_assign_next")
+    @patch("apps.support.matchmaker_service.enqueue_new_ticket")
+    def test_users_api_failure_keeps_ticket_queued(
+        self,
+        mock_enqueue,
+        mock_assign,
+        mock_reconcile,
+    ) -> None:
+        mock_enqueue.return_value = object()
+        mock_reconcile.return_value = {"error": "HubSpot unavailable"}
 
-        with patch("apps.support.tasks.task_handle_availability_change.delay") as mock_delay:
-            _handle_agent_availability_change(
-                hubspot_contact_id="5",
-                availability_value="away",
-                payload={"email": "ester@test.com"},
-            )
+        assert task_matchmaker_assign_single("T002") is False
 
-        mock_delay.assert_called_once_with("5", "away", {"email": "ester@test.com"})
-
-    def test_dispatches_even_without_email_in_payload(self) -> None:
-        from apps.webhooks.handlers.hubspot_handler import _handle_agent_availability_change
-
-        with patch("apps.support.tasks.task_handle_availability_change.delay") as mock_delay:
-            _handle_agent_availability_change(
-                hubspot_contact_id="6",
-                availability_value="away",
-                payload={},
-            )
-
-        mock_delay.assert_called_once_with("6", "away", {})
+        mock_assign.assert_not_called()

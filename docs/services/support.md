@@ -93,7 +93,7 @@ Configuração de horário comercial e exceções.
 | `task_matchmaker_assign_single` | On-demand | Atribui ticket específico |
 | `task_handle_ticket_closed` | On-demand | Processa fechamento |
 | `task_handle_owner_change` | On-demand | Processa reatribuição |
-| `task_handle_availability_change` | On-demand | Processa mudança de availability |
+| `task_matchmaker_assign_single` | Webhook de ticket NOVO | Enfileira, consulta Users API sem cache e só então tenta atribuir |
 | `task_sync_hubspot_team_members` | 06:00 | Sincroniza time N1 |
 | `task_sync_novo_stage_tickets` | 08:00 + startup | Sincroniza tickets NOVO |
 | `task_aggregate_queue_metrics` | 00:05 | Agrega métricas de fila |

@@ -15,6 +15,15 @@ CACHES = {
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
+# Tests opt into the legacy-compatible assignment lane explicitly. Individual
+# Gate B tests override these controls to prove fail-closed behavior.
+AUTO_ASSIGNMENT_ENABLED = True
+ABSENCE_SAFE_ELIGIBILITY_SHADOW = False
+
+if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+    DATABASES["default"].setdefault("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"]["application_name"] = "judah:local-test:pytest"  # type: ignore[index]
+
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]

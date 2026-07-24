@@ -156,7 +156,7 @@ class TestProcessWebhookEvent:
         assert event.retry_count == 3
         assert DeadLetterQueue.objects.filter(event=event).exists()
 
-    def test_lifecycle_error_blocks_conflicting_ticket_auto_assignment(self) -> None:
+    def test_lifecycle_error_does_not_block_ticket_auto_assignment(self) -> None:
         ConversationInstance.objects.create(
             idempotency_key="conversation:ticket:ticket-blocked",
             hubspot_ticket_id="ticket-blocked",
@@ -173,14 +173,19 @@ class TestProcessWebhookEvent:
             },
         )
 
-        with patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign:
+        with (
+            patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign,
+            patch(
+                "apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback()
+            ),
+        ):
             ok = process_webhook_event(event.pk)
 
-        assert ok is False
-        mock_assign.assert_not_called()
+        assert ok is True
+        mock_assign.assert_called_once_with("ticket-blocked", "1783022765000", str(event.pk))
         event.refresh_from_db()
-        assert event.processed is False
-        assert event.retry_count == 1
+        assert event.processed is True
+        assert event.retry_count == 0
 
     @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
     def test_lifecycle_ai_route_controls_dispatch(self, mock_pipeline) -> None:

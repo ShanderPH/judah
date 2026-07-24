@@ -155,23 +155,37 @@ def process_webhook_event(event_id) -> bool:
             from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
             if is_lifecycle_schema_ready():
-                lifecycle = record_lifecycle_for_webhook_event(event)
-                logger.info(
-                    "webhook_event_lifecycle_recorded",
-                    event_id=event.pk,
-                    conversation_instance_id=str(lifecycle.instance.pk),
-                    conversation_state=lifecycle.instance.state,
-                    route=lifecycle.decision.route,
-                    event_created=lifecycle.event_created,
-                )
-                if lifecycle.event_created:
-                    _dispatch_hubspot_lifecycle(event, lifecycle)
+                try:
+                    lifecycle = record_lifecycle_for_webhook_event(event)
+                except Exception as exc:
+                    lifecycle = None
+                    logger.warning(
+                        "webhook_event_lifecycle_record_failed",
+                        event_id=event.pk,
+                        event_type=event.event_type,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    # Lifecycle observability must never suppress the
+                    # deterministic support/AI webhook handler.
+                    handle_hubspot_event(event)
                 else:
                     logger.info(
-                        "webhook_event_duplicate_effects_skipped",
+                        "webhook_event_lifecycle_recorded",
                         event_id=event.pk,
-                        conversation_event_id=str(lifecycle.event.pk),
+                        conversation_instance_id=str(lifecycle.instance.pk),
+                        conversation_state=lifecycle.instance.state,
+                        route=lifecycle.decision.route,
+                        event_created=lifecycle.event_created,
                     )
+                    if lifecycle.event_created:
+                        _dispatch_hubspot_lifecycle(event, lifecycle)
+                    else:
+                        logger.info(
+                            "webhook_event_duplicate_effects_skipped",
+                            event_id=event.pk,
+                            conversation_event_id=str(lifecycle.event.pk),
+                        )
             else:
                 logger.info(
                     "webhook_event_lifecycle_schema_missing",

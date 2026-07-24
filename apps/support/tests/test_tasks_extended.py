@@ -6,13 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-from django.test import override_settings
 from django.utils import timezone
 
 from apps.support.models import (
     Agent,
-    AgentStatusHistory,
     AssignedConversation,
+    ClosedConversation,
     ConversationReassignment,
     NewConversation,
     QueuePerformanceMetrics,
@@ -20,7 +19,6 @@ from apps.support.models import (
 from apps.support.tasks import (
     _do_handle_owner_change,
     task_aggregate_queue_metrics,
-    task_handle_availability_change,
     task_handle_owner_change,
     task_handle_ticket_closed,
     task_matchmaker_assign_single,
@@ -41,21 +39,28 @@ def test_sat_task_wrappers() -> None:
 
 
 def test_matchmaker_assign_task_paths() -> None:
-    cache = Mock()
-    cache.add.return_value = False
-    with patch("django.core.cache.cache", cache):
+    lock = Mock()
+    lock.acquire.return_value = False
+    with (
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
+    ):
         assert task_matchmaker_assign_single.run("ticket-1") is False
 
-    cache.add.return_value = True
+    lock.acquire.return_value = True
     with (
-        patch("django.core.cache.cache", cache),
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.matchmaker_service.enqueue_new_ticket", return_value=None),
     ):
         assert task_matchmaker_assign_single.run("ticket-1") is False
 
     with (
-        patch("django.core.cache.cache", cache),
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.availability_runtime.may_assign", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.matchmaker_service.enqueue_new_ticket", return_value=SimpleNamespace()),
+        patch("apps.support.sat_service.sat_heartbeat", return_value={}),
         patch(
             "apps.support.matchmaker_service.matchmaker_assign_next",
             return_value=SimpleNamespace(value="assigned"),
@@ -64,7 +69,8 @@ def test_matchmaker_assign_task_paths() -> None:
         assert task_matchmaker_assign_single.run("ticket-1") is True
 
     with (
-        patch("django.core.cache.cache", cache),
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.matchmaker_service.enqueue_new_ticket", side_effect=RuntimeError("db")),
         patch.object(task_matchmaker_assign_single, "retry", side_effect=RuntimeError("retried")),
         pytest.raises(RuntimeError, match="retried"),
@@ -76,22 +82,11 @@ def test_matchmaker_drain_task_paths() -> None:
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=False):
         assert task_matchmaker_drain_queue.run() == {"skipped_off_hours": True}
 
-    cache = Mock()
-    cache.add.return_value = False
     with (
         patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
-        patch("django.core.cache.cache", cache),
-    ):
-        assert task_matchmaker_drain_queue.run() == {"skipped_locked": True}
-
-    cache.add.return_value = True
-    with (
-        patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
-        patch("django.core.cache.cache", cache),
         patch("apps.support.matchmaker_service.matchmaker_drain_queue", return_value={"assigned": 2}),
     ):
         assert task_matchmaker_drain_queue.run() == {"assigned": 2}
-    cache.delete.assert_called()
 
 
 def test_ticket_closed_and_owner_change_task_retries() -> None:
@@ -139,91 +134,26 @@ def test_owner_change_updates_assignment_and_audit() -> None:
 
 
 def test_owner_change_lock_and_retry_paths() -> None:
-    cache = Mock()
-    cache.add.return_value = False
+    lock = Mock()
+    lock.acquire.return_value = False
     with (
-        patch("django.core.cache.cache", cache),
+        patch("apps.support.availability_runtime.may_write_routing_state", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.auto_assign_service._safe_parse_owner_id", side_effect=[10, 11]),
         patch("apps.support.tasks._do_handle_owner_change") as process,
     ):
         task_handle_owner_change.run("ticket", "11", {"previousValue": "10"})
     process.assert_not_called()
 
-    cache.add.return_value = True
+    lock.acquire.return_value = True
     with (
-        patch("django.core.cache.cache", cache),
+        patch("apps.support.availability_runtime.may_write_routing_state", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.auto_assign_service._safe_parse_owner_id", side_effect=RuntimeError("bad")),
         patch.object(task_handle_owner_change, "retry", side_effect=RuntimeError("retried")),
         pytest.raises(RuntimeError, match="retried"),
     ):
         task_handle_owner_change.run("ticket", "11", {"previousValue": "10"})
-
-
-@pytest.mark.django_db
-def test_availability_change_updates_agent_and_dispatches() -> None:
-    agent = Agent.objects.create(
-        name="Ana",
-        agent_email="ana@example.com",
-        hubspot_owner_id=10,
-        status_enum=Agent.StatusEnum.AWAY,
-    )
-    with (
-        patch("apps.support.sat_service.sat_accumulate_time") as accumulate,
-        patch("apps.support.tasks.task_matchmaker_drain_queue.delay") as drain,
-    ):
-        task_handle_availability_change.run("contact", "available", {"email": "ANA@example.com"})
-
-    agent.refresh_from_db()
-    assert agent.status_enum == Agent.StatusEnum.ONLINE
-    accumulate.assert_called_once()
-    drain.assert_called_once()
-    assert AgentStatusHistory.objects.filter(agent=agent, new_status="online").exists()
-
-    assert (
-        task_handle_availability_change.run(
-            "contact",
-            "available",
-            {"email": "ana@example.com"},
-        )
-        is None
-    )
-
-
-@pytest.mark.django_db
-@override_settings(AGENT_STATUS_SYNC_ENABLED=False)
-def test_availability_change_does_not_update_status_when_sync_disabled() -> None:
-    agent = Agent.objects.create(
-        name="Ana",
-        agent_email="ana@example.com",
-        hubspot_owner_id=10,
-        status_enum=Agent.StatusEnum.AWAY,
-    )
-
-    with (
-        patch("apps.support.sat_service.sat_accumulate_time") as accumulate,
-        patch("apps.support.tasks.task_matchmaker_drain_queue.delay") as drain,
-    ):
-        task_handle_availability_change.run("contact", "available", {"email": "ana@example.com"})
-
-    agent.refresh_from_db()
-    assert agent.status_enum == Agent.StatusEnum.AWAY
-    assert not AgentStatusHistory.objects.filter(agent=agent).exists()
-    accumulate.assert_not_called()
-    drain.assert_not_called()
-
-
-def test_availability_change_fetches_contact_and_retries() -> None:
-    client = Mock()
-    client.get_contact_by_id.return_value = {"email": ""}
-    with patch("apps.integrations.hubspot.client.get_hubspot_client", return_value=client):
-        assert task_handle_availability_change.run("contact", "away", {}) is None
-
-    with (
-        patch("apps.integrations.hubspot.client.get_hubspot_client", side_effect=RuntimeError("offline")),
-        patch.object(task_handle_availability_change, "retry", side_effect=RuntimeError("retried")),
-        pytest.raises(RuntimeError, match="retried"),
-    ):
-        task_handle_availability_change.run("contact", "away", {})
 
 
 def test_team_and_novo_sync_tasks() -> None:
@@ -259,6 +189,17 @@ def test_queue_metrics_aggregation() -> None:
         assigned_at=entered_at,
         queue_wait_seconds=Decimal("10"),
         closed_at=entered_at,
+        total_handle_time_minutes=Decimal("5"),
+    )
+    ClosedConversation.objects.create(
+        hubspot_ticket_id="assigned",
+        agent=agent,
+        hubspot_owner_id=10,
+        agent_name="Ana",
+        entered_queue_at=entered_at,
+        assigned_at=entered_at,
+        closed_at=entered_at,
+        queue_wait_seconds=Decimal("10"),
         total_handle_time_minutes=Decimal("5"),
     )
 

@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
-from django.test import override_settings
 from django.utils import timezone
 
 from apps.support.agent_sync_service import (
@@ -71,6 +70,21 @@ class TestBusinessHoursLogic:
         # Sunday: 8-12
         assert _DEFAULT_BUSINESS_HOURS[6] == (8, 12)
 
+    @pytest.mark.parametrize(
+        "hour,expected",
+        [
+            (7, False),
+            (8, True),
+            (11, True),
+            (12, False),
+        ],
+    )
+    def test_holiday_uses_sunday_hours(self, hour: int, expected: bool) -> None:
+        holiday = datetime(2026, 4, 21, hour, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch.object(timezone, "localtime", return_value=holiday):
+            assert is_business_hours() is expected
+
     def test_get_poll_interval_seconds_business_hours(self) -> None:
         """Test that interval is 30s during business hours."""
         with patch("apps.support.agent_sync_service.is_business_hours", return_value=True):
@@ -105,33 +119,8 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             is_active=True,
         )
 
-    @override_settings(AGENT_STATUS_SYNC_ENABLED=False)
-    def test_disabled_status_sync_preserves_status_and_reconciles_count(self) -> None:
-        agent = self._make_agent(
-            "Test Agent",
-            "test@example.com",
-            123,
-            status="away",
-            current_chats=0,
-        )
-
-        with patch("apps.integrations.hubspot.client.get_hubspot_client") as mock_client_fn:
-            mock_client = MagicMock()
-            mock_client.count_active_tickets_by_owner.return_value = 3
-            mock_client_fn.return_value = mock_client
-
-            result = sync_all_agents_status_and_counts_optimized()
-
-        agent.refresh_from_db()
-        assert agent.status_enum == "away"
-        assert agent.current_simultaneous_chats == 3
-        assert result["status_changes"] == 0
-        assert result["count_corrections"] == 1
-        assert result["api_calls_made"] == 1
-        mock_client.get_all_owners_availability.assert_not_called()
-
-    def test_sync_updates_status_when_changed(self) -> None:
-        """Test that agent status is updated when it changes."""
+    def test_sync_does_not_mutate_authoritative_status(self) -> None:
+        """Load reconciliation cannot become a second availability writer."""
         agent = self._make_agent("Test Agent", "test@example.com", 123, status="away")
 
         mock_users = [
@@ -152,9 +141,10 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             result = sync_all_agents_status_and_counts_optimized()
 
         agent.refresh_from_db()
-        assert agent.status_enum == "online"
-        assert result["status_changes"] == 1
+        assert agent.status_enum == "away"
+        assert result["status_changes"] == 0
         assert result["agents_synced"] == 1
+        mock_client.get_all_owners_availability.assert_not_called()
 
     def test_sync_skips_status_when_unchanged(self) -> None:
         """Test that sync is skipped when status hasn't changed."""
@@ -283,16 +273,16 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
         agent1.refresh_from_db()
         agent2.refresh_from_db()
 
-        assert agent1.status_enum == "online"  # Changed
+        assert agent1.status_enum == "away"  # Availability belongs to SAT reconciliation
         assert agent2.status_enum == "online"  # Unchanged
         assert agent1.current_simultaneous_chats == 2  # Corrected
         assert agent2.current_simultaneous_chats == 2  # Unchanged
         assert result["agents_synced"] == 2
-        assert result["status_changes"] == 1
+        assert result["status_changes"] == 0
         assert result["count_corrections"] == 1
 
-    def test_sync_creates_status_history(self) -> None:
-        """Test that status changes are logged in AgentStatusHistory."""
+    def test_sync_does_not_create_status_history(self) -> None:
+        """Only the authoritative SAT reconciliation writes status history."""
         agent = self._make_agent("Test Agent", "test@example.com", 123, status="away")
 
         mock_users = [
@@ -313,10 +303,8 @@ class TestSyncAllAgentsStatusAndCountsOptimized:
             sync_all_agents_status_and_counts_optimized()
 
         history = AgentStatusHistory.objects.filter(agent=agent).first()
-        assert history is not None
-        assert history.old_status == "away"
-        assert history.new_status == "online"
-        assert history.sync_source == "hubspot_poll_optimized"
+        assert history is None
+        mock_client.get_all_owners_availability.assert_not_called()
 
     def test_sync_handles_email_not_in_availability_map(self) -> None:
         """Test that agents with email not in HubSpot availability map are still synced for counts."""

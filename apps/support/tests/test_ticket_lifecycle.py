@@ -3,7 +3,7 @@
 Covers the critical path for current_simultaneous_chats accuracy:
   - handle_ticket_closed: atomic decrement, correct target, idempotency
   - task_handle_owner_change: idempotency guard on retries
-  - matchmaker _do_assign: retry-agent reconciliation
+  - durable Matchmaker: ordered candidate fallback
 """
 
 from __future__ import annotations
@@ -247,6 +247,51 @@ class TestHandleOwnerChange:
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 0
 
+    def test_initial_manual_owner_consumes_queued_projection_idempotently(self):
+        agent = _make_agent("ManualAgent", owner_id=201, chats=0)
+        queue_row = NewConversation.objects.create(
+            hubspot_ticket_id="T013-QUEUED",
+            entered_queue_at=timezone.now() - timedelta(minutes=3),
+        )
+        queue_row_id = queue_row.pk
+
+        from apps.support.tasks import _do_handle_owner_change
+
+        _do_handle_owner_change("T013-QUEUED", None, 201)
+        _do_handle_owner_change("T013-QUEUED", None, 201)
+
+        assert not NewConversation.objects.filter(pk=queue_row_id).exists()
+        assert AssignedConversation.objects.filter(hubspot_ticket_id="T013-QUEUED").count() == 1
+        agent.refresh_from_db()
+        assert agent.current_simultaneous_chats == 1
+
+    def test_manual_owner_compensates_live_reservation_without_capacity_duplication(self):
+        agent = _make_agent("ReservedAgent", owner_id=202, chats=0)
+        NewConversation.objects.create(
+            hubspot_ticket_id="T013-RACE",
+            entered_queue_at=timezone.now() - timedelta(minutes=2),
+            automatic_assignment_eligible=True,
+        )
+        from apps.support.durable_assignment_service import reserve_next_assignment
+        from apps.support.models import AssignmentAttempt
+        from apps.support.tasks import _do_handle_owner_change
+
+        with patch(
+            "apps.support.durable_assignment_service._verify_candidates",
+            return_value=[(agent, "eligible")],
+        ):
+            reservation = reserve_next_assignment("T013-RACE")
+        assert reservation.attempt is not None
+
+        _do_handle_owner_change("T013-RACE", None, 202)
+
+        reservation.attempt.refresh_from_db()
+        agent.refresh_from_db()
+        assert reservation.attempt.state == AssignmentAttempt.State.COMPENSATED
+        assert agent.current_simultaneous_chats == 1
+        assert AssignedConversation.objects.filter(hubspot_ticket_id="T013-RACE").count() == 1
+        assert not NewConversation.objects.filter(hubspot_ticket_id="T013-RACE").exists()
+
     def test_skips_when_owner_unchanged(self):
         """Same previous and new owner — no-op."""
         agent = _make_agent("Agent", owner_id=100, chats=1)
@@ -282,8 +327,8 @@ class TestHandleOwnerChange:
 
 @pytest.mark.django_db
 class TestMatchmakerRetryReconciliation:
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.durable_assignment_service._verify_candidates")
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_retry_agent_reconciled_when_first_at_capacity(self, mock_client_fn, mock_reconcile):
         """When the first-selected agent is at capacity after reconcile, the retry
         agent must ALSO be reconciled before assignment.
@@ -301,10 +346,11 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T020",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # FirstAgent is actually at capacity per HubSpot (5); SecondAgent is not (1).
-        mock_reconcile.side_effect = lambda agent: 5 if agent.hubspot_owner_id == 100 else 1
+        mock_reconcile.return_value = [(second_agent, "eligible")]
         mock_client = MagicMock()
         mock_client_fn.return_value = mock_client
 
@@ -316,13 +362,13 @@ class TestMatchmakerRetryReconciliation:
 
         # sat_reconcile_agent_load must have been called at least twice —
         # once for first_agent (rejected) and once for second_agent (accepted).
-        assert mock_reconcile.call_count >= 2
+        mock_reconcile.assert_called_once_with()
 
         assigned = AssignedConversation.objects.get(hubspot_ticket_id="T020")
         assert assigned.agent == second_agent
 
-    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load")
-    @patch("apps.support.matchmaker_service.get_hubspot_client")
+    @patch("apps.support.durable_assignment_service._verify_candidates")
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
     def test_queued_when_retry_agent_also_at_capacity(self, mock_client_fn, mock_reconcile):
         """If both the first and retry agents are at capacity after reconcile,
         the ticket should stay queued rather than being over-assigned."""
@@ -333,10 +379,11 @@ class TestMatchmakerRetryReconciliation:
             hubspot_ticket_id="T021",
             pipeline_id="636459134",
             entered_queue_at=timezone.now() - timedelta(minutes=5),
+            automatic_assignment_eligible=True,
         )
 
         # Both agents at or above capacity after reconciliation
-        mock_reconcile.return_value = 5
+        mock_reconcile.return_value = []
         mock_client = MagicMock()
         mock_client_fn.return_value = mock_client
 
@@ -366,13 +413,21 @@ class TestPipelineStageChangeNoDuplicateClosure:
 
         mock_delay.assert_not_called()
 
+    @patch("apps.support.availability_runtime.may_ingest_queue", return_value=True)
+    @patch("apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback())
     @patch("apps.support.tasks.task_matchmaker_assign_single.delay")
     @patch("apps.support.tasks.task_handle_ticket_closed.delay")
-    def test_novo_stage_change_dispatches_assignment_not_closure(self, mock_closed, mock_assign):
+    def test_novo_stage_change_dispatches_assignment_not_closure(
+        self,
+        mock_closed,
+        mock_assign,
+        _mock_on_commit,
+        _mock_ingest,
+    ):
         """NOVO stage transitions dispatch assignment, never closure."""
         from apps.webhooks.handlers.hubspot_handler import _handle_pipeline_stage_change
 
         _handle_pipeline_stage_change("T_STAGE2", "939275049")  # NOVO stage
 
         mock_closed.assert_not_called()
-        mock_assign.assert_called_once_with("T_STAGE2", None)
+        mock_assign.assert_called_once_with("T_STAGE2", None, "")

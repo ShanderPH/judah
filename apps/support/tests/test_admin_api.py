@@ -23,7 +23,7 @@ from apps.support.schemas import (
     ManualAssignRequest,
     UpdateAgentRequest,
 )
-from common.exceptions import ConflictError, NotFoundError, ValidationError
+from common.exceptions import ConflictError, NotFoundError
 
 
 def _request():
@@ -103,20 +103,12 @@ def test_agent_update_inactivate_reactivate_and_validation() -> None:
     )
     assert updated.name == "Ana Atualizada"
     assert updated.max_simultaneous_chats == 8
-    assert updated.status_enum == "away"
-
-    with pytest.raises(ValidationError):
-        _call(
-            admin_api.update_agent,
-            request,
-            str(agent.pk),
-            UpdateAgentRequest(status_enum="invalid"),
-        )
+    assert updated.status_enum == Agent.StatusEnum.ONLINE
 
     inactive = _call(admin_api.inactivate_agent, request, str(agent.pk))
     assert inactive.is_active is False
     assert inactive.auto_assign_enabled is False
-    assert inactive.status_enum == Agent.StatusEnum.OFFLINE
+    assert inactive.status_enum == Agent.StatusEnum.ONLINE
     active = _call(admin_api.reactivate_agent, request, str(agent.pk))
     assert active.is_active is True
 
@@ -200,9 +192,17 @@ def test_manual_assignment_and_force_reassignment() -> None:
         subject="Assunto",
     )
 
+    reservation = SimpleNamespace(attempt=SimpleNamespace(pk="attempt-1", cycle_id=None))
     with (
-        patch("apps.support.admin_api._hubspot_assign") as hubspot,
-        patch("apps.support.admin_api.increment_agent_chat_count") as increment,
+        patch("apps.support.admin_api._ensure_agent_is_currently_eligible"),
+        patch(
+            "apps.support.durable_assignment_service.reserve_manual_assignment",
+            return_value=reservation,
+        ) as reserve,
+        patch(
+            "apps.support.durable_assignment_service.execute_assignment_attempt",
+            return_value="assigned",
+        ) as execute,
     ):
         result = _call(
             admin_api.manual_assign,
@@ -210,11 +210,19 @@ def test_manual_assignment_and_force_reassignment() -> None:
             ManualAssignRequest(hubspot_ticket_id="ticket-1", agent_id=first.pk),
         )
     assert result["success"] is True
-    assert AssignedConversation.objects.filter(hubspot_ticket_id="ticket-1").exists()
-    hubspot.assert_called_once_with("ticket-1", first.hubspot_owner_id)
-    increment.assert_called_once_with(first)
+    reserve.assert_called_once()
+    execute.assert_called_once_with("attempt-1")
+
+    AssignedConversation.objects.create(
+        hubspot_ticket_id="ticket-1",
+        agent=first,
+        hubspot_owner_id=first.hubspot_owner_id,
+        agent_name=first.name,
+        assigned_at=timezone.now(),
+    )
 
     with (
+        patch("apps.support.admin_api._ensure_agent_is_currently_eligible"),
         patch("apps.support.admin_api._hubspot_assign"),
         patch("apps.support.admin_api.decrement_agent_chat_count") as decrement,
         patch("apps.support.admin_api.increment_agent_chat_count") as increment,
@@ -229,11 +237,8 @@ def test_manual_assignment_and_force_reassignment() -> None:
     increment.assert_called_once_with(second)
     assert ConversationReassignment.objects.filter(hubspot_ticket_id="ticket-1").exists()
 
-    no_op = _call(
-        admin_api._force_reassign_internal,
-        "ticket-1",
-        second,
-    )
+    with patch("apps.support.admin_api._ensure_agent_is_currently_eligible"):
+        no_op = _call(admin_api._force_reassign_internal, "ticket-1", second)
     assert "no-op" in no_op["detail"]
 
 
@@ -256,8 +261,12 @@ def test_assignment_errors_and_hubspot_best_effort() -> None:
             ForceReassignRequest(
                 hubspot_ticket_id="missing",
                 target_agent_id="00000000-0000-0000-0000-000000000000",
+                reason="capacity",
             ),
         )
 
-    with patch("apps.integrations.hubspot.client.get_hubspot_client", side_effect=RuntimeError("offline")):
+    with (
+        patch("apps.integrations.hubspot.client.get_hubspot_client", side_effect=RuntimeError("offline")),
+        pytest.raises(RuntimeError, match="offline"),
+    ):
         admin_api._hubspot_assign("ticket", 10)

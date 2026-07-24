@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import UTC
 
 import structlog
+from django.conf import settings
 from django.utils import timezone
 
 from apps.support.models import Agent
@@ -41,12 +42,27 @@ def get_eligible_agents() -> list[Agent]:
     from django.db.models import F
     from django.db.models.functions import Coalesce
 
-    eligible = list(
-        Agent.objects.filter(
-            status_enum=Agent.StatusEnum.ONLINE,
-            auto_assign_enabled=True,
-            current_simultaneous_chats__lt=Coalesce(F("max_simultaneous_chats"), 5),
+    filters = {
+        "status_enum": Agent.StatusEnum.ONLINE,
+        "auto_assign_enabled": True,
+        "current_simultaneous_chats__lt": Coalesce(F("max_simultaneous_chats"), 5),
+    }
+    if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        filters["eligibility_state"] = Agent.EligibilityState.ELIGIBLE
+        filters["availability_observed_at__gte"] = timezone.now() - timezone.timedelta(
+            seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS)
         )
+    from apps.support.availability_runtime import (
+        automatic_assignment_canary_agent_ids,
+        is_automatic_assignment_canary_configured,
+    )
+
+    canary_agent_ids = automatic_assignment_canary_agent_ids()
+    if is_automatic_assignment_canary_configured():
+        filters["id__in"] = canary_agent_ids
+
+    eligible = list(
+        Agent.objects.filter(**filters)
         .exclude(is_active=False)
         .only(
             "id",
@@ -58,11 +74,42 @@ def get_eligible_agents() -> list[Agent]:
             "last_assignment_at",
             "auto_assign_enabled",
             "is_active",
+            "hubspot_user_id",
+            "availability_observed_at",
+            "eligibility_state",
+            "eligibility_reason",
+            "availability_revision",
         )
     )
 
     logger.debug("queue_eligible_agents", count=len(eligible))
     return eligible
+
+
+def get_ranked_eligible_agents(
+    last_assigned_hubspot_owner_id: int | None = None,
+) -> list[Agent]:
+    """Return all eligible agents in deterministic assignment order."""
+    eligible = get_eligible_agents()
+    if not eligible:
+        return []
+
+    candidates = eligible
+    if last_assigned_hubspot_owner_id is not None and len(eligible) > 1:
+        candidates = [agent for agent in eligible if agent.hubspot_owner_id != last_assigned_hubspot_owner_id]
+        if not candidates:
+            candidates = eligible
+
+    epoch = timezone.datetime(2000, 1, 1, tzinfo=UTC)
+
+    def sort_key(agent: Agent) -> tuple:
+        last = agent.last_assignment_at or epoch
+        if timezone.is_naive(last):
+            last = timezone.make_aware(last, UTC)
+        return (last, agent.current_simultaneous_chats, str(agent.pk))
+
+    candidates.sort(key=sort_key)
+    return candidates
 
 
 def select_next_agent(last_assigned_hubspot_owner_id: int | None = None) -> Agent | None:
@@ -130,6 +177,10 @@ def increment_agent_chat_count(agent: Agent) -> None:
     """
     from django.db.models import F
 
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("increment_agent_chat_count")
+
     now = timezone.now()
     Agent.objects.filter(pk=agent.pk).update(
         current_simultaneous_chats=F("current_simultaneous_chats") + 1,
@@ -153,6 +204,9 @@ def decrement_agent_chat_count(agent: Agent) -> None:
     from django.db.models import F, Value
     from django.db.models.functions import Greatest
 
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("decrement_agent_chat_count")
     Agent.objects.filter(pk=agent.pk).update(
         current_simultaneous_chats=Greatest(F("current_simultaneous_chats") - 1, Value(0)),
         updated_at=timezone.now(),

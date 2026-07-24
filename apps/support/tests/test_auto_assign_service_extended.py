@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import override_settings
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID
 from apps.support import auto_assign_service
-from apps.support.models import Agent, AssignedConversation, AssignmentLog, NewConversation
+from apps.support.models import Agent, AssignedConversation, NewConversation
 from common.exceptions import ExternalServiceError
 
 
@@ -31,18 +29,6 @@ def _agent(
         max_simultaneous_chats=5,
         auto_assign_enabled=True,
         is_active=True,
-    )
-
-
-def _pending(ticket_id: str = "ticket-1") -> NewConversation:
-    return NewConversation.objects.create(
-        hubspot_ticket_id=ticket_id,
-        pipeline_id=SUPPORT_PIPELINE_ID,
-        entered_queue_at=timezone.now() - timedelta(minutes=2),
-        contact_name="Maria",
-        contact_email="maria@test.local",
-        priority="HIGH",
-        subject="Ajuda",
     )
 
 
@@ -84,97 +70,6 @@ def test_process_new_ticket_event_fetch_failure_and_ineligible() -> None:
     assert NewConversation.objects.count() == 0
 
 
-@pytest.mark.django_db
-def test_process_new_ticket_event_enqueues_idempotently() -> None:
-    ticket = {
-        "id": "ticket-1",
-        "pipeline": SUPPORT_PIPELINE_ID,
-        "owner_id": "",
-        "contact_name": "Maria",
-        "subject": "Ajuda",
-    }
-    client = MagicMock()
-    client.get_ticket_details.return_value = ticket
-    with (
-        patch.object(auto_assign_service, "get_hubspot_client", return_value=client),
-        patch.object(auto_assign_service, "attempt_auto_assign", return_value=True) as assign,
-        patch.object(auto_assign_service, "_transition_lifecycle_best_effort") as transition,
-    ):
-        assert auto_assign_service.process_new_ticket_event("ticket-1", "1711900000000") is True
-        assert auto_assign_service.process_new_ticket_event("ticket-1", "1711900000000") is True
-
-    assert NewConversation.objects.count() == 1
-    assert assign.call_count == 2
-    assert transition.call_count == 2
-
-
-@pytest.mark.django_db
-def test_attempt_auto_assign_marks_queued_when_no_agent() -> None:
-    pending = _pending()
-    with (
-        patch.object(auto_assign_service, "get_last_assigned_owner_id", return_value=None),
-        patch.object(auto_assign_service, "select_next_agent", return_value=None),
-    ):
-        assert auto_assign_service.attempt_auto_assign(pending) is False
-
-    pending.refresh_from_db()
-    assert pending.queue_status == NewConversation.QueueStatus.QUEUED
-    assert pending.assignment_attempts == 1
-    assert pending.last_assignment_attempt_at is not None
-
-
-@pytest.mark.django_db
-def test_attempt_auto_assign_reselects_after_agent_goes_offline() -> None:
-    pending = _pending()
-    first = _agent(1, name="First", status=Agent.StatusEnum.OFFLINE)
-    second = _agent(2, name="Second")
-    client = MagicMock()
-    with (
-        patch.object(auto_assign_service, "get_last_assigned_owner_id", return_value=1),
-        patch.object(auto_assign_service, "select_next_agent", side_effect=[first, second]),
-        patch.object(auto_assign_service, "get_hubspot_client", return_value=client),
-        patch.object(auto_assign_service, "_transition_lifecycle_best_effort"),
-    ):
-        assert auto_assign_service.attempt_auto_assign(pending) is True
-
-    client.assign_ticket_owner.assert_called_once_with("ticket-1", 2)
-    assigned = AssignedConversation.objects.get(hubspot_ticket_id="ticket-1")
-    assert assigned.agent == second
-    assert AssignmentLog.objects.filter(ticket_id="ticket-1", agent=second).exists()
-    second.refresh_from_db()
-    assert second.current_simultaneous_chats == 1
-
-
-@pytest.mark.django_db
-def test_attempt_auto_assign_queues_when_reselection_fails() -> None:
-    pending = _pending()
-    first = _agent(1, status=Agent.StatusEnum.OFFLINE)
-    with (
-        patch.object(auto_assign_service, "get_last_assigned_owner_id", return_value=None),
-        patch.object(auto_assign_service, "select_next_agent", side_effect=[first, None]),
-    ):
-        assert auto_assign_service.attempt_auto_assign(pending) is False
-    pending.refresh_from_db()
-    assert pending.queue_status == NewConversation.QueueStatus.QUEUED
-    assert pending.assignment_attempts == 1
-
-
-@pytest.mark.django_db
-def test_attempt_auto_assign_preserves_queue_on_hubspot_failure() -> None:
-    pending = _pending()
-    agent = _agent(1)
-    client = MagicMock()
-    client.assign_ticket_owner.side_effect = ExternalServiceError("offline")
-    with (
-        patch.object(auto_assign_service, "get_last_assigned_owner_id", return_value=None),
-        patch.object(auto_assign_service, "select_next_agent", return_value=agent),
-        patch.object(auto_assign_service, "get_hubspot_client", return_value=client),
-    ):
-        assert auto_assign_service.attempt_auto_assign(pending) is False
-    assert NewConversation.objects.filter(pk=pending.pk).exists()
-    assert not AssignedConversation.objects.exists()
-
-
 def test_transition_lifecycle_is_best_effort() -> None:
     engine = MagicMock()
     engine.transition_by_ticket.side_effect = [True, False]
@@ -207,21 +102,6 @@ def test_sync_novo_stage_handles_external_failure() -> None:
     assert result["created"] == 0
     assert result["total_from_hubspot"] == 0
     assert "error" in result
-
-
-@override_settings(NOVO_STAGE_SYNC_ENABLED=False)
-def test_sync_novo_stage_stops_before_external_or_database_access() -> None:
-    with patch.object(auto_assign_service, "get_hubspot_client") as get_client:
-        result = auto_assign_service.sync_novo_stage_tickets()
-
-    assert result == {
-        "created": 0,
-        "skipped": 0,
-        "already_assigned": 0,
-        "total_from_hubspot": 0,
-        "disabled": True,
-    }
-    get_client.assert_not_called()
 
 
 @pytest.mark.django_db

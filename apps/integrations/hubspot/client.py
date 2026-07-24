@@ -11,7 +11,11 @@ from hubspot.crm.tickets import SimplePublicObjectInput as TicketUpdateInput
 from hubspot.crm.tickets import SimplePublicObjectInputForCreate as TicketInput
 from hubspot.crm.tickets.exceptions import ApiException, NotFoundException
 
-from apps.integrations.hubspot.exceptions import HubSpotAPIError, HubSpotResourceNotFoundError
+from apps.integrations.hubspot.exceptions import (
+    HubSpotAPIError,
+    HubSpotFailureKind,
+    HubSpotResourceNotFoundError,
+)
 from common.circuit_breaker import CircuitBreaker
 from common.exceptions import ExternalServiceError
 
@@ -206,6 +210,8 @@ class HubSpotClient:
                 "pipeline": props.get("hs_pipeline", ""),
                 "stage": props.get("hs_pipeline_stage", ""),
                 "owner_id": props.get("hubspot_owner_id") or "",
+                "entered_novo_at": props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}"),
+                "entered_closed_at": props.get(f"hs_v2_date_entered_{STAGE_CLOSED_ID}"),
                 "contact_name": props.get("firstname", ""),
                 "contact_email": props.get("email", ""),
             }
@@ -264,6 +270,17 @@ class HubSpotClient:
                 "HubSpot rejected the ticket owner update.",
                 external_status=external_status,
                 retryable=retryable,
+                error_code=(
+                    HubSpotFailureKind.RATE_LIMITED
+                    if external_status == 429
+                    else HubSpotFailureKind.SERVER_ERROR
+                    if external_status is not None and external_status >= 500
+                    else HubSpotFailureKind.UNAUTHORIZED
+                    if external_status == 401
+                    else HubSpotFailureKind.FORBIDDEN
+                    if external_status == 403
+                    else HubSpotFailureKind.UNKNOWN
+                ),
             ) from exc
         except Exception as exc:
             logger.error(
@@ -273,7 +290,11 @@ class HubSpotClient:
                 error_type=type(exc).__name__,
                 retryable=True,
             )
-            raise HubSpotAPIError("HubSpot ticket owner update failed.", retryable=True) from exc
+            raise HubSpotAPIError(
+                "HubSpot ticket owner update failed.",
+                retryable=True,
+                error_code=HubSpotFailureKind.UNKNOWN,
+            ) from exc
 
     def get_owner_details(self, owner_id: int) -> dict[str, Any]:
         """Fetch owner details by owner ID.
@@ -439,30 +460,104 @@ class HubSpotClient:
             Dict with ``id``, ``email``, ``hs_availability_status`` keys,
             or an empty dict if the user is not found.
         """
+        import random
+        import time
+
         import requests
 
-        try:
-            headers = {"Authorization": f"Bearer {self._access_token}"}
-            response = _circuit_breaker.call(
-                requests.get,
-                f"https://api.hubapi.com/crm/v3/objects/users/{user_id}",
-                headers=headers,
-                params={"properties": "hs_email,hs_availability_status"},
-                timeout=10,
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        properties = ",".join(
+            (
+                "hs_email",
+                "hs_availability_status",
+                "hs_out_of_office_hours",
+                "hs_working_hours",
+                "hs_standard_time_zone",
             )
-            response.raise_for_status()
-            data = response.json()
-            props = data.get("properties") or {}
+        )
+        for attempt in range(3):
+            try:
+                response = _circuit_breaker.call(
+                    requests.get,
+                    f"https://api.hubapi.com/crm/objects/2026-03/users/{user_id}",
+                    headers=headers,
+                    params={"properties": properties},
+                    timeout=10,
+                )
+            except requests.Timeout as exc:
+                if attempt < 2:
+                    time.sleep((0.1 * (2**attempt)) + random.uniform(0, 0.1))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot user lookup timed out.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.TIMEOUT,
+                ) from exc
+            except requests.RequestException as exc:
+                raise HubSpotAPIError(
+                    "HubSpot user lookup failed.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.UNKNOWN,
+                ) from exc
+
+            status = response.status_code
+            retry_after_raw = response.headers.get("Retry-After")
+            retry_after = (
+                float(retry_after_raw) if retry_after_raw and retry_after_raw.replace(".", "", 1).isdigit() else None
+            )
+            if status == 404:
+                raise HubSpotResourceNotFoundError("user", user_id)
+            if status in (401, 403):
+                kind = HubSpotFailureKind.UNAUTHORIZED if status == 401 else HubSpotFailureKind.FORBIDDEN
+                raise HubSpotAPIError(
+                    "HubSpot rejected the user lookup.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=kind,
+                )
+            if status == 429 or status >= 500:
+                kind = HubSpotFailureKind.RATE_LIMITED if status == 429 else HubSpotFailureKind.SERVER_ERROR
+                if attempt < 2:
+                    delay = retry_after if retry_after is not None else 0.1 * (2**attempt)
+                    time.sleep(min(delay, 2.0) + random.uniform(0, 0.1))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot user lookup is temporarily unavailable.",
+                    external_status=status,
+                    retryable=True,
+                    error_code=kind,
+                    retry_after_seconds=retry_after,
+                )
+            if not 200 <= status < 300:
+                raise HubSpotAPIError(
+                    "HubSpot rejected the user lookup.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=HubSpotFailureKind.UNKNOWN,
+                )
+            try:
+                data = response.json()
+                props = data["properties"]
+                if not isinstance(props, dict) or not data.get("id"):
+                    raise ValueError("missing user properties")
+            except (TypeError, ValueError, KeyError) as exc:
+                raise HubSpotAPIError(
+                    "HubSpot returned a malformed user response.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=HubSpotFailureKind.MALFORMED_RESPONSE,
+                ) from exc
             return {
                 "id": data.get("id"),
                 "email": props.get("hs_email", ""),
                 "hs_availability_status": props.get("hs_availability_status", ""),
+                "hs_out_of_office_hours": props.get("hs_out_of_office_hours"),
+                "hs_working_hours": props.get("hs_working_hours"),
+                "hs_standard_time_zone": props.get("hs_standard_time_zone", ""),
             }
-        except Exception as exc:
-            logger.warning("hubspot_get_user_by_id_failed", user_id=user_id, error=str(exc))
-            return {}
+        raise AssertionError("bounded HubSpot retry loop exhausted unexpectedly")
 
-    def get_all_owners_availability(self) -> list[dict[str, Any]]:
+    def get_all_owners_availability(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all HubSpot users with their current availability status.
 
         Uses the HubSpot CRM Users API (``GET /crm/v3/objects/users``) which
@@ -475,7 +570,11 @@ class HubSpotClient:
         agents on page 2+ without pagination.
 
         Results are cached in Redis for 15 seconds to avoid redundant API calls
-        when the SAT heartbeat and Matchmaker drain overlap.
+        when periodic SAT heartbeats overlap. Assignment-critical reconciliation
+        bypasses that cache so a ticket webhook never trusts an older snapshot.
+
+        Args:
+            force_refresh: Bypass the short-lived cache and read HubSpot now.
 
         Returns:
             List of dicts with ``user_id``, ``email``, ``availability_status``,
@@ -489,11 +588,12 @@ class HubSpotClient:
 
         # Check cache first — avoids redundant API calls within the same
         # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
-        cache_key = "hubspot_owners_availability"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
-            return cached
+        cache_key = "hubspot_users_availability_2026_03"
+        if not force_refresh:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
+                return cached
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -501,17 +601,27 @@ class HubSpotClient:
             after: str | None = None
             page = 0
 
+            properties = ",".join(
+                (
+                    "hs_email",
+                    "hs_availability_status",
+                    "hs_out_of_office_hours",
+                    "hs_working_hours",
+                    "hs_standard_time_zone",
+                )
+            )
+
             while True:
                 params: dict = {
                     "limit": 100,
-                    "properties": "hs_email,hs_availability_status",
+                    "properties": properties,
                 }
                 if after:
                     params["after"] = after
 
                 response = _circuit_breaker.call(
                     requests.get,
-                    "https://api.hubapi.com/crm/v3/objects/users",
+                    "https://api.hubapi.com/crm/objects/2026-03/users",
                     headers=headers,
                     params=params,
                     timeout=10,
@@ -522,12 +632,15 @@ class HubSpotClient:
 
                 for user in data.get("results", []):
                     props = user.get("properties") or {}
-                    availability = props.get("hs_availability_status") or "available"
+                    availability = str(props.get("hs_availability_status") or "").strip().lower()
                     result.append(
                         {
                             "user_id": user.get("id"),
                             "email": props.get("hs_email", ""),
                             "availability_status": availability,
+                            "out_of_office_hours": props.get("hs_out_of_office_hours"),
+                            "working_hours": props.get("hs_working_hours"),
+                            "timezone": props.get("hs_standard_time_zone", ""),
                             "status_enum": "online" if availability == "available" else "away",
                         }
                     )

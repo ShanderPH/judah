@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 from django.test import override_settings
 
 from apps.integrations.hubspot import client as hubspot_module
@@ -215,16 +216,23 @@ def test_search_novo_stage_wraps_errors() -> None:
 
 def test_user_lookup_success_and_failure() -> None:
     response = Mock()
+    response.status_code = 200
+    response.headers = {}
     response.json.return_value = {
         "id": "u1",
         "properties": {"hs_email": "ana@example.com", "hs_availability_status": "available"},
     }
     with patch("apps.integrations.hubspot.client._circuit_breaker.call", return_value=response):
         assert _client().get_user_by_id("u1")["hs_availability_status"] == "available"
-    response.raise_for_status.assert_called_once()
 
-    with patch("apps.integrations.hubspot.client._circuit_breaker.call", side_effect=RuntimeError("offline")):
-        assert _client().get_user_by_id("u1") == {}
+    with (
+        patch(
+            "apps.integrations.hubspot.client._circuit_breaker.call",
+            side_effect=requests.ConnectionError("offline"),
+        ),
+        pytest.raises(HubSpotAPIError),
+    ):
+        _client().get_user_by_id("u1")
 
 
 def test_owner_availability_cache_and_pagination() -> None:
@@ -251,7 +259,7 @@ def test_owner_availability_cache_and_pagination() -> None:
         result = _client().get_all_owners_availability()
 
     assert [item["status_enum"] for item in result] == ["online", "away"]
-    cache.set.assert_called_once_with("hubspot_owners_availability", result, timeout=15)
+    cache.set.assert_called_once_with("hubspot_users_availability_2026_03", result, timeout=15)
 
 
 def test_owner_availability_wraps_errors() -> None:

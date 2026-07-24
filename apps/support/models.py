@@ -40,6 +40,11 @@ class Agent(models.Model):
         OFFLINE = "offline", "Offline"
         BUSY = "busy", "Busy"
 
+    class EligibilityState(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        INELIGIBLE = "ineligible", "Ineligible"
+        ELIGIBLE = "eligible", "Eligible"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.TextField()
     agent_email = models.TextField(unique=True)
@@ -66,15 +71,43 @@ class Agent(models.Model):
     last_status_change_at = models.DateTimeField(null=True, blank=True)
     sat_last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     sat_last_count_sync_at = models.DateTimeField(null=True, blank=True)
+    hubspot_user_id = models.CharField(max_length=64, null=True, blank=True, unique=True)
+    remote_availability_status = models.CharField(max_length=32, blank=True, default="")
+    remote_out_of_office_hours = models.JSONField(null=True, blank=True)
+    remote_working_hours = models.JSONField(null=True, blank=True)
+    remote_timezone = models.TextField(blank=True, default="")
+    availability_observed_at = models.DateTimeField(null=True, blank=True)
+    availability_online_since = models.DateTimeField(null=True, blank=True)
+    availability_sample_count = models.PositiveIntegerField(default=0)
+    eligibility_state = models.CharField(
+        max_length=16,
+        choices=EligibilityState.choices,
+        default=EligibilityState.UNKNOWN,
+    )
+    eligibility_reason = models.CharField(max_length=64, default="never_observed")
+    eligibility_evaluated_at = models.DateTimeField(null=True, blank=True)
+    availability_writer_id = models.CharField(max_length=255, blank=True, default="")
+    availability_revision = models.PositiveBigIntegerField(default=0)
+    availability_fencing_token = models.PositiveBigIntegerField(default=0)
     updated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True)
 
     class Meta:
         db_table = "agents"
         ordering = ["name"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(current_simultaneous_chats__gte=0),
+                name="agent_current_chats_nonnegative",
+            ),
+        ]
         indexes = [  # noqa: RUF012
             models.Index(fields=["status_enum", "auto_assign_enabled"], name="idx_agent_eligible"),
             models.Index(fields=["hubspot_owner_id"], name="idx_agent_hubspot_owner"),
+            models.Index(
+                fields=["eligibility_state", "availability_observed_at"],
+                name="idx_agent_safe_eligibility",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -132,6 +165,61 @@ class AgentStatusHistory(models.Model):
         return f"{self.agent.name}: {self.old_status} → {self.new_status}"
 
 
+class AgentAvailabilityDecision(models.Model):
+    """Append-only evidence for an authoritative availability decision."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.CASCADE,
+        related_name="availability_decisions",
+        db_column="agent_id",
+    )
+    revision = models.PositiveBigIntegerField()
+    old_status = models.CharField(max_length=20, blank=True, default="")
+    new_status = models.CharField(max_length=20)
+    remote_status = models.CharField(max_length=32, blank=True, default="")
+    raw_state_hash = models.CharField(max_length=64)
+    observed_at = models.DateTimeField()
+    eligibility_state = models.CharField(max_length=16)
+    eligibility_reason = models.CharField(max_length=64)
+    task_id = models.CharField(max_length=255, blank=True, default="")
+    writer_id = models.CharField(max_length=255)
+    runtime_environment = models.CharField(max_length=64)
+    fencing_token = models.PositiveBigIntegerField()
+    metadata_schema_version = models.PositiveSmallIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agent_availability_decisions"
+        ordering = ["-created_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["agent", "revision"],
+                name="uniq_agent_availability_revision",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["agent", "-created_at"], name="idx_avail_decision_agent"),
+            models.Index(fields=["writer_id", "-created_at"], name="idx_avail_decision_writer"),
+        ]
+
+
+class AvailabilityReconciliationLease(models.Model):
+    """Database-backed singleton lease with owner-safe release and fencing."""
+
+    key = models.CharField(max_length=64, primary_key=True)
+    owner_token = models.CharField(max_length=64, blank=True, default="")
+    writer_id = models.CharField(max_length=255, blank=True, default="")
+    runtime_environment = models.CharField(max_length=64, blank=True, default="")
+    expires_at = models.DateTimeField(null=True, blank=True)
+    generation = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "availability_reconciliation_leases"
+
+
 class AgentMetrics(models.Model):
     """Per-agent aggregated metrics."""
 
@@ -185,6 +273,75 @@ class TicketJiraAssociation(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class SupportConversationCycle(models.Model):
+    """One independent attendance of a HubSpot ticket (conversation cycle).
+
+    Gate B (DB-02) of the reopened-conversation hotfix. A proven entry into
+    the configured NOVO stage opens a cycle; a terminal closure ends it. A
+    ticket may accumulate many sequential cycles, but at most one cycle is
+    active (``queued``/``assigned``/``repair_required``) per account + ticket.
+
+    Identity rules (natural key, cycle_key derivation, admission
+    classification and state transitions) live exclusively in
+    ``apps.support.conversation_cycle_service`` — this model only persists
+    the contract. ``source_event_id`` is audit metadata and never
+    participates in cycle identity.
+    """
+
+    class State(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        ASSIGNED = "assigned", "Assigned"
+        REPAIR_REQUIRED = "repair_required", "Repair Required"
+        CLOSED = "closed", "Closed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle_key = models.TextField(unique=True)
+    source_system = models.TextField(default="hubspot")
+    source_account_id = models.TextField()
+    hubspot_ticket_id = models.TextField(db_index=True)
+    entered_stage_at = models.DateTimeField(null=True, blank=True)
+    identity_source = models.CharField(max_length=32, default="hubspot_stage_entry")
+    identity_evidence_key = models.TextField(blank=True, default="")
+    source_event_id = models.TextField(blank=True, default="")
+    state = models.CharField(max_length=20, choices=State.choices, default=State.QUEUED)
+    opened_at = models.DateTimeField()
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "support_conversation_cycles"
+        ordering = ["-entered_stage_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            # Natural key of one proven stage-entry occurrence.
+            models.UniqueConstraint(
+                fields=["source_system", "source_account_id", "hubspot_ticket_id", "entered_stage_at"],
+                condition=models.Q(entered_stage_at__isnull=False),
+                name="uniq_conv_cycle_natural_key",
+            ),
+            # At most one active cycle per account + ticket. Values mirror
+            # conversation_cycle_service.ACTIVE_CYCLE_STATES.
+            models.UniqueConstraint(
+                fields=["source_account_id", "hubspot_ticket_id"],
+                condition=models.Q(state__in=["queued", "assigned", "repair_required"]),
+                name="uniq_active_conv_cycle_ticket",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            # Admission decisions load every cycle of a ticket in occurrence
+            # order (duplicate/stale detection).
+            models.Index(fields=["hubspot_ticket_id", "entered_stage_at"], name="idx_cycle_ticket_opened"),
+            # Readiness/repair scan active or broken cycles by age.
+            models.Index(fields=["state", "entered_stage_at"], name="idx_cycle_state_opened"),
+            # Natural-key lookup is served by the backing index of
+            # uniq_conv_cycle_natural_key (leftmost columns); no extra index.
+        ]
+
+    def __str__(self) -> str:
+        return f"Cycle {self.hubspot_ticket_id} entered={self.entered_stage_at} state={self.state}"
+
+
 class NewConversation(models.Model):
     """Ticket that entered the NOVO stage and is awaiting automatic assignment.
 
@@ -202,7 +359,14 @@ class NewConversation(models.Model):
         FAILED = "failed", "Quarantined After Permanent Failure"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="new_conversations",
+    )
     pipeline_id = models.TextField(default=default_support_pipeline_id)
     contact_name = models.TextField(blank=True, null=True)
     contact_email = models.TextField(blank=True, null=True)
@@ -219,12 +383,27 @@ class NewConversation(models.Model):
     next_assignment_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
     failure_code = models.CharField(max_length=50, blank=True, default="")
     failure_message = models.TextField(blank=True, default="")
+    automatic_assignment_eligible = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True only for tickets ingested by the live webhook path after the rollout gate.",
+    )
+    claim_owner_token = models.CharField(max_length=64, blank=True, default="")
+    claim_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "new_conversations"
         ordering = ["entered_queue_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_new_conversation_cycle",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"NewConversation {self.hubspot_ticket_id}"
@@ -255,7 +434,14 @@ class AssignedConversation(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assigned_conversations",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -289,9 +475,114 @@ class AssignedConversation(models.Model):
             models.Index(fields=["hubspot_owner_id", "assigned_at"]),
             models.Index(fields=["assigned_at"]),
         ]
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_assigned_conversation_cycle",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"AssignedConversation {self.hubspot_ticket_id} → {self.agent_name}"
+
+
+class AssignmentAttempt(models.Model):
+    """Durable protocol record for one HubSpot owner assignment."""
+
+    class State(models.TextChoices):
+        RESERVED = "reserved", "Reserved"
+        EXTERNAL_APPLIED = "external_applied", "External Applied"
+        COMPLETED = "completed", "Completed"
+        COMPENSATING = "compensating", "Compensating"
+        COMPENSATED = "compensated", "Compensated"
+        RETRYABLE = "retryable", "Retryable"
+        REPAIR_REQUIRED = "repair_required", "Repair Required"
+
+    class AssignmentType(models.TextChoices):
+        AUTOMATIC = "automatic", "Automatic"
+        MANUAL = "manual", "Manual"
+        FORCED = "forced", "Forced"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.UUIDField(unique=True, editable=False)
+    ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assignment_attempts",
+    )
+    queue_row = models.ForeignKey(
+        NewConversation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="durable_attempts",
+    )
+    selected_agent = models.ForeignKey(
+        Agent,
+        on_delete=models.PROTECT,
+        related_name="assignment_attempts",
+    )
+    eligibility_revision = models.PositiveBigIntegerField()
+    desired_hubspot_owner_id = models.BigIntegerField()
+    prior_observed_owner_id = models.BigIntegerField(null=True, blank=True)
+    decision_snapshot = models.JSONField(default=dict)
+    decision_reason = models.CharField(max_length=64)
+    state = models.CharField(max_length=24, choices=State.choices, default=State.RESERVED)
+    assignment_type = models.CharField(
+        max_length=16,
+        choices=AssignmentType.choices,
+        default=AssignmentType.AUTOMATIC,
+    )
+    requested_by = models.CharField(max_length=255, blank=True, default="")
+    override_reason = models.CharField(max_length=255, blank=True, default="")
+    provider_request_classification = models.CharField(max_length=64, blank=True, default="")
+    provider_result_classification = models.CharField(max_length=64, blank=True, default="")
+    reserved_at = models.DateTimeField()
+    external_applied_at = models.DateTimeField(null=True, blank=True)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+    compensation_started_at = models.DateTimeField(null=True, blank=True)
+    compensated_at = models.DateTimeField(null=True, blank=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "assignment_attempts"
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(
+                    cycle__isnull=False,
+                    state__in=[
+                        "reserved",
+                        "external_applied",
+                        "compensating",
+                        "retryable",
+                        "repair_required",
+                    ],
+                ),
+                name="uniq_live_assignment_cycle",
+            ),
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False, state="completed"),
+                name="uniq_completed_assignment_cycle",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["state", "next_retry_at"], name="idx_attempt_retry_scan"),
+            models.Index(fields=["ticket_id", "state"], name="idx_attempt_ticket_state"),
+            models.Index(fields=["reserved_at"], name="idx_attempt_stuck_scan"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AssignmentAttempt ticket={self.ticket_id} state={self.state}"
 
 
 class ClosedConversation(models.Model):
@@ -305,7 +596,14 @@ class ClosedConversation(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    hubspot_ticket_id = models.TextField(unique=True, db_index=True)
+    hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="closed_conversations",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -338,6 +636,13 @@ class ClosedConversation(models.Model):
         indexes = [  # noqa: RUF012
             models.Index(fields=["closed_at"]),
             models.Index(fields=["hubspot_owner_id", "closed_at"]),
+        ]
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(cycle__isnull=False),
+                name="uniq_closed_conversation_cycle",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -381,7 +686,21 @@ class AssignmentLog(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    assignment_attempt = models.OneToOneField(
+        AssignmentAttempt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assignment_log",
+    )
     ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assignment_logs",
+    )
     agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,
@@ -424,6 +743,13 @@ class ConversationReassignment(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     hubspot_ticket_id = models.TextField(db_index=True)
+    cycle = models.ForeignKey(
+        SupportConversationCycle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reassignments",
+    )
     from_agent = models.ForeignKey(
         Agent,
         on_delete=models.SET_NULL,

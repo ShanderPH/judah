@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import structlog
 from django.conf import settings
+from django.db import transaction
 
 logger = structlog.get_logger(__name__)
 
@@ -20,7 +21,6 @@ _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
 _PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
-_PROP_AVAILABILITY = "hs_availability_status"  # User/owner availability
 
 
 def handle_hubspot_event(event) -> None:
@@ -36,7 +36,8 @@ def handle_hubspot_event(event) -> None:
     logger.info("hubspot_event_received", event_type=event_type, event_id=event.pk)
 
     if et_lower.startswith("ticket."):
-        _handle_ticket_event(event_type, payload)
+        provider_event_id = getattr(event, "event_id", "")
+        _handle_ticket_event(event_type, payload, source_event_id=str(provider_event_id or event.pk))
     elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
     elif et_lower.startswith("conversation."):
@@ -47,7 +48,7 @@ def handle_hubspot_event(event) -> None:
         logger.debug("hubspot_event_unhandled", event_type=event_type)
 
 
-def _handle_ticket_event(event_type: str, payload: dict) -> None:
+def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str = "") -> None:
     """Process ticket-related HubSpot events."""
     object_id = str(payload.get("objectId", ""))
     if not object_id:
@@ -64,7 +65,7 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
         )
 
         if property_name == _PROP_STAGE_NOVO:
-            _handle_ticket_entered_novo(object_id, property_value)
+            _handle_ticket_entered_novo(object_id, property_value, source_event_id=source_event_id)
 
         elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_N1_NEW_STAGE_ID', '')}":
             _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage_entered")
@@ -103,16 +104,29 @@ def _handle_ticket_event(event_type: str, payload: dict) -> None:
         logger.debug("hubspot_ticket_event_unhandled", event_type=event_type, ticket_id=object_id)
 
 
-def _handle_ticket_entered_novo(hubspot_ticket_id: str, entered_at_ms: str | None) -> None:
+def _handle_ticket_entered_novo(
+    hubspot_ticket_id: str,
+    entered_at_ms: str | None,
+    *,
+    source_event_id: str = "",
+) -> None:
     """Dispatch auto-assignment via Matchmaker when a ticket enters NOVO stage.
 
     Non-blocking — dispatches a Celery task and returns immediately.
     """
+    from apps.support.availability_runtime import log_runtime_rejection, may_ingest_queue
+
+    if not may_ingest_queue():
+        log_runtime_rejection("hubspot_ticket_entered_novo")
+        return
+
     logger.info("hubspot_ticket_entered_novo", ticket_id=hubspot_ticket_id, entered_at_ms=entered_at_ms)
 
     from apps.support.tasks import task_matchmaker_assign_single
 
-    task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms)
+    transaction.on_commit(
+        lambda: task_matchmaker_assign_single.delay(hubspot_ticket_id, entered_at_ms, source_event_id)
+    )
 
 
 def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:
@@ -317,38 +331,6 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:
-    """Process contact-related HubSpot events.
-
-    Handles ``hs_availability_status`` property changes as a fast-path
-    for agent availability detection. The primary sync mechanism is the
-    SAT heartbeat (20-second polling).
-    """
+    """Log contact events; they cannot represent HubSpot user availability."""
     object_id = str(payload.get("objectId", ""))
-    property_name = payload.get("propertyName", "")
-    property_value = payload.get("propertyValue", "")
-
-    if event_type == "contact.propertyChange" and property_name == _PROP_AVAILABILITY:
-        _handle_agent_availability_change(object_id, property_value, payload)
-    else:
-        logger.debug("hubspot_contact_event", event_type=event_type, object_id=object_id)
-
-
-def _handle_agent_availability_change(
-    hubspot_contact_id: str,
-    availability_value: str,
-    payload: dict,
-) -> None:
-    """Dispatch agent availability change via Celery.
-
-    Non-blocking — dispatches a Celery task and returns immediately.
-    Acts as a fast-path complement to the SAT 20-second heartbeat.
-    """
-    logger.info(
-        "hubspot_agent_availability_change",
-        contact_id=hubspot_contact_id,
-        availability=availability_value,
-    )
-
-    from apps.support.tasks import task_handle_availability_change
-
-    task_handle_availability_change.delay(hubspot_contact_id, availability_value, payload)
+    logger.debug("hubspot_contact_event", event_type=event_type, object_id=object_id)
