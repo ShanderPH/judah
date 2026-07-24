@@ -16,14 +16,26 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `DATABASE_URL` | `core/settings/base.py` | URL de conexão com PostgreSQL. |
 | `REDIS_URL` | `core/settings/base.py` | URL do Redis (cache, broker Celery, session store). |
 
+### Limites de conexão Redis
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `REDIS_CACHE_MAX_CONNECTIONS` | `4` | Máximo de conexões do pool compartilhado do cache Django por processo. |
+| `REDIS_AGENT_MAX_CONNECTIONS` | `4` | Máximo de conexões do pool compartilhado pelas sessões Agno por processo. |
+| `REDIS_LOCK_MAX_CONNECTIONS` | `2` | Máximo de conexões do pool de locks do Supervisor por processo Celery. |
+| `CELERY_BROKER_POOL_LIMIT` | `2` | Máximo de conexões persistentes do Celery com o broker por processo. |
+| `CELERY_REDIS_MAX_CONNECTIONS` | `4` | Limite defensivo do transporte Redis do Celery. |
+
+O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult`; isso evita um segundo pool Redis sem utilidade.
+
 ## Variáveis de IA
 
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
-| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI para GPT-4o / GPT-4o-mini. |
+| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI para GPT-5.5. |
 | `ANTHROPIC_API_KEY` | `apps/ai_agents/agents/base.py` | Fallback opcional para modelos Anthropic. |
-| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-4o`). |
-| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo compacto (padrão: `gpt-4o-mini`). |
+| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-5.5`). |
+| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo de triagem/fallback (padrão: `gpt-5.5`). |
 | `PINECONE_API_KEY` | `apps/integrations/pinecone_client/client.py` | Chave da API Pinecone. |
 | `PINECONE_INDEX_NAME` | `apps/integrations/pinecone_client/client.py` | Nome do índice Pinecone (padrão: `inchurch-knowledge`). |
 | `PINECONE_HOST` | `apps/ai_agents/agents/rag.py` | URL do data-plane do Pinecone (evita adivinhar cloud/region). |
@@ -33,9 +45,12 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 | `EMBEDDING_MODEL` | `apps/ai_agents/agents/rag.py` | Modelo de embedding lido pelo agente RAG (padrão: `text-embedding-ada-002`). **Nota:** o cliente Pinecone em `apps/integrations/pinecone_client/client.py` hard-codes `text-embedding-3-small`; `EMBEDDING_MODEL` não é usado por ele. |
 | `AGNO_TELEMETRY` | Ambiente | Desabilita telemetria do Agno. |
 | `SALOMAO_V1_BASE_URL` | `apps/integrations/salomao_v1/client.py`, `apps/ai_agents/agents/salomao_chat.py` | URL base do servico standalone Salomao v1. Quando preenchida, o Supervisor pode expor o Salomao v1 como membro interno `SalomaoChat`. |
-| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (padrao: `45`). |
+| `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (mínimo: `120`). |
 | `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
+| `SALOMAO_V1_MAX_ATTEMPTS` | `apps/integrations/salomao_v1/client.py` | Tentativas para timeout, HTTP 429 e HTTP 5xx (padrão: `3`). |
+| `SALOMAO_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima do draft do Salomão antes de transbordar para humano (padrão: `0.65`). |
+| `HEIMDALL_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima da triagem Heimdall antes de transbordar para humano (padrão: `0.65`). |
 
 ## Variáveis de HubSpot
 
@@ -43,10 +58,11 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 |----------|--------------|-----------|
 | `HUBSPOT_ACCESS_TOKEN` | `apps/integrations/hubspot/client.py` | Token OAuth de private app. |
 | `HUBSPOT_APP_SECRET` | `apps/webhooks/api.py`, `apps/ai_agents/api/webhooks.py` | Secret para validar assinatura HMAC v1/v3 dos webhooks. |
+| `HUBSPOT_SANDBOX_APP_SECRET` | `apps/webhooks/api.py` | Secret isolado do app `inchurch-sandbox-App` para validar `/api/v1/webhooks/hubspot/sandbox/`. |
 | `HUBSPOT_PORTAL_ID` | `apps/ai_agents/mcp_servers/hubspot_server.py` | Portal ID para construir URLs de ticket. |
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |
 | `USE_MOCK_HUBSPOT` | `apps/ai_agents/services/hubspot.py` | Modo mock para simulador local (dev only). |
-| `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID usado para postar respostas do Salomao v1 em threads do HubSpot. |
+| `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | `apps/ai_agents/services/hubspot.py` | Actor ID preferencial para postar respostas nas threads. Opcional: quando vazio, Judah usa o ator destinatário da mensagem recebida. |
 | `HUBSPOT_AI_TRIAGE_PIPELINE_ID` | `apps/ai_agents/services/lifecycle.py` | Pipeline dedicada à Triagem IA. |
 | `HUBSPOT_N1_NEW_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Novo Atendimento da Triagem IA. |
 | `HUBSPOT_AI_TRIAGE_STAGE_ID` | `apps/ai_agents/services/lifecycle.py` | Estágio Exibindo Menu/Em atendimento da Triagem IA. |
@@ -83,13 +99,16 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
-| `DJANGO_ENV` | `core/settings/base.py`, `core/settings/production.py` | Ambiente: `development`, `staging`, `production`, `test`. |
+| `DJANGO_ENV` | `core/settings/__init__.py` | Ambiente: `development`, `staging`, `production`, `test`. Valores desconhecidos interrompem o boot para evitar fallback inseguro. |
 | `DJANGO_DEBUG` | `core/settings/base.py` | Ativa modo debug (padrão: `False`). |
 | `DJANGO_ALLOWED_HOSTS` | `core/settings/base.py` | Hosts permitidos (separados por vírgula). |
 | `CORS_ALLOWED_ORIGINS` | `core/settings/base.py` | Origens permitidas para CORS. |
 | `JWT_ACCESS_TOKEN_LIFETIME_MINUTES` | `core/settings/base.py` | TTL do access token JWT (padrão: `60`). |
 | `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | `core/settings/base.py` | TTL do refresh token JWT (padrão: `7`). |
-| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` define `true` por conveniência de dev, mas o fallback do código é `False`. |
+| `AI_ROUTING_ENABLED` | `core/settings/base.py`, `core/urls.py` | Habilita router de IA (padrão: `false`). `.env.example` e o fallback do código permanecem desabilitados por segurança. |
+| `AI_ROUTING_ROLLOUT_PERCENTAGE` | `apps/ai_agents/services/rollout.py` | Percentual determinístico de tickets habilitados para IA, de `0` a `100` (padrão: `100`). |
+| `AGENT_STATUS_SYNC_ENABLED` | `core/settings/base.py` | Permite que SAT, reconciliação e webhooks alterem automaticamente o status dos agentes (padrão: `true`). O perfil `staging` força `false`, independentemente do valor no ambiente. |
+| `NOVO_STAGE_SYNC_ENABLED` | `core/settings/base.py` | Habilita o backfill automático de tickets do estágio Novo para a fila interna (padrão: `true`). O perfil `staging` força `false`, pois sua conexão de banco não é autorizada a alterar o estado de roteamento. |
 
 ## Variáveis de observabilidade
 
@@ -106,7 +125,19 @@ As configurações são carregadas via `python-decouple` nos arquivos de setting
 |----------|--------------|-----------|
 | `INRADAR_AUTH_TOKEN` | `apps/ai_agents/tools/inchurch_tools.py` | Token para API interna InRadar (diagnóstico de eventos). |
 | `REDIS_PRIVATE_URL` | `core/settings/base.py` | Fallback para `REDIS_URL` (usado pelo Railway). |
-| `RAILWAY_PUBLIC_DOMAIN` | `core/settings/production.py` | Injetado pelo Railway em `ALLOWED_HOSTS`. |
+| `RAILWAY_PUBLIC_DOMAIN` | `core/settings/production.py` | Injetado pelo Railway em `ALLOWED_HOSTS`; também é usado por `staging`, que herda a configuração segura de produção. |
+
+### Configuração de staging
+
+No ambiente de staging da Railway, use `DJANGO_ENV=staging`. Esse perfil mantém
+`DEBUG=False`, cookies seguros, tratamento correto do proxy TLS, logs JSON e as
+demais proteções de produção, mas conserva logs de aplicação mais detalhados
+para diagnóstico.
+
+`DJANGO_ENV` escolhe apenas o perfil do Django. A separação real de dados e
+integrações depende de configurar no ambiente de staging seus próprios valores
+para `DATABASE_URL`, `REDIS_URL`, HubSpot, Pinecone, Salomão-V1, OpenAI e Sentry.
+Não reutilize credenciais ou bancos de produção no serviço de staging.
 
 ## Exemplo de `.env` para desenvolvimento
 
@@ -121,18 +152,27 @@ SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_KEY=your-service-key
 
 REDIS_URL=redis://localhost:6379/0
+REDIS_CACHE_MAX_CONNECTIONS=4
+REDIS_AGENT_MAX_CONNECTIONS=4
+REDIS_LOCK_MAX_CONNECTIONS=2
+CELERY_BROKER_POOL_LIMIT=2
+CELERY_REDIS_MAX_CONNECTIONS=4
 
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 PINECONE_API_KEY=your-pinecone-key
 PINECONE_INDEX_NAME=inchurch-knowledge
 SALOMAO_V1_BASE_URL=http://localhost:8001
-SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_TIMEOUT_SECONDS=120
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS=180
 SALOMAO_V1_AS_TEAM_AGENT=true
+SALOMAO_V1_MAX_ATTEMPTS=3
+SALOMAO_MIN_CONFIDENCE=0.65
+HEIMDALL_MIN_CONFIDENCE=0.65
 
 HUBSPOT_ACCESS_TOKEN=your-hubspot-token
 HUBSPOT_APP_SECRET=your-app-secret
+HUBSPOT_SANDBOX_APP_SECRET=your-sandbox-app-secret
 HUBSPOT_PORTAL_ID=your-portal-id
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=A-123456
 HUBSPOT_AI_TRIAGE_PIPELINE_ID=636594474
@@ -173,6 +213,8 @@ JWT_ACCESS_TOKEN_LIFETIME_MINUTES=60
 JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
 
 AI_ROUTING_ENABLED=false
+AI_ROUTING_ROLLOUT_PERCENTAGE=100
+AGENT_STATUS_SYNC_ENABLED=true
 ```
 
 ## Arquivos relacionados
@@ -185,6 +227,7 @@ AI_ROUTING_ENABLED=false
 - `HUBSPOT_APP_SECRET` deve estar preenchido em produção; em `DEBUG` vazio, a assinatura é bypassada.
 - `DJANGO_SECRET_KEY` é usada tanto pelo Django quanto pelo JWT; rotação invalida todas as sessões.
 - `AI_ROUTING_ENABLED=false` desmonta o router `/api/v1/ai/` por completo. O código usa `False` como padrão; `.env.example` foi ajustado para refletir isso.
+- Em `staging`, `AGENT_STATUS_SYNC_ENABLED` é sempre `false`: heartbeat, reconciliação e webhook não podem alterar `status_enum`. Alterações administrativas manuais continuam disponíveis.
 - `.env.example` foi atualizado com as variáveis documentadas acima. Verifique se o template local possui `HUBSPOT_N1_TEAM_ID`, `HUBSPOT_PORTAL_ID`, `JIRA_WEBHOOK_SECRET`, `PINECONE_HOST`, `PINECONE_CLOUD`, `PINECONE_REGION`, `PINECONE_DIMENSION`, `EMBEDDING_MODEL`, `DEFAULT_MODEL`, `DEFAULT_MINI_MODEL`, `USE_MOCK_HUBSPOT`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILES_SAMPLE_RATE` e `GIT_SHA`.
 
 ## Recomendações

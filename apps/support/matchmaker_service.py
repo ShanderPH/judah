@@ -12,7 +12,7 @@ from django.conf import settings
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.support.conversation_cycle_service import CycleClassification, open_or_get_cycle
-from apps.support.models import NewConversation
+from apps.support.models import Agent, NewConversation
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +33,45 @@ class AssignmentOutcome(StrEnum):
     STALE_TICKET = "stale_ticket"
     RETRYABLE_EXTERNAL_ERROR = "retryable_external_error"
     NON_RETRYABLE_EXTERNAL_ERROR = "non_retryable_external_error"
+
+
+def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None:
+    """Advance every queued AI conversation after human assignment."""
+    try:
+        from apps.ai_agents.models import ConversationInstance
+        from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+
+        engine = LifecycleEngine()
+        instances = list(
+            ConversationInstance.objects.filter(
+                hubspot_ticket_id=str(hubspot_ticket_id),
+                state=ConversationInstance.State.QUEUE_PENDING,
+            )
+        )
+        for instance in instances:
+            instance.assigned_agent_id = str(agent.hubspot_owner_id)
+            instance.save(update_fields=["assigned_agent_id", "updated_at"])
+            try:
+                engine.transition(
+                    instance,
+                    ConversationInstance.State.HUMAN_ASSIGNED,
+                    reason="Matchmaker assigned the conversation to a human agent.",
+                    actor_type="matchmaker",
+                    actor_id=str(agent.hubspot_owner_id),
+                )
+            except InvalidStateTransitionError as exc:
+                logger.info(
+                    "matchmaker_lifecycle_transition_skipped",
+                    ticket_id=hubspot_ticket_id,
+                    conversation_instance_id=str(instance.pk),
+                    error=str(exc),
+                )
+    except Exception as exc:
+        logger.warning(
+            "matchmaker_lifecycle_transition_failed",
+            ticket_id=hubspot_ticket_id,
+            error=str(exc),
+        )
 
 
 class QueueItemOutcome(StrEnum):
@@ -106,6 +145,11 @@ def process_queue_item(
         return QueueItemResult(QueueItemOutcome.CONVERGED_COMPLETED, row_id, cycle_id, True)
     effect_pending = reservation.attempt.state == "reserved"
     outcome = execute_assignment_attempt(reservation.attempt.pk)
+    if outcome == "assigned":
+        _transition_assigned_lifecycle(
+            reservation.attempt.ticket_id,
+            reservation.attempt.selected_agent,
+        )
     mapping = {
         "assigned": QueueItemOutcome.ASSIGNED_NEW_EFFECT,
         "stale_ticket": QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,

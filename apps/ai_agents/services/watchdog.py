@@ -64,26 +64,17 @@ def run_lifecycle_watchdog(*, limit: int = 100, max_failures: int = 3) -> Watchd
         instance.next_retry_at = timezone.now() + timedelta(minutes=5)
         instance.save(update_fields=["failure_count", "current_error", "next_retry_at", "updated_at"])
 
-        if instance.failure_count >= max_failures:
-            if instance.state != ConversationInstance.State.FAILED_RETRYABLE:
-                engine.transition(
-                    instance,
-                    ConversationInstance.State.FAILED_RETRYABLE,
-                    reason="Lifecycle watchdog prepared terminal failure.",
-                )
-            engine.transition(
-                instance,
-                ConversationInstance.State.FAILED_TERMINAL,
-                reason="Lifecycle watchdog marked terminal failure.",
-            )
-            marked_terminal += 1
-        else:
+        if instance.state != ConversationInstance.State.FAILED_RETRYABLE:
             engine.transition(
                 instance,
                 ConversationInstance.State.FAILED_RETRYABLE,
-                reason="Lifecycle watchdog marked retryable failure.",
+                reason=(
+                    "Lifecycle watchdog exhausted retries and scheduled safe handoff."
+                    if instance.failure_count >= max_failures
+                    else "Lifecycle watchdog marked retryable failure."
+                ),
             )
-            marked_retryable += 1
+        marked_retryable += 1
 
     return WatchdogResult(
         scanned=scanned,

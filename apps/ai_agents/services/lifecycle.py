@@ -19,6 +19,8 @@ from apps.ai_agents.models import (
     ToolCallAuditLog,
 )
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
+from apps.ai_agents.services.instance_identity import find_conversation_instance, ticket_scope_instances
+from common.idempotency import canonical_event_key
 
 logger = structlog.get_logger(__name__)
 
@@ -131,6 +133,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     ConversationInstance.State.CONTEXT_HYDRATING: {
         ConversationInstance.State.CONTEXT_READY,
         ConversationInstance.State.CONTACT_REQUIRED,
+        ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
@@ -164,6 +167,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.TRIAGE_RUNNING: {
         ConversationInstance.State.AI_SERVICE_PENDING,
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.QUEUE_PENDING,
         ConversationInstance.State.FAILED_RETRYABLE,
@@ -174,9 +178,17 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.AI_SERVICE_RUNNING: {
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.FAILED_RETRYABLE,
+    },
+    ConversationInstance.State.WAITING_FOR_CUSTOMER: {
+        ConversationInstance.State.CONTEXT_HYDRATING,
+        ConversationInstance.State.RESOLVED_BY_AI,
+        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.FAILED_RETRYABLE,
+        ConversationInstance.State.CLOSED,
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         ConversationInstance.State.QUEUE_PENDING,
@@ -246,9 +258,10 @@ def _idempotency_key(
     occurred_at: str,
     source_event_id: str,
     message_id: str,
+    payload: dict[str, Any],
 ) -> str:
-    natural_id = source_event_id or f"{object_id}:{occurred_at}:{message_id}"
-    return f"{source}:{event_type}:{natural_id}"
+    del object_id, occurred_at, source_event_id, message_id
+    return canonical_event_key(source=source, event_type=event_type, payload=payload)
 
 
 class EventNormalizer:
@@ -260,7 +273,7 @@ class EventNormalizer:
         object_id = _as_text(payload.get("objectId") or payload.get("object_id") or getattr(event, "object_id", ""))
         property_name = _as_text(payload.get("propertyName") or payload.get("property_name"))
         property_value = _as_text(payload.get("propertyValue") or payload.get("property_value"))
-        source_event_id = _event_id_from_payload(payload) or _as_text(getattr(event, "id", ""))
+        source_event_id = _event_id_from_payload(payload)
         message_id = _message_id_from_payload(payload)
         occurred_at_raw = _as_text(payload.get("occurredAt") or payload.get("occurred_at"))
         occurred_at = _parse_hubspot_timestamp(occurred_at_raw)
@@ -309,6 +322,7 @@ class EventNormalizer:
             occurred_at=occurred_at_raw,
             source_event_id=source_event_id,
             message_id=message_id,
+            payload=payload,
         )
 
         return NormalizedEvent(
@@ -426,7 +440,7 @@ class LifecycleEngine:
     ) -> LifecycleRecordResult:
         decision = decision or RoutingPolicyEngine().route(event)
         with transaction.atomic():
-            instance, _instance_created = self._get_or_create_instance(event)
+            instance, instance_created = self._get_or_create_instance(event)
             self._refresh_instance_snapshot(instance, event)
             lifecycle_event, event_created = self._append_event(instance, event)
             if event_created:
@@ -437,17 +451,42 @@ class LifecycleEngine:
                         reason="External event normalized.",
                         source_event_id=event.source_event_id,
                     )
-                self.transition(
-                    instance,
-                    decision.target_state,
-                    reason=decision.reason,
-                    source_event_id=event.source_event_id,
-                    allow_terminal_reopen=event.event_type == "ticket_entered_n1",
-                )
-            else:
-                lifecycle_event.processing_status = ConversationEvent.ProcessingStatus.DUPLICATE
-                lifecycle_event.save(update_fields=["processing_status"])
-
+                # Ignored events remain visible in the ledger, but must not
+                # terminalize an existing active conversation. HubSpot emits an
+                # OUTGOING webhook for replies that Judah itself just sent.
+                if (
+                    decision.route == "IGNORE"
+                    and not instance_created
+                    and instance.state == ConversationInstance.State.HUMAN_ASSIGNED
+                    and event.event_type == "conversation_message_received"
+                    and event.direction == "OUTGOING"
+                ):
+                    self.transition(
+                        instance,
+                        ConversationInstance.State.HUMAN_IN_PROGRESS,
+                        reason="Assigned human agent sent the first outgoing message.",
+                        source_event_id=event.source_event_id,
+                    )
+                elif decision.route != "IGNORE":
+                    self.transition(
+                        instance,
+                        decision.target_state,
+                        reason=decision.reason,
+                        source_event_id=event.source_event_id,
+                        allow_terminal_reopen=event.event_type == "ticket_entered_n1",
+                    )
+                elif instance_created and not event.hubspot_ticket_id:
+                    # A ticket can emit metadata/property events before the
+                    # actionable pipeline or customer-message event. Keeping
+                    # that new ticket instance NORMALIZED allows the later
+                    # event to enter AI processing instead of failing because
+                    # an unrelated first property terminalized it as IGNORED.
+                    self.transition(
+                        instance,
+                        decision.target_state,
+                        reason=decision.reason,
+                        source_event_id=event.source_event_id,
+                    )
         return LifecycleRecordResult(
             instance=instance,
             event=lifecycle_event,
@@ -499,7 +538,7 @@ class LifecycleEngine:
         return instance
 
     def transition_by_ticket(self, ticket_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:
-        instance = ConversationInstance.objects.filter(hubspot_ticket_id=str(ticket_id)).first()
+        instance = find_conversation_instance(ticket_id=str(ticket_id))
         if instance is None:
             return False
         self.transition(instance, to_state, reason=reason, actor_id=actor_id)
@@ -518,6 +557,9 @@ class LifecycleEngine:
         instance: ConversationInstance | None,
         agent_name: str,
         input_snapshot: dict[str, Any],
+        model_name: str = "",
+        prompt_version: str = "",
+        policy_version: str = "",
         output_structured: dict[str, Any] | None = None,
         tokens_used: int = 0,
         latency_ms: int = 0,
@@ -527,6 +569,9 @@ class LifecycleEngine:
         return AgentRun.objects.create(
             instance=instance,
             agent_name=agent_name,
+            model_name=model_name,
+            prompt_version=prompt_version,
+            policy_version=policy_version,
             input_snapshot=input_snapshot,
             output_structured=output_structured or {},
             tokens_used=tokens_used,
@@ -563,6 +608,31 @@ class LifecycleEngine:
         )
         return log
 
+    def mark_event_processed(self, event: ConversationEvent) -> None:
+        """Mark a lifecycle event as successfully dispatched."""
+        if event.processing_status == ConversationEvent.ProcessingStatus.DUPLICATE:
+            return
+        event.processing_status = ConversationEvent.ProcessingStatus.PROCESSED
+        event.processed_at = timezone.now()
+        event.error_message = ""
+        event.save(update_fields=["processing_status", "processed_at", "error_message"])
+
+    def mark_event_failed(self, event: ConversationEvent, error: Exception | str) -> None:
+        """Mark a lifecycle event as failed while preserving it for replay."""
+        if event.processing_status == ConversationEvent.ProcessingStatus.DUPLICATE:
+            return
+        event.processing_status = ConversationEvent.ProcessingStatus.FAILED
+        event.error_message = str(error)
+        event.save(update_fields=["processing_status", "error_message"])
+
+    def update_metadata(self, instance: ConversationInstance, **values: Any) -> ConversationInstance:
+        """Merge values into the lifecycle metadata snapshot."""
+        metadata = dict(instance.metadata or {})
+        metadata.update(values)
+        instance.metadata = metadata
+        instance.save(update_fields=["metadata", "updated_at"])
+        return instance
+
     def _get_or_create_instance(self, event: NormalizedEvent) -> tuple[ConversationInstance, bool]:
         defaults = {
             "hubspot_thread_id": event.hubspot_thread_id,
@@ -583,7 +653,9 @@ class LifecycleEngine:
         if event.hubspot_thread_id:
             lookup = {"hubspot_thread_id": event.hubspot_thread_id}
         elif event.hubspot_ticket_id:
-            lookup = {"hubspot_ticket_id": event.hubspot_ticket_id}
+            instance = ticket_scope_instances(event.hubspot_ticket_id).select_for_update().first()
+            if instance is not None:
+                return instance, False
 
         if lookup:
             instance = ConversationInstance.objects.filter(**lookup).select_for_update().first()

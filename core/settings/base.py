@@ -9,6 +9,8 @@ from pathlib import Path
 import structlog
 from decouple import Csv, config
 
+from common.logging import add_service_context, scrub_pii
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = config("DJANGO_SECRET_KEY")
@@ -132,12 +134,18 @@ REDIS_URL = config(
     "REDIS_URL",
     default=config("REDIS_PRIVATE_URL", default="redis://localhost:6379/0"),
 )
+REDIS_CACHE_MAX_CONNECTIONS = config("REDIS_CACHE_MAX_CONNECTIONS", default=4, cast=int)
+REDIS_AGENT_MAX_CONNECTIONS = config("REDIS_AGENT_MAX_CONNECTIONS", default=4, cast=int)
+REDIS_LOCK_MAX_CONNECTIONS = config("REDIS_LOCK_MAX_CONNECTIONS", default=2, cast=int)
 
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
+            "pool_class": "redis.BlockingConnectionPool",
+            "max_connections": REDIS_CACHE_MAX_CONNECTIONS,
+            "timeout": 2,
             "socket_connect_timeout": 5,
             "socket_timeout": 5,
             "retry_on_timeout": True,
@@ -151,10 +159,16 @@ SESSION_CACHE_ALIAS = "default"
 # --- Celery ---
 
 CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_URL
+# No application code consumes AsyncResult objects. Do not open a second
+# Redis pool to persist results that are never read.
+CELERY_RESULT_BACKEND = None
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_STORE_ERRORS_EVEN_IF_IGNORED = False
+CELERY_BROKER_POOL_LIMIT = config("CELERY_BROKER_POOL_LIMIT", default=2, cast=int)
+CELERY_REDIS_MAX_CONNECTIONS = config("CELERY_REDIS_MAX_CONNECTIONS", default=4, cast=int)
 CELERY_TIMEZONE = "America/Sao_Paulo"
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ALWAYS_EAGER = False
@@ -167,7 +181,12 @@ CELERY_TASK_TIME_LIMIT = 600
 # The queue is declared here but ``run_supervisor_pipeline_task`` only
 # dispatches when ``AI_ROUTING_ENABLED`` is true.
 CELERY_TASK_ROUTES = {
+    "webhooks.process_webhook_event_task": {"queue": "celery"},
     "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
+    "ai_agents.run_salomao_v1_thread_pipeline_task": {"queue": "ai_tasks"},
+    "ai_agents.request_human_handoff_task": {"queue": "ai_tasks"},
+    "ai_agents.retry_failed_lifecycle_instances_task": {"queue": "ai_tasks"},
+    "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }
 
 # --- Feature flags ---
@@ -176,6 +195,16 @@ CELERY_TASK_ROUTES = {
 # not mounted and the supervisor pipeline task is not dispatched from webhooks.
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
+AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
+
+# Controls automatic agent availability writes from HubSpot polling, SAT and
+# availability webhooks. Staging overrides this to False unconditionally.
+AGENT_STATUS_SYNC_ENABLED = config("AGENT_STATUS_SYNC_ENABLED", default=True, cast=bool)
+
+# Controls the HubSpot NOVO-stage backfill that writes to the internal routing
+# queue. Staging disables it because its database role is intentionally
+# non-authoritative for routing-state mutations.
+NOVO_STAGE_SYNC_ENABLED = config("NOVO_STAGE_SYNC_ENABLED", default=True, cast=bool)
 
 # Availability and assignment authority. A non-authoritative environment may
 # read HubSpot for diagnostics, but it cannot mutate shared availability state
@@ -259,6 +288,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_reconcile_agent_counts",
         "schedule": crontab(minute=30),  # :30 of every hour
     },
+    "ai-lifecycle-watchdog": {
+        "task": "ai_agents.run_lifecycle_watchdog_task",
+        "schedule": 60,
+    },
+    "ai-lifecycle-retry-dispatch": {
+        "task": "ai_agents.retry_failed_lifecycle_instances_task",
+        "schedule": 60,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -327,12 +364,21 @@ PINECONE_INDEX_NAME = config("PINECONE_INDEX_NAME", default="inchurch-knowledge"
 PINECONE_HOST = config("PINECONE_HOST", default="")
 
 SALOMAO_V1_BASE_URL = config("SALOMAO_V1_BASE_URL", default="")
-SALOMAO_V1_TIMEOUT_SECONDS = config("SALOMAO_V1_TIMEOUT_SECONDS", default=45.0, cast=float)
+SALOMAO_V1_TIMEOUT_SECONDS = max(
+    120.0,
+    config("SALOMAO_V1_TIMEOUT_SECONDS", default=120.0, cast=float),
+)
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS = config("SALOMAO_V1_IMAGE_TIMEOUT_SECONDS", default=180.0, cast=float)
 SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast=bool)
+SALOMAO_V1_MAX_ATTEMPTS = config("SALOMAO_V1_MAX_ATTEMPTS", default=3, cast=int)
+SALOMAO_MIN_CONFIDENCE = config("SALOMAO_MIN_CONFIDENCE", default=0.65, cast=float)
+SALOMAO_MESSAGE_QUIET_SECONDS = config("SALOMAO_MESSAGE_QUIET_SECONDS", default=4.0, cast=float)
+SALOMAO_MESSAGE_MAX_WAIT_SECONDS = config("SALOMAO_MESSAGE_MAX_WAIT_SECONDS", default=12.0, cast=float)
+HEIMDALL_MIN_CONFIDENCE = config("HEIMDALL_MIN_CONFIDENCE", default=0.65, cast=float)
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
+HUBSPOT_SANDBOX_APP_SECRET = config("HUBSPOT_SANDBOX_APP_SECRET", default="")
 # Non-secret portal (account) ID. Required by the support conversation-cycle
 # contract to build deterministic cycle identities. Empty means the
 # cycle-opening writer must fail closed (identity_unavailable); reads are not
@@ -417,13 +463,15 @@ if SENTRY_DSN:
 #   stdlib/third-party records → foreign_pre_chain (same chain)  →  formatter
 #   Both paths converge in ProcessorFormatter which applies the final renderer.
 #
-# In production:  JSONRenderer  → machine-readable, aggregator-friendly
+# In staging/production: JSONRenderer → machine-readable, aggregator-friendly
 # In development: ConsoleRenderer → human-readable coloured output (see development.py)
 # ---------------------------------------------------------------------------
 
 _STRUCTLOG_PRE_CHAIN: list = [
     # Merge any context variables bound via structlog.contextvars.bind_contextvars()
     structlog.contextvars.merge_contextvars,
+    add_service_context,
+    scrub_pii,
     # Add log level name ("info", "error", …) to the event dict
     structlog.stdlib.add_log_level,
     # Add the logger name for easy filtering
@@ -436,8 +484,8 @@ _STRUCTLOG_PRE_CHAIN: list = [
 
 # Determine active log format from environment (base.py is loaded before
 # production.py overrides DEBUG, so we read DJANGO_ENV directly).
-_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development")
-_IS_PRODUCTION = _DJANGO_ENV == "production"
+_DJANGO_ENV = os.environ.get("DJANGO_ENV", "development").strip().lower()
+_IS_DEPLOYED = _DJANGO_ENV in {"staging", "production"}
 
 LOGGING: dict = {
     "version": 1,
@@ -483,8 +531,8 @@ LOGGING: dict = {
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            # Production uses JSON; development.py switches this to "console"
-            "formatter": "json" if _IS_PRODUCTION else "console",
+            # Deployed environments use JSON; local development uses console.
+            "formatter": "json" if _IS_DEPLOYED else "console",
             "filters": ["suppress_health_checks"],
         },
     },

@@ -413,11 +413,21 @@ class TestPipelineStageChangeNoDuplicateClosure:
 
         mock_delay.assert_not_called()
 
+    @patch("apps.support.availability_runtime.may_ingest_queue", return_value=True)
+    @patch("apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback())
+    @patch("apps.support.tasks.task_matchmaker_assign_single.delay")
     @patch("apps.support.tasks.task_handle_ticket_closed.delay")
-    def test_novo_stage_change_does_not_dispatch_closure(self, mock_delay):
-        """Other stage transitions must not dispatch closure."""
+    def test_novo_stage_change_dispatches_assignment_not_closure(
+        self,
+        mock_closed,
+        mock_assign,
+        _mock_on_commit,
+        _mock_ingest,
+    ):
+        """NOVO stage transitions dispatch assignment, never closure."""
         from apps.webhooks.handlers.hubspot_handler import _handle_pipeline_stage_change
 
         _handle_pipeline_stage_change("T_STAGE2", "939275049")  # NOVO stage
 
-        mock_delay.assert_not_called()
+        mock_closed.assert_not_called()
+        mock_assign.assert_called_once_with("T_STAGE2", None, "")

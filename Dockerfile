@@ -42,9 +42,9 @@ RUN addgroup --system appgroup && \
 COPY . .
 
 # Run collectstatic at build time so /app/staticfiles exists in the runtime
-# image. Railway's preDeployCommand runs in an ephemeral container whose
+# image. Railway's releaseCommand runs in an ephemeral container whose
 # filesystem is NOT shared with the runtime container — files written
-# during `preDeployCommand` (e.g. collectstatic) vanish before the app starts.
+# during `releaseCommand` (e.g. collectstatic) vanish before the app starts.
 # DJANGO_ENV=development is used at build only because production.py refuses
 # to import without DATABASE_URL — the static manifest is the same either way.
 RUN DJANGO_ENV=development \
@@ -57,17 +57,8 @@ USER appuser
 
 EXPOSE 8000
 
-# Use shell form so ${PORT} is expanded at runtime by the shell.
-# Railway injects PORT; falls back to 8000 for local Docker runs.
-# collectstatic runs at build time; railway_predeploy handles migrations and
-# assignment-backlog suppression before the runtime container starts.
-CMD gunicorn core.asgi:application \
-    -k uvicorn.workers.UvicornWorker \
-    --bind "0.0.0.0:${PORT}" \
-    --workers 2 \
-    --worker-connections 1000 \
-    --timeout 120 \
-    --keep-alive 5 \
-    --log-level info \
-    --access-logfile - \
-    --error-logfile -
+# The launcher runs migrations before accepting traffic. On Render it also
+# embeds one low-memory Celery worker and beat because Free instances do not
+# support a separate background-worker service. Other platforms keep their
+# dedicated worker/beat containers and only launch Gunicorn here.
+CMD ["python", "scripts/start_service.py"]

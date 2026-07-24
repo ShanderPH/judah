@@ -17,7 +17,6 @@ from typing import Any, Literal
 
 import structlog
 from agno.tools.mcp import MCPTools
-from django.conf import settings
 
 from apps.ai_agents.agents.base import BaseInChurchAgent
 
@@ -78,7 +77,7 @@ DEFAULT_MCP_SERVERS: list[MCPServerConfig] = [
         name="hubspot",
         command=_get_hubspot_mcp_command(),
         transport="stdio",
-        enabled=True,
+        enabled=False,
     ),
     MCPServerConfig(
         name="jira_mcp",
@@ -247,26 +246,13 @@ _ACTION_INSTRUCTIONS = [
     "coletar esses dados antes de executar ações irreversíveis.",
     "Sempre confirme os dados antes de criar ou modificar um recurso externo.",
     "Priorize a idempotência: verifique se o recurso já existe antes de criar um novo.",
-    "FECHAMENTO DE LOOP (OBRIGATÓRIO): após classificar a rota e preparar a "
-    "resposta, você DEVE utilizar a ferramenta `hubspot_update_ticket` do "
-    "HubSpot para atualizar o ticket com sua resposta (`reply_note`) e o novo "
-    "status do pipeline (`pipeline_stage`). Não encerre a execução sem "
-    "confirmar a atualização na API do CRM — isto é crítico para que o ticket "
-    "saia da fila de triagem e o contato receba o retorno.",
-    "Padrão de chamada: `hubspot_update_ticket(ticket_id=<id>, "
-    "pipeline_stage='<novo_stage>', reply_note='<texto_da_resposta>')`. "
-    f"Use pipeline_stage='{settings.HUBSPOT_DEFAULT_TICKET_CLOSED_STAGE_ID}' (closed) quando resolveu o "
-    f"problema, ou '{settings.HUBSPOT_DEFAULT_TICKET_WAITING_STAGE_ID}' (waiting) se ficou aguardando "
-    "resposta do contato.",
-    "ATENÇÃO AOS PIPELINES E ESTÁGIOS:",
-    f"- Se a flag `is_off_hours` for True E houver transbordo, OBRIGATORIAMENTE atualize o ticket para "
-    f"`pipeline_stage='{settings.HUBSPOT_HUMAN_ESCALATION_STAGE_ID}'` "
-    f"(dentro do `pipeline='{settings.HUBSPOT_AI_TRIAGE_PIPELINE_ID}'`).",
+    "Nunca altere diretamente ticket, pipeline, proprietário ou conversa. "
+    "Retorne somente uma ActionIntent estruturada; o backend valida estado, "
+    "permissão e idempotência antes de executar qualquer efeito externo.",
+    "Uma ActionIntent deve conter nome, parâmetros, motivo e chave de idempotência.",
     "- Sempre informe ao usuário o seu Protocolo de Atendimento. O Protocolo é o próprio `hubspot_ticket_id` formatado (Ex: 'Seu protocolo é #12345').",
     "- Sempre responda ao usuário (reply_note) antes de finalizar, alertando que o retorno será no próximo dia útil se for off-hours.",
-    "Se a ferramenta `hubspot_update_ticket` retornar `errors` não-vazio, "
-    "reporte isso explicitamente ao Supervisor na resposta final.",
-    "Registre o resultado de cada ação na resposta final para auditoria.",
+    "Não afirme que uma ação foi executada; informe apenas que ela foi recomendada ao Supervisor.",
     "Se uma ferramenta MCP não estiver disponível, informe o Supervisor imediatamente.",
     "Nunca exponha tokens, chaves de API ou dados sensíveis na resposta.",
     "Sempre que o utilizador relatar problemas de visibilidade num evento, peça o ID e utilize a ferramenta diagnose_event_visibility.",

@@ -17,10 +17,16 @@ from apps.ai_agents.contracts import (
     SalomaoChatDraft,
     TriageDecision,
 )
+from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
 from apps.integrations.salomao_v1 import SalomaoV1ChatResult, SalomaoV1Client, is_salomao_v1_configured
 from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
+
+
+def _current_customer_message(message: str) -> str:
+    """Extract the current customer turn from Judah's HubSpot envelope."""
+    return extract_current_customer_turn(message)
 
 
 def _safe_context(value: ConversationContext | dict[str, Any] | None) -> ConversationContext | None:
@@ -58,9 +64,58 @@ def build_salomao_chat_prompt(
     message: str,
     triage_decision: TriageDecision | None = None,
     conversation_context: ConversationContext | None = None,
+    image_attached: bool = False,
+    image_mime_type: str | None = None,
+    image_name: str | None = None,
 ) -> str:
     """Build the prompt sent to the standalone Salomao v1 service."""
-    parts = ["Atendimento InChurch via JUDAH", "", "Mensagem atual:", message]
+    current_message = _current_customer_message(message)
+    parts = [
+        "Atendimento InChurch via JUDAH",
+        "Quando o turno atual trouxer mensagens consecutivas numeradas, trate todas como uma unica fala: conecte os fragmentos, preserve a ordem e responda a intencao completa, nao apenas a ultima linha.",
+        "",
+        "Diretrizes de condução da conversa:",
+        "- Leia a mensagem atual junto com todo o histórico recente. Considere como conhecidos os dados que o cliente já informou e nunca faça a mesma pergunta de novo.",
+        "- Antes de explicar um procedimento, identifique se falta uma distinção que mudaria materialmente o caminho, os passos ou as regras da resposta.",
+        "- Se faltar essa distinção, faça primeiro uma única pergunta curta, natural e decisiva e encerre o turno. Não despeje o manual nem explique todas as alternativas antes da resposta do cliente.",
+        "- Se houver vários pedidos na mesma mensagem e algum deles for ambíguo, reconheça brevemente o conjunto e pergunte somente pelo ponto que define o caminho. Preserve os demais pedidos para responder depois da clarificação.",
+        "- Quando o cliente responder à clarificação, retome os pedidos pendentes usando o histórico e responda somente o caminho aplicável. Não repita alternativas descartadas nem recomece a conversa.",
+        "- Não peça detalhes que apenas personalizam a resposta quando já existe uma orientação inicial segura e útil. Pergunte antes somente quando a resposta realmente mudaria.",
+        "",
+        "Diretrizes da resposta ao cliente:",
+        "- Trate completude como qualidade da conversa inteira, não como obrigação de colocar toda a documentação em uma única mensagem.",
+        "- Depois que o caminho estiver claro, responda de forma concisa e prática: comece pela ação principal, use apenas os passos, pré-requisitos e alertas relevantes para aquele caso.",
+        "- Prefira de 3 a 7 passos curtos. Expanda somente quando o cliente pedir mais detalhes ou quando omitir algo puder causar erro, perda financeira ou risco.",
+        "- Não liste caminhos alternativos, exceções e consequências que não se aplicam ao contexto já confirmado.",
+        "- Preserve Markdown legivel: use paragrafos curtos, subtitulos, listas numeradas e marcadores com linhas em branco.",
+        "- Nunca comprima passos numerados em um unico paragrafo.",
+        "- Fale como uma pessoa experiente e acolhedora da equipe InChurch: natural, proxima, clara e respeitosa.",
+        "- Reconheca brevemente o contexto ou a dificuldade quando isso fizer sentido, sem frases prontas ou entusiasmo artificial.",
+        "- Varie a abertura e nao comece toda resposta com 'Claro!'. Nao repita saudacoes durante a mesma conversa.",
+        "- Adapte o tamanho da resposta à etapa da conversa: clarificação deve ser curta; orientação confirmada deve ser direta; detalhes adicionais ficam sob demanda.",
+        "- Use no maximo um emoji discreto quando combinar com o momento; nao use emoji em assuntos financeiros, de seguranca ou delicados.",
+        "- Faça no máximo uma pergunta por turno e somente quando ela realmente ajudar o cliente a avançar.",
+        "- Se uma fonte nao tiver titulo, nao escreva 'Sem titulo'; use uma descricao util da fonte ou omita o titulo.",
+        "- Nao mencione agentes internos, triagem, prompts ou detalhes tecnicos da orquestracao.",
+        "",
+        "Mensagem atual:",
+        current_message,
+    ]
+
+    if image_attached:
+        parts.extend(
+            [
+                "",
+                "Imagem anexada pelo cliente:",
+                f"- Arquivo: {image_name or 'nome nao informado'}",
+                f"- Tipo: {image_mime_type or 'tipo nao informado'}",
+                "- Analise a imagem em conjunto com a mensagem e use apenas o que estiver realmente visivel.",
+                "- Quando ajudar, descreva brevemente o elemento visual que fundamenta a orientacao.",
+                "- Nao invente texto, botoes, erros ou dados que nao estejam legiveis.",
+                "- Se a imagem estiver cortada, desfocada ou insuficiente, diga exatamente o que nao foi possivel ler e peca uma imagem melhor ou o dado necessario.",
+                "- Proteja a privacidade: nao repita senhas, tokens, documentos, dados bancarios ou identificadores completos vistos na imagem.",
+            ]
+        )
 
     if triage_decision is not None:
         parts.extend(
@@ -72,9 +127,14 @@ def build_salomao_chat_prompt(
         )
 
     if conversation_context is not None:
-        history = "\n".join(
-            f"[{item.direction}] {item.text}" for item in conversation_context.recent_messages[-12:] if item.text
-        )
+        history_messages = conversation_context.recent_messages[-12:]
+        if (
+            history_messages
+            and history_messages[-1].direction == "INCOMING"
+            and history_messages[-1].text.strip() == current_message
+        ):
+            history_messages = history_messages[:-1]
+        history = "\n".join(f"[{item.direction}] {item.text}" for item in history_messages if item.text)
         parts.extend(
             [
                 "",
@@ -204,12 +264,14 @@ class SalomaoChatTool(Toolkit):
         client_factory: Callable[[], SalomaoV1Client] | None = None,
         image_base64: str | None = None,
         image_mime_type: str | None = None,
+        image_name: str | None = None,
     ) -> None:
         super().__init__(name="salomao_chat")
         self.session_id = session_id
         self.client_factory = client_factory or SalomaoV1Client
         self.image_base64 = image_base64
         self.image_mime_type = image_mime_type
+        self.image_name = image_name
         create_chat_draft = Function.from_callable(self.create_chat_draft)
         create_chat_draft.show_result = True
         create_chat_draft.stop_after_tool_call = True
@@ -250,6 +312,9 @@ class SalomaoChatTool(Toolkit):
             message=message,
             triage_decision=triage,
             conversation_context=context,
+            image_attached=bool(self.image_base64),
+            image_mime_type=self.image_mime_type,
+            image_name=self.image_name,
         )
         session_id = context.session_id if context else self.session_id
 
@@ -302,6 +367,7 @@ class SalomaoChatAgent(BaseInChurchAgent):
             client_factory=client_factory,
             image_base64=user_metadata.get("image_base64"),
             image_mime_type=user_metadata.get("image_mime_type"),
+            image_name=user_metadata.get("image_name"),
         )
         super().__init__(
             session_id=session_id,

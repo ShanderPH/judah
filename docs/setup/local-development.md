@@ -97,7 +97,7 @@ Em outro terminal:
 ```bash
 make celery
 # Equivalente a:
-# celery -A core.celery worker --loglevel=info
+# celery -A core.celery worker --loglevel=info --queues=celery,ai_tasks
 ```
 
 ## 8. Executar Celery Beat

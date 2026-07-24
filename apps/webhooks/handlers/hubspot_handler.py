@@ -20,6 +20,7 @@ _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
+_PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
 
 
 def handle_hubspot_event(event) -> None:
@@ -57,17 +58,45 @@ def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str
     property_value = payload.get("propertyValue", "")
 
     if event_type == "ticket.propertyChange":
+        logger.info(
+            "hubspot_ticket_property_changed",
+            ticket_id=object_id,
+            property_name=property_name,
+        )
+
         if property_name == _PROP_STAGE_NOVO:
             _handle_ticket_entered_novo(object_id, property_value, source_event_id=source_event_id)
+
+        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_N1_NEW_STAGE_ID', '')}":
+            _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage_entered")
 
         elif property_name == _PROP_STAGE_CLOSED:
             _handle_ticket_entered_closed(object_id, property_value, payload)
 
+        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_CLOSED_STAGE_ID', '')}":
+            logger.info("hubspot_ai_ticket_entered_closed", ticket_id=object_id)
+
         elif property_name == _PROP_PIPELINE_STAGE:
-            _handle_pipeline_stage_change(object_id, property_value)
+            _handle_pipeline_stage_change(object_id, property_value, payload)
 
         elif property_name == _PROP_OWNER_ID:
             _handle_ticket_owner_change(object_id, property_value, payload)
+
+        elif property_name == _PROP_LAST_VISITOR_MESSAGE:
+            if str(property_value).lower() == "true":
+                _dispatch_salomao_ticket_pipeline(object_id, trigger="customer_message")
+            else:
+                logger.info(
+                    "hubspot_ticket_customer_message_flag_cleared",
+                    ticket_id=object_id,
+                )
+
+        else:
+            logger.info(
+                "hubspot_ticket_property_change_recorded",
+                ticket_id=object_id,
+                property_name=property_name,
+            )
 
     elif event_type in ("ticket.creation", "ticket.created"):
         logger.debug("hubspot_ticket_created_event", ticket_id=object_id)
@@ -131,23 +160,33 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
     task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
 
 
-def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
-    """Handle pipeline stage transitions.
+def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict | None = None) -> None:
+    """Route configured stage transitions without changing unrelated tickets."""
+    payload = payload or {}
+    new_stage = str(new_stage or "")
+    support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
+    support_closed_stage = str(getattr(settings, "HUBSPOT_SUPPORT_CLOSED_STAGE_ID", ""))
+    ai_new_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", ""))
+    ai_triage_stage = str(getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", ""))
+    ai_closed_stage = str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", ""))
 
-    When a ticket moves to the configured FECHADO stage, this event is logged for
-    observability only. The actual closure flow is triggered exclusively by the
-    configured closed-stage property change event (``_PROP_STAGE_CLOSED``)
-    to avoid dispatching duplicate ``task_handle_ticket_closed`` tasks.
+    logger.info("hubspot_ticket_pipeline_stage_changed", ticket_id=object_id, new_stage=new_stage)
 
-    Dispatching closure from both ``hs_pipeline_stage`` and
-    the closed-stage timestamp property would cause double decrements of
-    ``current_simultaneous_chats`` even though ``handle_ticket_closed`` now
-    holds a Redis dedup lock — the lock prevents re-entry within 60 s, but
-    two rapid concurrent dispatches (one per webhook property) could both
-    reach the cache.add() check before either has committed.
-    """
-    if new_stage == _STAGE_FECHADO_ID:
-        # Log for observability — closure is handled by _PROP_STAGE_CLOSED handler.
+    if new_stage == support_new_stage:
+        entered_at_ms = payload.get("occurredAt") or payload.get("occurred_at")
+        _handle_ticket_entered_novo(object_id, str(entered_at_ms) if entered_at_ms else None)
+        return
+
+    if new_stage == ai_new_stage:
+        _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage")
+        return
+
+    if new_stage == ai_triage_stage:
+        logger.info("hubspot_ticket_ai_triage_stage_recorded", ticket_id=object_id)
+        return
+
+    if new_stage == support_closed_stage:
+        # Closure remains owned by the calculated closed-stage event.
         logger.info(
             "hubspot_ticket_pipeline_stage_fechado_logged",
             ticket_id=object_id,
@@ -155,15 +194,51 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str) -> None:
         )
         return
 
-    from apps.support.models import Ticket
+    if new_stage == ai_closed_stage:
+        logger.info("hubspot_ai_ticket_closed_stage_recorded", ticket_id=object_id)
+        return
 
-    try:
-        ticket = Ticket.objects.get(ticket_id=object_id)
-        ticket.status = "RESOLVED"
-        ticket.save(update_fields=["status", "updated_at"])
-        logger.info("ticket_resolved_via_hubspot", ticket_id=ticket.pk)
-    except Ticket.DoesNotExist:
-        logger.debug("hubspot_ticket_not_synced_locally", hubspot_id=object_id)
+    logger.info(
+        "hubspot_ticket_pipeline_stage_recorded_without_action",
+        ticket_id=object_id,
+        new_stage=new_stage,
+    )
+
+
+def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -> None:
+    """Dispatch the ticket Supervisor for a new AI ticket or customer reply."""
+    if not getattr(settings, "AI_ROUTING_ENABLED", False):
+        logger.info("hubspot_ticket_ai_routing_disabled", ticket_id=hubspot_ticket_id, trigger=trigger)
+        return
+
+    if not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
+        logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, trigger=trigger)
+        return
+
+    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
+
+    if not is_ai_rollout_enabled(hubspot_ticket_id):
+        logger.info("hubspot_ticket_ai_rollout_skipped", ticket_id=hubspot_ticket_id, trigger=trigger)
+        return
+
+    from apps.ai_agents.tasks import run_supervisor_pipeline_task, schedule_supervisor_customer_turn
+    from apps.ai_agents.utils.business_rules import is_business_hours, is_quinta_fire, off_hours_reason
+
+    is_off_hours = bool(off_hours_reason() or is_quinta_fire() or not is_business_hours())
+    if trigger == "customer_message":
+        schedule_supervisor_customer_turn(
+            hubspot_ticket_id,
+            is_off_hours=is_off_hours,
+            enforce_ai_pipeline=True,
+        )
+    else:
+        run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
+    logger.info(
+        "hubspot_ticket_supervisor_dispatched",
+        ticket_id=hubspot_ticket_id,
+        trigger=trigger,
+        is_off_hours=is_off_hours,
+    )
 
 
 def _handle_ticket_owner_change(
@@ -236,7 +311,13 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         logger.debug("hubspot_conversation_ai_routing_disabled", object_id=object_id)
         return
 
-    from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task
+    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
+
+    if not is_ai_rollout_enabled(str(object_id)):
+        logger.info("hubspot_conversation_ai_rollout_skipped", object_id=object_id)
+        return
+
+    from apps.ai_agents.tasks import schedule_salomao_thread_customer_turn
 
     thread_id = (
         payload.get("threadId")
@@ -245,7 +326,7 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         or object_id
     )
 
-    run_salomao_v1_thread_pipeline_task.delay(str(thread_id))
+    schedule_salomao_thread_customer_turn(str(thread_id))
     logger.info("hubspot_conversation_supervisor_dispatched", thread_id=str(thread_id), object_id=object_id)
 
 

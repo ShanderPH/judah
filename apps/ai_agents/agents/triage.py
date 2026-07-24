@@ -78,6 +78,20 @@ class TriageResult(BaseModel):
         ),
     )
     sentimento: Sentimento
+    confidence: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Confiança calibrada da classificação.",
+    )
+    evidences: list[str] = Field(
+        default_factory=list,
+        description="Trechos curtos da mensagem que sustentam a classificação.",
+    )
+    policy_version: str = Field(
+        default="heimdall-v1",
+        description="Versão da política de triagem aplicada.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +148,23 @@ ou três tentativas fracassadas mencionadas pelo usuário → rota =
 ESCALAR_IMEDIATAMENTE e prioridade = CRITICA. Nesses casos, `sentimento`
 deve ser "negativo".
 
+PEDIDO EXPLÍCITO DE ATENDIMENTO HUMANO → ESCALAR_IMEDIATAMENTE
+Se o cliente pedir para falar, conversar ou ser atendido por uma pessoa,
+humano, atendente ou equipe de suporte, respeite imediatamente o pedido:
+rota = ESCALAR_IMEDIATAMENTE. Não classifique isso como dúvida sobre os
+canais de atendimento e não tente responder com documentação.
+
 SENTIMENTO
 - positivo: elogios, agradecimentos, tom amigável.
 - neutro: perguntas objetivas sem carga emocional.
 - negativo: reclamação, frustração, urgência com tom duro.
+
+CONFIANÇA, EVIDÊNCIAS E POLÍTICA
+- `confidence`: número entre 0 e 1. Use valores abaixo de 0.60 quando a
+  classificação estiver ambígua ou depender de contexto ausente.
+- `evidences`: até 3 trechos curtos presentes na mensagem que justificam rota,
+  prioridade ou sentimento. Nunca invente evidências.
+- `policy_version`: retorne exatamente "heimdall-v1".
 
 TAGS
 - Use snake_case, curto e descritivo (máx 4 tags).
@@ -147,6 +174,14 @@ TAGS
 DADOS FALTANTES
 - Liste somente o que AINDA NÃO foi informado e seria necessário para
   resolver (ex: "cpf", "id_do_ticket", "nome_da_igreja", "print_do_erro").
+- Considere também uma distinção decisiva quando ela muda o procedimento
+  aplicável (ex: "tipo_da_transacao", "origem_do_pagamento",
+  "modulo_afetado"). Nesse caso, liste apenas o ponto mínimo que separa os
+  caminhos possíveis.
+- Leia o histórico incluído na mensagem antes de marcar um dado como faltante.
+  Se o cliente já respondeu à pergunta em um turno anterior, não peça de novo.
+- Não marque detalhes opcionais ou dados que podem ser solicitados somente
+  depois da orientação inicial.
 - Se já houver tudo que é necessário, retorne lista vazia [].
 
 REGRA DE OURO
@@ -166,8 +201,7 @@ class HeimdallTriageAgent(BaseInChurchAgent):
     Usa `output_schema=TriageResult` + `structured_outputs=True` para que o
     Agno valide a resposta do LLM via Pydantic antes de retornar ao chamador.
 
-    Roda em modelo mini (`DEFAULT_MINI_MODEL`) porque triagem é de alta
-    frequência e baixo custo cognitivo. O Supervisor (`gpt-4o`) assume o
+    Roda no modelo configurado em `DEFAULT_MINI_MODEL`. O Supervisor (`gpt-5.5`) assume o
     raciocínio mais complexo só depois de receber a rota.
     """
 

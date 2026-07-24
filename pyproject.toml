@@ -62,9 +62,9 @@ source = ["apps", "common"]
 omit = ["*/tests/*", "*/migrations/*"]
 
 [tool.coverage.report]
-# Current enforced floor. The project target remains 80%; raise this incrementally
-# (60 → 70 → 80) as coverage improves. CI passes --cov-fail-under=50 explicitly.
-fail_under = 50
+# Verified local and CI floor; keep both runners aligned.
+fail_under = 90
+precision = 2
 show_missing = true
 
 [tool.mypy]

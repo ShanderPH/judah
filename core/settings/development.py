@@ -29,7 +29,7 @@ AUTO_ASSIGNMENT_ENABLED = config("AUTO_ASSIGNMENT_ENABLED", default=False, cast=
 # ---------------------------------------------------------------------------
 # Logging overrides for development
 # ---------------------------------------------------------------------------
-# base.py already selected "console" formatter when DJANGO_ENV != "production",
+# base.py already selected "console" formatter for local development,
 # so no formatter override is needed here.
 #
 # Enable slow-query capture: log all queries that take ≥ 50 ms so you can

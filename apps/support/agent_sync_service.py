@@ -6,12 +6,18 @@ with support for business hours scheduling.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import TYPE_CHECKING
 
 import structlog
 from django.db import transaction
 from django.utils import timezone
+
+from apps.ai_agents.utils.business_rules import (
+    WEEKLY_BUSINESS_HOURS,
+    is_holiday,
+    is_quinta_fire,
+)
 
 if TYPE_CHECKING:
     from apps.support.models import Agent
@@ -21,18 +27,10 @@ logger = structlog.get_logger(__name__)
 
 # Default business hours configuration (America/Sao_Paulo)
 # Used as fallback when no BusinessHoursConfig is active in the database.
-_DEFAULT_BUSINESS_HOURS = {
-    0: (9, 18),  # Monday
-    1: (9, 18),  # Tuesday
-    2: (9, 18),  # Wednesday
-    3: (9, 18),  # Thursday
-    4: (9, 18),  # Friday
-    5: (9, 13),  # Saturday
-    6: (8, 12),  # Sunday
-}
+_DEFAULT_BUSINESS_HOURS = WEEKLY_BUSINESS_HOURS
 
 
-def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int] | None:
+def _get_business_hours_for_today(now: datetime | None = None) -> tuple[time, time] | None:
     """Get today's business hours, considering special schedules and DB config.
 
     Priority:
@@ -41,7 +39,7 @@ def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int
       3. Hardcoded defaults in _DEFAULT_BUSINESS_HOURS
 
     Returns:
-        (start_hour, end_hour) tuple, or None if closed today.
+        (start_time, end_time) tuple, or None if closed today.
     """
     local_now = timezone.localtime(now)
     today = local_now.date()
@@ -62,9 +60,15 @@ def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int
                     start=special.start_hour,
                     end=special.end_hour,
                 )
-                return (special.start_hour, special.end_hour)
+                return (time(special.start_hour), time(special.end_hour))
     except Exception:
         pass  # Table may not exist yet during migrations
+
+    # Keep human availability aligned with the same exceptional closures used
+    # by the Salomão workflow. A SpecialSchedule above can explicitly reopen
+    # one of these dates when needed.
+    if is_holiday(local_now) or is_quinta_fire(local_now):
+        return None
 
     # 2. Check active BusinessHoursConfig from database
     try:
@@ -72,18 +76,21 @@ def _get_business_hours_for_today(now: datetime | None = None) -> tuple[int, int
 
         config = BusinessHoursConfig.objects.filter(is_active=True).first()
         if config:
-            from apps.ai_agents.utils.business_rules import is_holiday
-
-            weekday = 6 if is_holiday(local_now) else local_now.weekday()
-            return config.get_hours_for_weekday(weekday)
+            weekday = local_now.weekday()
+            configured_hours = config.get_hours_for_weekday(weekday)
+            if configured_hours is None:
+                return None
+            start_hour, end_hour = configured_hours
+            # Normalize records created with the old weekday default to the
+            # official 17:50 closing boundary.
+            if weekday <= 4 and start_hour == 9 and end_hour == 18:
+                return WEEKLY_BUSINESS_HOURS[weekday]
+            return (time(start_hour), time(end_hour))
     except Exception:
         pass  # Table may not exist yet during migrations
 
     # 3. Fallback to hardcoded defaults
-    from apps.ai_agents.utils.business_rules import is_holiday
-
-    weekday = 6 if is_holiday(local_now) else local_now.weekday()
-    return _DEFAULT_BUSINESS_HOURS.get(weekday)
+    return _DEFAULT_BUSINESS_HOURS.get(local_now.weekday())
 
 
 def is_business_hours(now: datetime | None = None) -> bool:
@@ -100,8 +107,9 @@ def is_business_hours(now: datetime | None = None) -> bool:
     if hours is None:
         return False
 
-    start_hour, end_hour = hours
-    return start_hour <= local_now.hour < end_hour
+    start_time, end_time = hours
+    current_time = local_now.time().replace(tzinfo=None)
+    return start_time <= current_time < end_time
 
 
 def get_poll_interval_seconds() -> int:

@@ -6,7 +6,7 @@ para o dicionário que o `SalomaoSupervisorAgent` consome — espelhando os
 nós `Get Full Ticket Data` e `Get Conversation History` do fluxo N8N.
 
 Decisões:
-- `httpx.AsyncClient` com HTTP/2 desabilitado (compat) e `follow_redirects=True`.
+- `httpx.AsyncClient` com HTTP/2 desabilitado (compat) e redirects explÃ­citos.
 - Token vindo apenas de `os.getenv("HUBSPOT_ACCESS_TOKEN")`, sem Django ORM,
   mantendo o módulo utilizável em background tasks e workers sem app-ready.
 - Qualquer falha de rede é logada e convertida em dicionário-erro parcial
@@ -15,16 +15,28 @@ Decisões:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import html
+import ipaddress
+import json
 import os
+import re
+import socket
 from typing import Any, Literal, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import structlog
+from django.conf import settings
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
+from apps.ai_agents.services.conversation_turn import (
+    CURRENT_CUSTOMER_TURN_MARKER,
+    current_incoming_turn,
+    current_incoming_turn_text,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +44,22 @@ HUBSPOT_API_BASE = "https://api.hubapi.com"
 ConversationChannel = Literal["hubspot", "webchat_central", "api"]
 SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
 DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+MAX_ATTACHMENT_REDIRECTS = 3
+ALLOWED_ATTACHMENT_HOST_SUFFIXES = (
+    "hubspotusercontent.com",
+    "hubspotusercontent-na1.net",
+    "hubspotusercontent-eu1.net",
+    "hubspotusercontent-ap1.net",
+    "hubspotusercontent00.net",
+    "hubspotusercontent10.net",
+    "hubspotusercontent20.net",
+    "hubspotusercontent30.net",
+    "hubspotusercontent40.net",
+)
+DEFAULT_TICKET_CHURCH_PROPERTY = "codigo_de_igreja_local___ticket"
+TICKET_CHURCH_PROPERTY = (
+    str(getattr(settings, "HUBSPOT_TICKET_CHURCH_PROPERTY", "")).strip() or DEFAULT_TICKET_CHURCH_PROPERTY
+)
 
 # QA/dev switch: quando True, `hydrate_ticket_context` devolve um payload
 # sintético sem tocar na API do HubSpot. Usado pelo simulador local de
@@ -56,6 +84,7 @@ def _mock_ticket_context(ticket_id: str) -> dict[str, Any]:
         "pipeline": "0",
         "pipeline_stage": "1",
         "priority": "high",
+        "church_id": "1573",
         "contact_ids": ["mock-contact-001"],
         "thread_ids": ["mock-thread-001"],
         "conversation_history": [
@@ -90,6 +119,7 @@ _TICKET_PROPERTIES: list[str] = [
     "hs_thread_ids_to_restore",
     "createdate",
     "hs_lastmodifieddate",
+    TICKET_CHURCH_PROPERTY,
 ]
 
 
@@ -117,6 +147,26 @@ async def _fetch_ticket(client: httpx.AsyncClient, ticket_id: str) -> dict[str, 
     )
     response.raise_for_status()
     return response.json()
+
+
+def _apply_ticket_context(context: dict[str, Any], ticket: dict[str, Any]) -> None:
+    """Copy the ticket fields needed by routing and protocol lookup."""
+    props = ticket.get("properties", {}) or {}
+    context["subject"] = props.get("subject", "") or ""
+    context["content"] = props.get("content", "") or ""
+    context["owner_id"] = props.get("hubspot_owner_id", "") or ""
+    context["originating_channel"] = props.get("source_type", "") or context.get("originating_channel", "")
+    context["pipeline"] = props.get("hs_pipeline", "") or ""
+    context["pipeline_stage"] = props.get("hs_pipeline_stage", "") or ""
+    context["priority"] = props.get("hs_ticket_priority", "") or ""
+    context["church_id"] = props.get(TICKET_CHURCH_PROPERTY, "") or ""
+    context["raw_ticket"] = ticket
+
+    associations = ticket.get("associations") or {}
+    contacts = (associations.get("contacts") or {}).get("results") or []
+    contact_ids = [str(contact.get("id")) for contact in contacts if contact.get("id")]
+    if contact_ids:
+        context["contact_ids"] = contact_ids
 
 
 async def _fetch_conversation_history(
@@ -227,11 +277,39 @@ async def _resolve_attachment_url(client: httpx.AsyncClient, attachment: dict[st
 def _is_allowed_attachment_url(url: str) -> bool:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not hostname:
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
         return False
-    if hostname in {"hubapi.com", "hubspot.com"} or hostname.endswith((".hubapi.com", ".hubspot.com")):
+    if hostname == "api.hubapi.com":
         return True
-    return any(label.startswith("hubspotusercontent") for label in hostname.split("."))
+    return any(hostname == suffix or hostname.endswith(f".{suffix}") for suffix in ALLOWED_ATTACHMENT_HOST_SUFFIXES)
+
+
+async def _validate_public_attachment_url(url: str) -> None:
+    """Reject untrusted hosts and DNS answers that can reach private networks."""
+    if not _is_allowed_attachment_url(url):
+        raise ValueError("HubSpot attachment URL is missing or is not trusted.")
+
+    hostname = urlparse(url).hostname or ""
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            records = await asyncio.to_thread(
+                socket.getaddrinfo,
+                hostname,
+                443,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise ValueError("HubSpot attachment host could not be resolved.") from exc
+        addresses = {record[4][0] for record in records}
+    else:
+        addresses = {str(literal_ip)}
+
+    if not addresses:
+        raise ValueError("HubSpot attachment host did not resolve to an address.")
+    if any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise ValueError("HubSpot attachment host resolved to a non-public address.")
 
 
 async def _download_image_attachment(
@@ -241,24 +319,41 @@ async def _download_image_attachment(
     max_bytes: int = DEFAULT_IMAGE_MAX_BYTES,
 ) -> tuple[str, str]:
     url = await _resolve_attachment_url(client, attachment)
-    if not url or not _is_allowed_attachment_url(url):
+    if not url:
         raise ValueError("HubSpot attachment URL is missing or is not trusted.")
 
-    content = bytearray()
-    async with client.stream("GET", url, headers={"Authorization": ""}) as response:
-        response.raise_for_status()
-        content_length = response.headers.get("content-length")
-        if content_length and int(content_length) > max_bytes:
-            raise ValueError("HubSpot image attachment exceeds the configured size limit.")
-        async for chunk in response.aiter_bytes():
-            content.extend(chunk)
-            if len(content) > max_bytes:
-                raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+    current_url = url
+    for redirect_count in range(MAX_ATTACHMENT_REDIRECTS + 1):
+        await _validate_public_attachment_url(current_url)
+        content = bytearray()
+        async with client.stream(
+            "GET",
+            current_url,
+            headers={"Authorization": ""},
+            follow_redirects=False,
+        ) as response:
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location or redirect_count == MAX_ATTACHMENT_REDIRECTS:
+                    raise ValueError("HubSpot attachment exceeded the redirect limit.")
+                current_url = urljoin(current_url, location)
+                continue
 
-    mime_type = _image_mime_type(bytes(content))
-    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-        raise ValueError("HubSpot attachment is not a supported image.")
-    return base64.b64encode(content).decode("ascii"), mime_type
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ValueError("HubSpot image attachment exceeds the configured size limit.")
+
+        mime_type = _image_mime_type(bytes(content))
+        if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+            raise ValueError("HubSpot attachment is not a supported image.")
+        return base64.b64encode(content).decode("ascii"), mime_type
+
+    raise ValueError("HubSpot attachment exceeded the redirect limit.")
 
 
 async def _hydrate_latest_incoming_image(client: httpx.AsyncClient, context: dict[str, Any]) -> None:
@@ -300,12 +395,144 @@ async def _fetch_thread(client: httpx.AsyncClient, thread_id: str) -> dict[str, 
     return response.json()
 
 
+def _parse_restored_thread_ids(value: Any) -> list[str]:
+    """Parse HubSpot's thread restore property into stable thread IDs."""
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if not value:
+        return []
+
+    text = str(value).strip()
+    try:
+        decoded = json.loads(text)
+    except TypeError, ValueError:
+        decoded = None
+    if isinstance(decoded, list):
+        return [str(item) for item in decoded if str(item).strip()]
+
+    return re.findall(r"\d+", text)
+
+
 def _extract_thread_ids(ticket_payload: dict[str, Any]) -> list[str]:
-    """Extrai IDs de thread de conversa associados ao ticket."""
+    """Extract associated threads, with the ticket restore property as fallback."""
     associations = ticket_payload.get("associations") or {}
     conv = associations.get("conversations") or {}
     results = conv.get("results") or []
-    return [str(item.get("id")) for item in results if item.get("id")]
+    association_ids = [str(item.get("id")) for item in results if item.get("id")]
+    properties = ticket_payload.get("properties") or {}
+    restored_ids = _parse_restored_thread_ids(properties.get("hs_thread_ids_to_restore"))
+    return list(dict.fromkeys([*association_ids, *restored_ids]))
+
+
+async def update_hubspot_ticket_stage(
+    ticket_id: str,
+    stage_id: str,
+    *,
+    timeout_seconds: float = 20.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Move a HubSpot ticket to a stage, retrying transient provider failures."""
+    return await update_hubspot_ticket_route(
+        ticket_id,
+        stage_id,
+        timeout_seconds=timeout_seconds,
+        max_attempts=max_attempts,
+    )
+
+
+async def update_hubspot_ticket_route(
+    ticket_id: str,
+    stage_id: str,
+    *,
+    pipeline_id: str | None = None,
+    timeout_seconds: float = 20.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Move a ticket to a stage and, when provided, to another pipeline."""
+    if USE_MOCK_HUBSPOT:
+        return {
+            "updated": True,
+            "ticket_id": str(ticket_id),
+            **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+            "stage_id": str(stage_id),
+            "attempts": 1,
+        }
+
+    properties = {"hs_pipeline_stage": str(stage_id)}
+    if pipeline_id:
+        properties["hs_pipeline"] = str(pipeline_id)
+    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
+    async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.patch(
+                    f"{HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
+                    json={"properties": properties},
+                )
+                if (response.status_code == 429 or response.status_code >= 500) and attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                response.raise_for_status()
+                logger.info(
+                    "hubspot_ticket_stage_updated",
+                    ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
+                    stage_id=stage_id,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": True,
+                    "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                }
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "hubspot_ticket_stage_update_http_error",
+                    ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
+                    stage_id=stage_id,
+                    status=exc.response.status_code,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": False,
+                    "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                    "reason": f"http:{exc.response.status_code}",
+                }
+            except httpx.HTTPError as exc:
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                logger.error(
+                    "hubspot_ticket_stage_update_error",
+                    ticket_id=ticket_id,
+                    pipeline_id=pipeline_id,
+                    stage_id=stage_id,
+                    error_type=type(exc).__name__,
+                    attempts=attempt,
+                )
+                return {
+                    "updated": False,
+                    "ticket_id": str(ticket_id),
+                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+                    "stage_id": str(stage_id),
+                    "attempts": attempt,
+                    "reason": type(exc).__name__,
+                }
+
+    return {
+        "updated": False,
+        "ticket_id": str(ticket_id),
+        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+        "stage_id": str(stage_id),
+        "attempts": max_attempts,
+        "reason": "unknown",
+    }
 
 
 async def hydrate_ticket_context(
@@ -353,6 +580,7 @@ async def hydrate_ticket_context(
         "pipeline": "",
         "pipeline_stage": "",
         "priority": "",
+        "church_id": "",
         "contact_ids": [],
         "thread_ids": [],
         "threads": [],
@@ -364,7 +592,7 @@ async def hydrate_ticket_context(
     headers = _auth_headers()
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as client:
         try:
             ticket = await _fetch_ticket(client, ticket_id)
         except httpx.HTTPStatusError as exc:
@@ -380,27 +608,30 @@ async def hydrate_ticket_context(
             errors.append(f"ticket_fetch:{exc.__class__.__name__}")
             return context
 
-        props = ticket.get("properties", {}) or {}
-        context["subject"] = props.get("subject", "") or ""
-        context["content"] = props.get("content", "") or ""
-        context["owner_id"] = props.get("hubspot_owner_id", "") or ""
-        context["originating_channel"] = props.get("source_type", "") or ""
-        context["pipeline"] = props.get("hs_pipeline", "") or ""
-        context["pipeline_stage"] = props.get("hs_pipeline_stage", "") or ""
-        context["priority"] = props.get("hs_ticket_priority", "") or ""
-        context["raw_ticket"] = ticket
+        _apply_ticket_context(context, ticket)
 
-        associations = ticket.get("associations") or {}
-        contacts = (associations.get("contacts") or {}).get("results") or []
-        context["contact_ids"] = [str(c.get("id")) for c in contacts if c.get("id")]
-
-        thread_ids = _extract_thread_ids(ticket)[:max_threads]
-        context["thread_ids"] = thread_ids
-        history: list[dict[str, Any]] = []
-        for thread_id in thread_ids:
+        candidate_thread_ids = _extract_thread_ids(ticket)
+        hydrated_threads: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+        for thread_id in candidate_thread_ids:
+            if len(hydrated_threads) >= max_threads:
+                break
             try:
-                context["threads"].append(await _fetch_thread(client, thread_id))
-                history.extend(await _fetch_conversation_history(client, thread_id))
+                thread = await _fetch_thread(client, thread_id)
+                thread_history = await _fetch_conversation_history(client, thread_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    # HubSpot may retain an obsolete restored-thread ID after
+                    # the underlying conversation was removed. It is not a
+                    # pipeline failure when another associated thread is valid.
+                    logger.info("hubspot_stale_thread_skipped", thread_id=thread_id)
+                    continue
+                logger.warning(
+                    "hubspot_history_fetch_failed",
+                    thread_id=thread_id,
+                    status=exc.response.status_code,
+                )
+                errors.append(f"history:{thread_id}")
+                continue
             except httpx.HTTPError as exc:
                 logger.warning(
                     "hubspot_history_fetch_error",
@@ -408,11 +639,27 @@ async def hydrate_ticket_context(
                     error=str(exc),
                 )
                 errors.append(f"history:{thread_id}")
+                continue
 
-        context["conversation_history"] = sorted(
-            history,
-            key=lambda m: m.get("created_at") or "",
-        )
+            hydrated_threads.append((thread_id, thread, thread_history))
+
+        if hydrated_threads:
+            # A ticket can contain several independent conversations. The
+            # ticket-triggered pipeline must select one concrete thread rather
+            # than concatenate histories and accidentally share state.
+            selected_thread_id, selected_thread, selected_history = max(
+                hydrated_threads,
+                key=lambda item: max(
+                    (str(message.get("created_at") or "") for message in item[2]),
+                    default=str(item[1].get("createdAt") or ""),
+                ),
+            )
+            context["thread_ids"] = [selected_thread_id]
+            context["threads"] = [selected_thread]
+            context["conversation_history"] = sorted(
+                selected_history,
+                key=lambda message: message.get("created_at") or "",
+            )
         await _hydrate_latest_incoming_image(client, context)
 
     logger.info(
@@ -451,6 +698,7 @@ async def hydrate_thread_context(
         "pipeline": "",
         "pipeline_stage": "",
         "priority": "",
+        "church_id": "",
         "contact_ids": [],
         "thread_ids": [str(thread_id)],
         "threads": [],
@@ -459,7 +707,7 @@ async def hydrate_thread_context(
         "errors": errors,
     }
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as client:
         try:
             thread = await _fetch_thread(client, thread_id)
             context["threads"].append(thread)
@@ -467,6 +715,26 @@ async def hydrate_thread_context(
             contact_id = thread.get("associatedContactId")
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
+            if context["ticket_id"]:
+                try:
+                    ticket = await _fetch_ticket(client, context["ticket_id"])
+                    _apply_ticket_context(context, ticket)
+                except httpx.HTTPStatusError as exc:
+                    logger.warning(
+                        "hubspot_thread_ticket_fetch_failed",
+                        thread_id=thread_id,
+                        ticket_id=context["ticket_id"],
+                        status=exc.response.status_code,
+                    )
+                    errors.append(f"ticket_fetch:{exc.response.status_code}")
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "hubspot_thread_ticket_fetch_error",
+                        thread_id=thread_id,
+                        ticket_id=context["ticket_id"],
+                        error=str(exc),
+                    )
+                    errors.append(f"ticket_fetch:{exc.__class__.__name__}")
             context["conversation_history"] = await _fetch_conversation_history(client, thread_id, limit=limit)
             await _hydrate_latest_incoming_image(client, context)
         except httpx.HTTPStatusError as exc:
@@ -491,31 +759,28 @@ async def hydrate_thread_context(
 
 
 def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
-    history = context.get("conversation_history") or []
-    incoming = [
-        message
-        for message in history
-        if (message.get("direction") or "").upper() == "INCOMING"
-        and (
-            (message.get("text") or "").strip()
-            or any(_looks_like_image_attachment(a) for a in message.get("attachments") or [] if isinstance(a, dict))
-        )
-    ]
-    return incoming[-1] if incoming else None
+    turn = current_incoming_turn(context)
+    return turn[-1] if turn else None
 
 
 def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | None:
-    """Build the text Judah sends to Salomao v1 from HubSpot chat context."""
+    """Build a prompt whose current turn groups consecutive customer messages."""
     latest = _latest_incoming_message(context)
     if not latest:
         return None
 
+    history = context.get("conversation_history") or []
+    last_outgoing_index = max(
+        (index for index, message in enumerate(history) if str(message.get("direction") or "").upper() == "OUTGOING"),
+        default=-1,
+    )
     history_lines = [
         f"[{message.get('direction')}] {message.get('text')}"
-        for message in context.get("conversation_history", [])
+        for message in history[: last_outgoing_index + 1]
         if message.get("text")
     ]
-    history_block = "\n".join(history_lines[-12:])
+    history_block = "\n".join(history_lines[-12:]) or "(sem mensagens anteriores)"
+    current_turn = current_incoming_turn_text(context)
     ticket_id = context.get("ticket_id") or "(sem ticket associado)"
     subject = context.get("subject") or "(sem assunto)"
 
@@ -524,7 +789,7 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
         f"Ticket: {ticket_id}\n"
         f"Assunto: {subject}\n\n"
         f"Historico recente:\n{history_block}\n\n"
-        f"Mensagem atual do cliente:\n{latest.get('text') or '[Imagem enviada pelo cliente]'}"
+        f"{CURRENT_CUSTOMER_TURN_MARKER}\n{current_turn}"
     )
 
 
@@ -605,6 +870,103 @@ def _recipient_from_sender(sender: dict[str, Any]) -> dict[str, Any]:
     return recipient
 
 
+def _format_inline_markdown(value: str) -> str:
+    """Render the small, safe Markdown subset used in Salomao replies."""
+    placeholders: dict[str, str] = {}
+
+    def preserve_link(match: re.Match[str]) -> str:
+        raw_url = match.group(2).strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return match.group(0)
+        key = f"\x00LINK{len(placeholders)}\x00"
+        label = html.escape(match.group(1), quote=False)
+        safe_url = html.escape(raw_url, quote=True)
+        placeholders[key] = f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+        return key
+
+    value = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", preserve_link, value)
+    escaped = html.escape(value, quote=True)
+
+    def preserve_code(match: re.Match[str]) -> str:
+        key = f"\x00CODE{len(placeholders)}\x00"
+        placeholders[key] = f"<code>{match.group(1)}</code>"
+        return key
+
+    escaped = re.sub(r"`([^`]+)`", preserve_code, escaped)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    for key, rendered in placeholders.items():
+        escaped = escaped.replace(key, rendered)
+    return escaped
+
+
+def markdown_to_hubspot_rich_text(markdown: str) -> str:
+    """Convert Salomao Markdown to safe HTML accepted by HubSpot richText.
+
+    Raw HTML is always escaped. The converter intentionally supports only the
+    response primitives used by Salomao so model output cannot inject arbitrary
+    tags or attributes into the agent inbox.
+    """
+    rendered: list[str] = []
+    paragraph: list[str] = []
+    list_kind: str | None = None
+
+    def close_paragraph() -> None:
+        if paragraph:
+            rendered.append(f"<p>{'<br>'.join(paragraph)}</p>")
+            paragraph.clear()
+
+    def close_list() -> None:
+        nonlocal list_kind
+        if list_kind:
+            rendered.append(f"</{list_kind}>")
+            list_kind = None
+
+    for raw_line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            close_paragraph()
+            close_list()
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        unordered = re.match(r"^[-*]\s+(.+)$", line)
+        ordered = re.match(r"^\d+[.)]\s+(.+)$", line)
+
+        if heading:
+            close_paragraph()
+            close_list()
+            # Compact headings render better in the HubSpot chat timeline.
+            level = min(len(heading.group(1)) + 2, 5)
+            rendered.append(f"<h{level}>{_format_inline_markdown(heading.group(2))}</h{level}>")
+        elif re.fullmatch(r"-{3,}", line):
+            close_paragraph()
+            close_list()
+            rendered.append("<hr>")
+        elif line.startswith(">"):
+            close_paragraph()
+            close_list()
+            rendered.append(f"<blockquote>{_format_inline_markdown(line.lstrip('> ').strip())}</blockquote>")
+        elif unordered or ordered:
+            close_paragraph()
+            target_kind = "ul" if unordered else "ol"
+            if list_kind != target_kind:
+                close_list()
+                rendered.append(f"<{target_kind}>")
+                list_kind = target_kind
+            match = unordered or ordered
+            assert match is not None
+            rendered.append(f"<li>{_format_inline_markdown(match.group(1))}</li>")
+        else:
+            close_list()
+            paragraph.append(_format_inline_markdown(line))
+
+    close_paragraph()
+    close_list()
+    return "".join(rendered)
+
+
 async def send_salomao_reply_to_hubspot_thread(
     context: dict[str, Any],
     text: str,
@@ -619,7 +981,17 @@ async def send_salomao_reply_to_hubspot_thread(
     thread_id = latest.get("thread_id")
     channel_id = latest.get("channel_id")
     channel_account_id = latest.get("channel_account_id")
-    sender_actor_id = os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "")
+    configured_sender_actor_id = str(
+        os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID") or getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or ""
+    ).strip()
+    incoming_recipients = latest.get("recipients") or []
+    fallback_sender_actor_id = next(
+        (str(recipient.get("actorId")) for recipient in incoming_recipients if recipient.get("actorId")),
+        "",
+    )
+    sender_actor_id = configured_sender_actor_id or fallback_sender_actor_id
+    if sender_actor_id and not configured_sender_actor_id:
+        logger.info("hubspot_salomao_sender_actor_inferred", thread_id=thread_id)
     recipients = [_recipient_from_sender(sender) for sender in latest.get("senders", [])]
     recipients = [recipient for recipient in recipients if recipient]
 
@@ -651,7 +1023,7 @@ async def send_salomao_reply_to_hubspot_thread(
         "senderActorId": sender_actor_id,
         "text": text,
         "type": "MESSAGE",
-        "richText": text,
+        "richText": markdown_to_hubspot_rich_text(text),
     }
 
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
@@ -687,5 +1059,8 @@ __all__ = [
     "build_salomao_prompt_from_hubspot_context",
     "hydrate_thread_context",
     "hydrate_ticket_context",
+    "markdown_to_hubspot_rich_text",
     "send_salomao_reply_to_hubspot_thread",
+    "update_hubspot_ticket_route",
+    "update_hubspot_ticket_stage",
 ]

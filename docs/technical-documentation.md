@@ -194,7 +194,7 @@ HubSpot Webhook (ticket change)
   → Persiste WebhookEvent
   → Agenda Celery task
   → SalomaoSupervisorAgent.run_pipeline_async()
-    → HeimdallTriageAgent classifica (gpt-4o-mini)
+    → HeimdallTriageAgent classifica (gpt-5.5)
     → Rota definida:
       • DUVIDAS_PLATAFORMA → KnowledgeRagAgent (Pinecone RAG)
       • SUPORTE_TECNICO → HelpdeskActionAgent (MCP HubSpot tools)
@@ -463,7 +463,7 @@ POST /api/v1/ai/salomao/chat (JWT-authenticated)
     1. Circuit breaker: rejeita se sessão > 15k tokens
     2. Greeting injection: primeira mensagem com saudação obrigatória
     3. Team.run(message) — Agno coordena:
-       a. HeimdallTriageAgent (gpt-4o-mini) → classifica mensagem
+       a. HeimdallTriageAgent (gpt-5.5) → classifica mensagem
        b. Baseado na rota:
           • DUVIDAS_PLATAFORMA/ATENDIMENTO_IA → KnowledgeRagAgent (Pinecone RAG)
           • BOLETO/FINANCEIRO/SUPORTE → HelpdeskActionAgent (MCP HubSpot tools)

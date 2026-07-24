@@ -15,7 +15,17 @@
         },
         {
           "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939271304",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
           "propertyName": "hs_v2_date_entered_939275052",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939271307",
           "active": true
         },
         {
@@ -26,6 +36,11 @@
         {
           "subscriptionType": "ticket.propertyChange",
           "propertyName": "hubspot_owner_id",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_last_message_from_visitor",
           "active": true
         }
       ]

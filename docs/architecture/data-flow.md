@@ -102,64 +102,56 @@ SalomaoResponse + TokenTrackingLog
 
 ### 3.2 Webhook HubSpot → Supervisor
 
-> **Nota:** `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`. O fluxo real de tickets passa pelo webhook canônico `/api/v1/webhooks/hubspot/` e, quando `AI_ROUTING_ENABLED=true`, dispara `run_supervisor_pipeline_task.delay`.
-
 ```text
-HubSpot ticket-change
+HubSpot event
   │
   ▼
 /api/v1/webhooks/hubspot/  [apps/webhooks/api.py]
-  │ 1. HMAC v1/v3
-  │ 2. Persiste WebhookEvent
+  │ 1. HMAC v1/v3 + replay window
+  │ 2. WebhookEvent + deduplication_key
   ▼
-apps/webhooks/handlers/hubspot_handler.py
-  │ Quando AI_ROUTING_ENABLED=true
-  ▼
-run_supervisor_pipeline_task.delay  [apps/ai_agents/tasks.py]
-  │ 1. Redis lock por ticket
-  ▼
-_run_supervisor_pipeline
-  │ 1. hydrate_ticket_context (HubSpot API)
-  │ 2. Instancia supervisor
-  │ 3. Team.run(message)
-  ▼
-TokenTrackingLog
-```
-
-### 3.3 Webhook HubSpot Conversations -> Supervisor com SalomaoChat
-
-```text
-HubSpot conversation.newMessage
+process_webhook_event_task
   │
   ▼
-/api/v1/webhooks/hubspot/  [apps/webhooks/api.py]
-  │ 1. Verifica HMAC v1/v3
-  │ 2. Persiste WebhookEvent
+EventNormalizer → RoutingPolicyEngine
+  │
+  ├── IGNORE / CLOSE / AUTO_ASSIGNMENT → handler determinístico
+  ├── HUMAN_HANDOFF → HandoffPackage + Matchmaker
+  └── AI_TRIAGE → worker do Supervisor
   ▼
-apps/webhooks/handlers/hubspot_handler.py
-  │ 1. Ignora mensagens OUTGOING para evitar loop
-  │ 2. Registra lifecycle e valida capacidade de canal
-  │ 3. Verifica AI_ROUTING_ENABLED + SALOMAO_V1_BASE_URL
-  ▼
-run_salomao_v1_thread_pipeline_task.delay
-  │ 1. Redis lock por thread
-  │ 2. hydrate_thread_context (HubSpot API)
-  │ 3. Supervisor Team.run
-  │ 4. SalomaoChat chama POST /chat no Salomao v1 quando acionado
-  ▼
-send_salomao_reply_to_hubspot_thread
+ConversationContext + content safety
   │
   ▼
-HubSpot thread reply
+Heimdall → TriageDecision
+  │
+  ├── dados faltantes → pergunta focada → WAITING_FOR_CUSTOMER
+  ├── risco/baixa confiança → HUMAN_HANDOFF_REQUESTED
+  └── serviço especializado → SupervisorDecision
+  ▼
+execution.apply_supervisor_result
+  │ 1. AgentRun
+  │ 2. ToolCallAuditLog
+  │ 3. permissão por estado + idempotência
+  ▼
+WAITING_FOR_CUSTOMER / QUEUE_PENDING / FAILED_RETRYABLE
 ```
 
-### Regras do adapter Salomao v1
+Uma resposta considerada candidata à resolução não fecha a conversa. O estado
+permanece em `WAITING_FOR_CUSTOMER` até confirmação explícita e determinística
+do cliente. Só então o lifecycle avança por `RESOLVED_BY_AI` até `CLOSED`.
 
-- O endpoint canonico do HubSpot continua sendo `/api/v1/webhooks/hubspot/`; nao e necessario ngrok quando Judah esta publicado no Railway.
-- O pipeline de Conversations so e despachado quando `AI_ROUTING_ENABLED=true` e `SALOMAO_V1_BASE_URL` esta configurado.
-- O Salomao v1 e membro interno `SalomaoChat` do Supervisor quando `SALOMAO_V1_AS_TEAM_AGENT=true`.
-- O session id e estavel por ticket (`hubspot-ticket-{id}`) ou por thread (`hubspot-thread-{id}`).
-- Respostas de erro sensivel do provider de IA viram handoff seguro e nao sao reenviadas para a thread do HubSpot.
+### 3.3 Retry, watchdog e handoff
+
+- Tasks de webhook e IA usam até três retries com backoff exponencial.
+- O watchdog periódico detecta instâncias presas e marca
+  `FAILED_RETRYABLE`.
+- O dispatcher periódico reenvia instâncias elegíveis; ao esgotar o orçamento,
+  encaminha tickets ao atendimento humano ou usa `FAILED_TERMINAL` quando não
+  há identificador operacional para handoff.
+- O Matchmaker atualiza o lifecycle para `HUMAN_ASSIGNED` após atribuição.
+
+O Salomão v1 continua disponível como membro interno `SalomaoChat`, quando
+configurado, mas não controla transições nem efeitos externos.
 
 ### Arquivos relacionados
 
@@ -224,11 +216,13 @@ AgentMetrics
 ## Pontos de atenção
 
 - O endpoint `/api/v1/ai/webhooks/hubspot/ticket-change` usa `run_supervisor_pipeline_task.delay`, mas a task interna executa `asyncio.run(_run_supervisor_pipeline(...))`. O mix de sync Celery + async pode gerar problemas de event loop em workers com concorrência alta.
-- O fluxo de auto-atribuição depende de múltiplos locks Redis; se o Redis cair, a deduplicação falha.
+- Locks Redis são uma proteção adicional; a idempotência principal do evento
+  bruto e do lifecycle também é persistida no banco.
 - O webhook de ticket fechado pode ser disparado por `hs_pipeline_stage` e por `hs_v2_date_entered_939275052`; o código evita duplicidade via lock, mas o risco de corrida existe.
 
 ## Recomendações
 
 - Monitorar latência do `task_matchmaker_assign_single` e da hidratação do ticket.
 - Adicionar tracing distribuído (Sentry já captura transações, mas o propagation do `request_id` para Celery poderia ser formalizado).
-- Considerar dead-letter queue para falhas de tasks críticas.
+- Monitorar a dead-letter queue de webhooks e os handoffs causados por retry
+  esgotado.

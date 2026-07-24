@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 
 from apps.support.models import Ticket
@@ -22,7 +23,7 @@ def get_ticket(ticket_id: UUID | str) -> Ticket:
     """
     try:
         return Ticket.objects.get(pk=ticket_id)
-    except (Ticket.DoesNotExist, ValueError):
+    except (Ticket.DoesNotExist, ValueError, DjangoValidationError):
         try:
             return Ticket.objects.get(ticket_id=str(ticket_id))
         except Ticket.DoesNotExist as err:

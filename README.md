@@ -40,17 +40,19 @@ Backend unificado da InChurch: uma plataforma Django 5.2 que consolida suporte, 
                                   ▼
  Authenticated UI ───► /api/v1/ai/salomao/chat ─► SalomaoSupervisorAgent
                                                     │
-                                     ┌──────────────┼────────────────┐
-                                     ▼              ▼                ▼
-                             HeimdallTriage  KnowledgeRagAgent  HelpdeskAction
-                             (gpt-4o-mini)   (Pinecone RAG)     (MCP tools)
-                                                                      │
-                                                                      ▼
-                                                              HubSpot MCP server
-                                                              (FastMCP stdio)
+                                                    ▼
+                                             HeimdallTriage
+                                                (gpt-5.5)
+                                                    │
+                                                    ▼
+                                             SalomaoChat adapter
+                                                    │
+                                                    ▼
+                                              Salomao v1
+                                                (gpt-5.5)
 ```
 
-The **Supervisor** is an Agno `Team` in `coordinate` mode. It calls Heimdall first to produce a structured `TriageResult`, then routes to one of the worker agents based on the returned `rota`. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
+The production **Supervisor** calls Heimdall first to produce a structured `TriageResult`, then always delegates the customer answer to the official Salomao v1 adapter. Only `ESCALAR_IMEDIATAMENTE`, an unavailable v1 service, or a transfer requested by v1 enters human handoff. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
 
 Background work (pipeline dispatch, auto-assignment, metrics aggregation) is scheduled by Celery. FastAPI-style endpoints are exposed through **Django Ninja**.
 
@@ -162,6 +164,7 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `DATABASE_URL`                  | Always             | `postgres://...`                                        |
 | `REDIS_URL`                     | Always             | Broker, cache, and agent session store                  |
 | `AI_ROUTING_ENABLED`            | AI endpoints       | Mounts `/api/v1/ai/*` when `true`                       |
+| `AI_ROUTING_ROLLOUT_PERCENTAGE` | AI routing         | Stable rollout cohort from `0` to `100`; default `100` |
 | `OPENAI_API_KEY`                | AI endpoints       | For GPT-4o / 4o-mini and embeddings                     |
 | `PINECONE_API_KEY`              | RAG                | Pinecone serverless                                     |
 | `PINECONE_INDEX_NAME`           | RAG                |                                                         |
@@ -169,14 +172,17 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `SALOMAO_V1_BASE_URL`           | Salomao v1 adapter | When set, the Supervisor can expose Salomao v1 as an internal Team member |
 | `SALOMAO_V1_TIMEOUT_SECONDS`    | Salomao v1 adapter | HTTP timeout for the Salomao v1 adapter                 |
 | `SALOMAO_V1_AS_TEAM_AGENT`      | Salomao v1 adapter | Enables the internal `SalomaoChat` Team member, default `true` |
+| `SALOMAO_V1_MAX_ATTEMPTS`       | Salomao v1 adapter | Retries for timeout, HTTP 429, and HTTP 5xx; default `3` |
+| `SALOMAO_MIN_CONFIDENCE`        | AI policy         | Minimum Salomao draft confidence before human handoff; default `0.65` |
+| `HEIMDALL_MIN_CONFIDENCE`       | AI policy         | Minimum Heimdall confidence before human handoff; default `0.65` |
 | `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
 | `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | HubSpot chat AI   | HubSpot actor ID used by Salomao to answer conversation threads |
 | `HUBSPOT_TICKET_CHURCH_PROPERTY` | HubSpot protocol lookup | Ticket property containing the local church ID; defaults to `codigo_de_igreja_local___ticket` |
 | `HUBSPOT_PORTAL_ID`             | Optional           | Used to build ticket URLs                               |
 | `SENTRY_DSN`                    | Recommended        | Auto-initialized if set                                 |
-| `DEFAULT_MODEL`                 | Optional           | Override `gpt-4o`                                       |
-| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-4o-mini`                                  |
+| `DEFAULT_MODEL`                 | Optional           | Override `gpt-5.5`                                      |
+| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-5.5`                                      |
 | `USE_MOCK_HUBSPOT`              | Dev only           | `True` bypasses signature verification (local simulator)|
 
 ---
@@ -186,10 +192,15 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | Target         | Command                    |
 |----------------|----------------------------|
 | API (dev)      | `make run`                 |
-| API (prod)     | `gunicorn core.asgi:application -k uvicorn.workers.UvicornWorker` |
+| API (prod)     | `python scripts/start_service.py` |
 | Celery worker  | `make celery`              |
 | Celery beat    | `make celery-beat`         |
 | Full stack     | `make docker-up`           |
+
+The production launcher applies pending migrations before accepting traffic.
+Render automatically provides `RENDER=true`, so a Free Web Service also starts
+one low-memory Celery worker with embedded beat in the same container. Set
+`RUN_CELERY_IN_WEB=false` only when a dedicated worker and beat are deployed.
 
 OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
@@ -205,10 +216,11 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
 1. **Circuit breaker** — reject if the session has consumed >15k tokens (`TokenTrackingLog` aggregate). See Known Risks H4.
 2. **Greeting injection** — first-turn system rule prepended to Team instructions (per-request).
-3. **Team.run(message)** — Agno coordinates:
-   - `HeimdallTriageAgent` (gpt-4o-mini, `output_schema=TriageResult`) classifies the message.
-   - Based on `rota`, either `KnowledgeRagAgent` (Pinecone RAG) or `HelpdeskActionAgent` (MCP tools) handles the turn.
-   - `ESCALAR_IMEDIATAMENTE` triggers a human handoff signal.
+3. **Deterministic chain** — Judah coordinates:
+   - `HeimdallTriageAgent` (gpt-5.5, `output_schema=TriageResult`) classifies the message.
+   - `SalomaoChatAgent` sends the current customer turn, triage and normalized history to Salomao v1.
+   - Judah preserves the complete Markdown response from v1.
+   - `ESCALAR_IMEDIATAMENTE`, v1 unavailability, or a v1 transfer request triggers human handoff.
 4. **Token tracking** — tokens × model price persisted to `TokenTrackingLog` (see `utils/pricing.py`).
 
 ### MCP integration
@@ -217,7 +229,18 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 
 ### Inbound webhook pipeline
 
-`POST /api/v1/webhooks/hubspot/` is the canonical webhook router. It verifies HubSpot HMAC (v1 or v3) and, when `AI_ROUTING_ENABLED=true`, schedules the supervisor pipeline via Celery (`run_supervisor_pipeline_task.delay`). The alternate `POST /api/v1/ai/webhooks/hubspot/ticket-change` router exists in `apps/ai_agents/api/webhooks.py` but is **not mounted** in `core/urls.py` and should be treated as experimental/pending.
+`POST /api/v1/webhooks/hubspot/` is the canonical and authoritative webhook
+router. It verifies HubSpot HMAC v1/v3 (including the v3 replay window),
+persists provider-aware idempotency, and schedules durable processing through
+Celery. `RoutingPolicyEngine` selects exactly one deterministic route before
+any LLM call. AI routes hydrate a normalized `ConversationContext`, run
+content-safety checks, execute Heimdall, and apply the resulting
+`SupervisorDecision` through an audited backend execution layer.
+
+Candidate resolutions and focused questions enter `WAITING_FOR_CUSTOMER`.
+Only explicit customer confirmation closes an AI-resolved conversation.
+Human handoffs persist a `HandoffPackage` and enter Matchmaker. Watchdog and
+retry tasks recover stuck or transiently failed executions.
 
 ### Session persistence
 
@@ -229,11 +252,14 @@ Agno sessions are stored in Redis under `inchurch:agent:{session_id}`. `session_
 
 ## Security Considerations
 
-1. **Webhook signatures.** HubSpot webhooks are verified via v1 SHA-256 *or* v3 HMAC. **Never leave `HUBSPOT_APP_SECRET` blank in production** — the current behavior silently accepts all requests in that case (tracked; see risk S-01).
+1. **Webhook signatures.** HubSpot webhooks are verified via v1 SHA-256 or v3
+   HMAC. Production fails closed when `HUBSPOT_APP_SECRET` is absent.
 2. **JWT.** HS256 using `DJANGO_SECRET_KEY`. Rotating the secret invalidates every active session.
 3. **Rate limiting.** `common/rate_limit.py` applies a sliding window per user or IP. Race-prone under high load — see risk H8.
 4. **CORS.** Explicit origin whitelist via `CORS_ALLOWED_ORIGINS`. Credentials allowed.
-5. **Prompt injection.** Agent prompts currently do **not** isolate untrusted content (ticket bodies, user messages). Treat any deployment as internal-only until an injection guardrail is in place.
+5. **Prompt injection.** Customer content is normalized and explicit
+   instruction-override patterns are handed off before LLM execution. This
+   deterministic guardrail must still be backed by evals and monitoring.
 6. **Secrets in logs.** `debug_mode=True` is still hardcoded on several agents — these expose prompts and tool arguments in logs. Disable before shipping.
 7. **PII.** No encryption at rest for agent traces; rely on the database's TDE (Supabase).
 8. **MCP subprocess.** Inherits the parent env — strip secrets before passing downstream once `env` kwarg usage is audited.
@@ -250,7 +276,9 @@ pytest -m "not slow"         # skip slow suite
 
 **Warning:** `conftest.py:isolate_db` deletes rows from the support tables before every test. If `DATABASE_URL` points at production, this rolls back within the transaction **only** when Django actually opens one. Always confirm you are pointed at a disposable database.
 
-Coverage target: 80% (`pyproject.toml`). CI currently enforces a 50% floor while the project target remains 80%. Both `apps/ai_agents` and `apps/webhooks` have unit tests; expand coverage before relying on edge-case paths.
+Coverage floor: 90% (`pyproject.toml` and CI). The suite uses a private local
+SQLite database through `python run_tests_local.py`; never load production
+credentials into pytest.
 
 ---
 
@@ -289,9 +317,13 @@ Set these variables on the Judah API and worker services:
 
 ```env
 AI_ROUTING_ENABLED=true
+AI_ROUTING_ROLLOUT_PERCENTAGE=100
 SALOMAO_V1_BASE_URL=https://salomao-v1-production.up.railway.app
-SALOMAO_V1_TIMEOUT_SECONDS=45
+SALOMAO_V1_TIMEOUT_SECONDS=120
 SALOMAO_V1_AS_TEAM_AGENT=true
+SALOMAO_V1_MAX_ATTEMPTS=3
+SALOMAO_MIN_CONFIDENCE=0.65
+HEIMDALL_MIN_CONFIDENCE=0.65
 HUBSPOT_ACCESS_TOKEN=...
 HUBSPOT_APP_SECRET=...
 HUBSPOT_SALOMAO_SENDER_ACTOR_ID=...
@@ -321,21 +353,25 @@ HubSpot chat -> Judah Railway webhook -> Judah Celery worker -> Supervisor -> Sa
 
 The following must be resolved before production cutover. See the full audit report for detail.
 
-- [ ] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
-- [ ] **C2** — Add a prompt-injection guardrail around ticket content.
+- [x] **C1** — Fail-closed when `HUBSPOT_APP_SECRET` is blank.
+- [x] **C2** — Add a deterministic prompt-injection guardrail around ticket content.
 - [x] **C3** — Replace `asyncio.create_task` in `ai_agents/api/webhooks.py` with a Celery task. *(Done — `run_supervisor_pipeline_task.delay` is used.)*
-- [ ] **C4** — Consolidate the two HubSpot webhook entry points. *(Note: `/api/v1/ai/webhooks/hubspot/ticket-change` exists in code but is not mounted in `core/urls.py`.)*
+- [x] **C4** — Make `/api/v1/webhooks/hubspot/` the single mounted,
+  authoritative entry point; the alternate router remains unmounted worker
+  code.
 - [ ] **C5** — Gate `conftest.py:isolate_db` behind an explicit test-env marker.
 - [x] **H1** — Fix `except Ticket.DoesNotExist, ValueError:` in `support/services.py`. *(Done — syntax corrected.)*
 - [ ] **H1b** — Audit `auto_assign_service.py` and `hubspot_handler.py` for any remaining Python 2 exception syntax.
 - [ ] **H2** — Remove `debug_mode=True` from Salomão agents; remove the `loading_openai_key` log line.
 - [ ] **H3** — Stop mutating `self._team.instructions` per request.
 - [ ] **H4** — Switch the token budget to a rolling window.
-- [ ] **H5** — Use `output_schema` instead of string-matching for handoff detection and citations.
+- [x] **H5** — Use structured `TriageDecision` and `SupervisorDecision`
+  contracts for routing and handoff outcomes.
 - [ ] **H6** — Cache Pinecone / Knowledge / MCPTools at process startup.
 - [ ] **H7** — Delete the legacy module-level `salomao_agent` / `heimdall_agent` + `services.chat_with_agent`.
 - [ ] **H8** — Replace the custom rate limiter with an atomic implementation.
 - [ ] **H9** — Move pipeline stage IDs into settings.
-- [ ] **H10** — Enable Agno tracing + persist `TriageResult` in `AgentTrace`.
+- [x] **H10** — Persist correlated Heimdall and Supervisor executions in
+  `AgentRun`, including model, prompt and policy versions.
 
 Once these are green the system can be promoted to production with a staged rollout.

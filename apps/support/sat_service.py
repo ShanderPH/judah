@@ -135,6 +135,16 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
         force_refresh: Bypass the HubSpot availability cache. Ticket-triggered
             reconciliation uses this before attempting an assignment.
     """
+    if not settings.AGENT_STATUS_SYNC_ENABLED:
+        logger.debug("sat_heartbeat_status_sync_disabled")
+        return {
+            "agents_checked": 0,
+            "status_changes": 0,
+            "agents_came_online": 0,
+            "skipped_off_hours": False,
+            "skipped_status_sync_disabled": True,
+        }
+
     from apps.integrations.hubspot.client import get_hubspot_client
     from apps.integrations.hubspot.user_availability import (
         AvailabilityParseError,

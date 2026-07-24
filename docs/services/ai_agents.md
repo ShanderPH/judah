@@ -2,7 +2,7 @@
 
 ## Resumo
 
-Módulo do ecossistema **Salomão**: agentes de IA para atendimento ao cliente, composto por triagem (Heimdall), respostas baseadas em conhecimento (RAG) e ações externas (HelpdeskAction via MCP).
+Módulo do ecossistema **Salomão**: agentes de IA para atendimento ao cliente, composto por triagem (Heimdall), respostas oficiais do Salomão v1 e ações externas auditadas.
 
 ## Contexto
 
@@ -12,11 +12,11 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 
 - Orquestrar o Supervisor multi-agente.
 - Classificar mensagens (Heimdall).
-- Responder dúvidas via RAG (Pinecone).
+- Delegar todas as respostas ao Salomão v1 após a triagem.
 - Executar ações no HubSpot/Jira via MCP.
 - Persistir sessões, memórias, traces e custos.
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
-- Expor o Salomao v1 externo como membro interno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado.
+- Usar o Salomão v1 externo no fluxo determinístico sempre que `SALOMAO_V1_BASE_URL` estiver configurado.
 
 Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes, agent runs e auditoria de tools. O backend controla estado e idempotencia; agentes retornam saidas estruturadas, mas nao alteram lifecycle diretamente.
 
@@ -24,13 +24,14 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 ### `HeimdallTriageAgent`
 
-- Modelo: `DEFAULT_MINI_MODEL` (gpt-4o-mini).
-- Saída estruturada: `TriageResult` (rota, prioridade, tags, dados_faltantes, sentimento).
+- Modelo: `DEFAULT_MINI_MODEL` (gpt-5.5).
+- Saída estruturada: `TriageResult` (rota, prioridade, tags, dados faltantes,
+  sentimento, confiança, evidências e versão da política).
 - Sem histórico.
 
 ### `KnowledgeRagAgent`
 
-- Modelo: `DEFAULT_MODEL` (gpt-4o).
+- Modelo: `DEFAULT_MODEL` (gpt-5.5).
 - Conectado ao Pinecone via `Knowledge` do Agno.
 - Busca automática habilitada.
 - Encerra com `<REQUIRES_ESCALATION>` quando não encontra resposta.
@@ -46,16 +47,17 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 - Modelo: `DEFAULT_MINI_MODEL`.
 - Adapter interno para o servico standalone Salomao v1.
-- Disponivel somente quando `SALOMAO_V1_BASE_URL` e `SALOMAO_V1_AS_TEAM_AGENT=true`.
+- Usado na produção quando `SALOMAO_V1_BASE_URL` está configurado; `SALOMAO_V1_AS_TEAM_AGENT` controla apenas a exposição no Team exploratório.
 - Saida normalizada: `SalomaoChatDraft`.
 - Em erro de provider, devolve draft seguro com handoff humano sem vazar tokens, chaves ou stack traces.
 
 ### `SalomaoSupervisorAgent`
 
 - Wrapper sobre `agno.team.Team` modo `coordinate`.
-- Orquestra Heimdall -> RAG/Action/SalomaoChat.
-- Implementa circuit breaker e greeting injection.
-- Saída: `SalomaoResponse`.
+- Orquestra o fluxo determinístico Heimdall -> SalomaoChat -> Salomão v1.
+- Implementa janela limitada de histórico e greeting injection.
+- Saída: `SalomaoResponse` com `SupervisorDecision` restrito a
+  `waiting_customer`, `candidate_resolved`, `escalate_human` ou `failed`.
 
 ### `SalomaoDirectAgent` (legacy)
 
@@ -65,10 +67,11 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 `apps/ai_agents/contracts.py` centraliza os schemas Pydantic usados para handoffs entre agentes:
 
-- `TriageDecision`: rota, prioridade, tags, dados faltantes, sentimento.
+- `TriageDecision`: rota, prioridade, tags, dados faltantes, sentimento,
+  confiança, evidências e versão da política.
 - `ConversationContext` / `ConversationMessage`: contexto neutro de provedor (canal, ticket, thread, mensagens recentes).
 - `SalomaoChatDraft`: resposta normalizada produzida pelo adapter Salomao v1.
-- `SupervisorDecision`: decisão interna do Supervisor antes de converter para `SalomaoResponse`.
+- `SupervisorDecision`: decisão final estruturada que o backend valida e aplica.
 - `ActionIntent` / `HubSpotAction`: ações recomendadas e escritas no HubSpot.
 
 ## Modelos
@@ -91,7 +94,11 @@ Custo e consumo de tokens por execução.
 
 ## Lifecycle deterministico
 
-- `ConversationInstance`: instancia persistida da state machine de atendimento.
+- `ConversationInstance`: instância persistida da state machine de atendimento. Cada
+  `hubspot_thread_id` identifica exatamente uma conversa e possui estado, sessão,
+  eventos, execuções e auditorias independentes. Um mesmo ticket pode conter várias
+  instâncias de conversa. Eventos que possuem apenas `ticket_id` usam um registro de
+  escopo do ticket sem `thread_id` e nunca reutilizam uma conversa arbitrária.
 - `ConversationEvent`: ledger append-only de eventos normalizados a partir de webhooks HubSpot.
 - `ConversationStateTransition`: trilha auditavel de toda mudanca de estado.
 - `AgentRun`: snapshot de execucao de agente/modelo com entrada, saida, tokens, latencia, custo e status.
@@ -101,7 +108,12 @@ Custo e consumo de tokens por execução.
 - `channel_capabilities`: aplica bloqueios configuráveis por canal; WhatsApp é sempre permitido para evitar que configurações legadas interrompam o atendimento.
 - `tool_permissions`: aplica allowlist de tools por estado do lifecycle.
 - `build_handoff_package`: monta contexto minimo para transferencia humana.
-- `run_lifecycle_watchdog`: detecta instancias presas e transiciona para `FAILED_RETRYABLE` ou `FAILED_TERMINAL`.
+- `execution.apply_supervisor_result`: aplica respostas e handoffs com
+  permissão por estado, idempotência e auditoria.
+- `content_safety.assess_customer_content`: sanitiza conteúdo e bloqueia
+  tentativas explícitas de sobrescrever instruções antes do LLM.
+- `run_lifecycle_watchdog`: detecta instâncias presas e transiciona para
+  `FAILED_RETRYABLE`; o dispatcher periódico reexecuta ou faz handoff seguro.
 
 ## Endpoints
 
@@ -121,6 +133,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `build_salomao_prompt_from_hubspot_context(context)`: extrai a mensagem atual do cliente para eventos de conversa.
 - `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
+- `request_human_handoff(...)`: primeiro move o ticket para o pipeline/estágio
+  humano e persiste a fila do Matchmaker; a confirmação ao cliente só é
+  enviada depois desses efeitos concluírem.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
@@ -128,6 +143,10 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 
 - `run_supervisor_pipeline_task(ticket_id, is_off_hours)`: executa pipeline com lock Redis.
 - `run_salomao_v1_thread_pipeline_task(thread_id)`: executa o Supervisor para HubSpot Conversations com lock Redis; o nome foi mantido por compatibilidade.
+- `request_human_handoff_task(...)`: hidrata o contexto mínimo e cria handoff.
+- `run_lifecycle_watchdog_task()`: detecta execuções presas.
+- `retry_failed_lifecycle_instances_task()`: reexecuta falhas elegíveis e faz
+  handoff quando o orçamento termina.
 
 ## Regras de negócio
 
@@ -137,8 +156,29 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   - `BOLETO`, `MEIOS_DE_PAGAMENTO`, `FINANCEIRO`, `SUPORTE_TECNICO_N1`, `EVENTOS`, `CUSTOMER_SUCCESS` → Action.
   - `ESCALAR_IMEDIATAMENTE` → handoff humano.
 - Prioridade `CRITICA` → handoff humano mesmo sem rota de escalation.
-- Circuit breaker: > 15k tokens por sessão → bloqueio.
+- Pedido explícito de atendimento humano é detectado por política
+  determinística antes dos modelos e sempre interrompe a resposta automática.
+- Agressividade severa, ameaça ou insultos claros também produzem handoff
+  imediato; frustração comum continua sendo atendida pela IA.
+- No handoff, o cliente recebe primeiro uma mensagem curta informando o
+  encaminhamento. Em seguida, o ticket é movido para
+  `HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`) e persistido na fila do Matchmaker;
+  retries são idempotentes e não duplicam a confirmação.
+- Dados faltantes ou resposta candidata → `WAITING_FOR_CUSTOMER`.
+- Resolução por IA só fecha após confirmação explícita do cliente.
+- Tools externas exigem estado permitido, chave de idempotência e
+  `ToolCallAuditLog`.
+- `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma
+  conversa. O contexto enviado ao modelo é limitado às mensagens recentes.
 - Primeira mensagem: greeting obrigatório. Demais: não repetir.
+- O Salomão lê a mensagem atual junto com o histórico recente e reutiliza dados
+  já informados; uma clarificação respondida não pode ser perguntada novamente.
+- Quando uma distinção muda materialmente o procedimento, o Salomão faz uma
+  única pergunta decisiva antes de orientar e encerra aquele turno sem despejar
+  todos os caminhos possíveis.
+- A completude é construída ao longo da conversa: depois da clarificação, o
+  Salomão retoma todos os pedidos pendentes e apresenta somente o caminho
+  aplicável, em geral com 3 a 7 passos curtos e detalhes adicionais sob demanda.
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.

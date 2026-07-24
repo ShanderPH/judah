@@ -9,6 +9,7 @@ class WebhookEvent(models.Model):
     """Incoming webhook event — maps to existing webhook_events table in HelpdeskDB."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deduplication_key = models.CharField(max_length=255, unique=True, null=True, blank=True)
     event_type = models.TextField(db_index=True)
     event_id = models.TextField(db_index=True)
     object_id = models.TextField(db_index=True)

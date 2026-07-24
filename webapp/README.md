@@ -26,9 +26,10 @@ JUDAH_API_URL=http://127.0.0.1:8000/api/v1
 NEXT_PUBLIC_HUBSPOT_PORTAL_ID=51734496
 # The sandbox's official tracking code is loaded from
 # https://js-na1.hs-scripts.com/51734496.js on /sandbox-chat.
-# Server-only OAuth token from the sandbox test install. Requires
+# Server-only static private-app token (or OAuth access token) from the
+# sandbox install. Requires
 # conversations.visitor_identification.tokens.create.
-HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN=...
+HUBSPOT_SANDBOX_ACCESS_TOKEN=...
 ```
 
 Se o backend estiver em outra origem, ajuste o valor.
@@ -61,6 +62,10 @@ Os dois comandos passaram nesta implementacao.
 - `app/api/backend/[...path]/route.ts`: proxy autenticado para o Judah
 - `src/features/*`: telas e logica de apresentacao
 - `src/lib/api/*`: client tipado e agregadores de dados
+
+`HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN` continua aceito temporariamente como
+fallback para deployments existentes. Prefira `HUBSPOT_SANDBOX_ACCESS_TOKEN`,
+pois o projeto `inchurch-sandbox` usa autenticacao estatica de app privado.
 
 ## Endpoints usados
 

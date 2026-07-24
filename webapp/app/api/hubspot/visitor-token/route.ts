@@ -6,7 +6,6 @@ import { readAuthTokens, resolveSessionFromTokens } from "@/src/lib/auth/server-
 export const dynamic = "force-dynamic";
 
 interface HubSpotVisitorTokenResponse {
-  expiresAt: string;
   token: string;
 }
 
@@ -15,11 +14,12 @@ interface HubSpotVisitorTokenResponse {
  * Judah user. The HubSpot private-app/OAuth token stays server-side.
  */
 export async function POST() {
-  const accessToken = process.env.HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN;
+  const accessToken =
+    process.env.HUBSPOT_SANDBOX_ACCESS_TOKEN ?? process.env.HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN;
 
   if (!accessToken) {
     return NextResponse.json(
-      { detail: "HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN nao foi configurado no servidor." },
+      { detail: "HUBSPOT_SANDBOX_ACCESS_TOKEN nao foi configurado no servidor." },
       { status: 503 },
     );
   }
@@ -32,15 +32,20 @@ export async function POST() {
   }
 
   try {
-    const response = await fetch("https://api.hubapi.com/conversations/v3/visitor-identification/tokens", {
+    const response = await fetch("https://api.hubapi.com/visitor-identification/v3/tokens/create", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        visitorId: `judah-sandbox-user-${session.user.id}`,
-        expiresInMins: 60,
+        email: session.user.email,
+        firstName: session.user.first_name || undefined,
+        lastName: session.user.last_name || undefined,
+        hsCustomerAgentContext: {
+          judahUserId: String(session.user.id),
+          source: "judah-sandbox-chat",
+        },
       }),
       cache: "no-store",
     });
@@ -51,14 +56,17 @@ export async function POST() {
         status: response.status,
         body: body.slice(0, 500),
       });
-      return NextResponse.json(
-        { detail: "Nao foi possivel autenticar o visitante no HubSpot." },
-        { status: 502 },
-      );
+      const detail =
+        response.status === 401
+          ? "O token de acesso da sandbox HubSpot e invalido ou expirou."
+          : response.status === 403
+            ? "O app nao possui o escopo necessario ou a conta sandbox nao tem assinatura HubSpot Professional/Enterprise."
+            : "Nao foi possivel autenticar o visitante no HubSpot.";
+      return NextResponse.json({ detail }, { status: 502 });
     }
 
     const payload = (await response.json()) as HubSpotVisitorTokenResponse;
-    return NextResponse.json({ expiresAt: payload.expiresAt, token: payload.token });
+    return NextResponse.json({ token: payload.token });
   } catch (error) {
     console.error("[hubspot/visitor-token] request failed", error);
     return NextResponse.json({ detail: "HubSpot indisponivel no momento." }, { status: 502 });

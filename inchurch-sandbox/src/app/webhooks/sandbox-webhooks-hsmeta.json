@@ -1,0 +1,45 @@
+{
+    "uid": "hs_inchurch_sandbox_tools_webhooks",
+    "type": "webhooks",
+    "config": {
+        "settings": {
+            "targetUrl": "https://judah-spi1.onrender.com/api/v1/webhooks/hubspot/sandbox/",
+            "maxConcurrentRequests": 10
+        },
+        "subscriptions": {
+            "hubEvents": [
+                {
+                    "subscriptionType": "conversation.newMessage",
+                    "active": true
+                }
+            ],
+            "legacyCrmObjects": [
+                {
+                    "subscriptionType": "ticket.propertyChange",
+                    "propertyName": "hs_v2_date_entered_939271304",
+                    "active": true
+                },
+                {
+                    "subscriptionType": "ticket.propertyChange",
+                    "propertyName": "hs_v2_date_entered_939271307",
+                    "active": true
+                },
+                {
+                    "subscriptionType": "ticket.propertyChange",
+                    "propertyName": "hs_pipeline_stage",
+                    "active": true
+                },
+                {
+                    "subscriptionType": "ticket.propertyChange",
+                    "propertyName": "hubspot_owner_id",
+                    "active": true
+                },
+                {
+                    "subscriptionType": "ticket.propertyChange",
+                    "propertyName": "hs_last_message_from_visitor",
+                    "active": false
+                }
+            ]
+        }
+    }
+}

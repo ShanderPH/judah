@@ -19,13 +19,15 @@ a hierarquia de tipos do Agno.
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+import unicodedata
+from typing import Any, Literal
 
 import structlog
 from agno.team import Team
 from agno.team.team import TeamMode
 from django.conf import settings
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from apps.ai_agents.agents.action import HelpdeskActionAgent, MCPServerConfig
 from apps.ai_agents.agents.base import (
@@ -37,12 +39,144 @@ from apps.ai_agents.agents.base import (
 from apps.ai_agents.agents.rag import KnowledgeRagAgent
 from apps.ai_agents.agents.salomao_chat import SalomaoChatAgent
 from apps.ai_agents.agents.triage import HeimdallTriageAgent
-from apps.ai_agents.contracts import ConversationContext, ConversationMessage, SalomaoChatDraft, TriageDecision
+from apps.ai_agents.contracts import (
+    ConversationContext,
+    ConversationMessage,
+    HubSpotAction,
+    SalomaoChatDraft,
+    SupervisorDecision,
+    TriageDecision,
+)
+from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
+from apps.ai_agents.services.guardrails import apply_output_guardrails
 from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
 logger = structlog.get_logger(__name__)
 
-FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, o seu assistente virtual da inChurch..."
+FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, assistente virtual da inChurch."
+GREETING_CLARIFICATION = "Como posso ajudar hoje? Conte brevemente o que você precisa."
+
+_LEADING_ASSISTANT_GREETING_RE = re.compile(
+    r"^\s*(?:(?:ol[áa]|oi|bom\s+dia|boa\s+tarde|boa\s+noite)\s*[!,.?:;\-]*\s*)"
+    r"(?:(?:👋\s*)?eu\s+sou\s+o\s+salom[aã]o[^\n.!?]*inchurch(?:\.\.\.|[.!?])?\s*)?",
+    flags=re.IGNORECASE,
+)
+_RESOLUTION_CONFIRMATION_RE = re.compile(
+    r"(?:\s+)?isso\s+resolveu\s+(?:a\s+)?sua\s+solicita(?:ç|c)[ãa]o\?\s*",
+    flags=re.IGNORECASE,
+)
+
+_GREETING_ONLY_MESSAGES = {
+    "bom dia",
+    "boa noite",
+    "boa tarde",
+    "e ai",
+    "ola",
+    "ola salomao",
+    "ola tudo bem",
+    "oi",
+    "oi salomao",
+    "oi tudo bem",
+    "opa",
+    "tudo bem",
+}
+
+_EXPLICIT_HUMAN_REQUEST_PATTERNS = (
+    re.compile(
+        r"\b(?:quero|preciso|gostaria|prefiro|posso|poderia|tem como|como faco para|como posso)\b.{0,45}"
+        r"\b(?:falar|conversar|ser atendid[oa])\b.{0,30}"
+        r"\b(?:humano|atendente|pessoa|alguem|equipe|suporte)\b"
+    ),
+    re.compile(
+        r"\b(?:me\s+)?(?:passe|passa|encaminhe|encaminha|transfira|transfere|chame|chama)\b.{0,35}"
+        r"\b(?:humano|atendente|pessoa|alguem|equipe|suporte)\b"
+    ),
+    re.compile(
+        r"\b(?:quero|preciso|gostaria|prefiro)\s+(?:de\s+)?(?:um\s+)?"
+        r"(?:humano|atendente|atendimento humano)\b"
+    ),
+    re.compile(r"\bnao quero (?:mais )?falar com (?:um )?(?:robo|bot|ia)\b"),
+    re.compile(r"^(?:falar|conversar) com (?:um )?(?:humano|atendente|alguem)(?: por favor)?[!?]*$"),
+    re.compile(r"^(?:um )?(?:humano|atendente)(?: por favor)?[!?]*$"),
+)
+_SEVERE_AGGRESSION_TERMS = {
+    "bosta",
+    "burro",
+    "caralho",
+    "desgraca",
+    "fdp",
+    "filho da puta",
+    "idiota",
+    "incompetente",
+    "lixo",
+    "merda",
+    "palhaco",
+    "palhacos",
+    "porra",
+}
+_SEVERE_THREAT_PATTERNS = (
+    re.compile(r"\b(?:vou|iremos)\s+(?:processar|denunciar|expor)\b"),
+    re.compile(r"\b(?:vou|quero)\s+cancelar\s+(?:o\s+)?(?:contrato|plano|assinatura|servico)\b"),
+    re.compile(r"\b(?:procon|reclame aqui|imprensa|meu advogado|minha advogada)\b"),
+)
+
+
+def _current_customer_message(message: str) -> str:
+    """Extract only the current customer turn from a provider envelope."""
+    return extract_current_customer_turn(message)
+
+
+def _normalize_policy_text(message: str) -> str:
+    """Normalize the current turn for deterministic routing rules."""
+    customer_message = _current_customer_message(message)
+    normalized = unicodedata.normalize("NFKD", customer_message).encode("ascii", "ignore").decode("ascii").lower()
+    normalized = re.sub(r"[^a-z0-9!?\s]", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _deterministic_handoff_trigger(message: str) -> Literal["explicit_human_request", "severe_aggression"] | None:
+    """Detect handoff cases that must not depend on an LLM classification."""
+    normalized = _normalize_policy_text(message)
+    if any(pattern.search(normalized) for pattern in _EXPLICIT_HUMAN_REQUEST_PATTERNS):
+        return "explicit_human_request"
+
+    if any(pattern.search(normalized) for pattern in _SEVERE_THREAT_PATTERNS):
+        return "severe_aggression"
+
+    aggression_hits = sum(1 for term in _SEVERE_AGGRESSION_TERMS if re.search(rf"\b{re.escape(term)}\b", normalized))
+    if aggression_hits >= 2:
+        return "severe_aggression"
+    if aggression_hits >= 1 and normalized.count("!") >= 3:
+        return "severe_aggression"
+
+    letters = [character for character in _current_customer_message(message) if character.isalpha()]
+    uppercase_ratio = sum(character.isupper() for character in letters) / len(letters) if letters else 0.0
+    if aggression_hits >= 1 and len(letters) >= 20 and uppercase_ratio >= 0.75:
+        return "severe_aggression"
+    return None
+
+
+def _is_greeting_only(message: str) -> bool:
+    """Return whether the customer greeted without describing a request."""
+    normalized = (
+        unicodedata.normalize("NFKD", _current_customer_message(message))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    normalized = " ".join(normalized.split())
+    return normalized in _GREETING_ONLY_MESSAGES
+
+
+def _without_resolution_confirmation(content: str) -> str:
+    """Remove the deprecated automatic closing question from customer text."""
+    return _RESOLUTION_CONFIRMATION_RE.sub("", content).rstrip()
+
+
+def _without_leading_assistant_greeting(content: str) -> str:
+    """Remove a model-generated salutation before the canonical first intro."""
+    return _LEADING_ASSISTANT_GREETING_RE.sub("", content, count=1).lstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +202,23 @@ class SalomaoResponse(BaseModel):
     completion_tokens: int = 0
     model_name: str = ""
     latency_ms: int
+    decision: SupervisorDecision | None = None
+    triage_decision: TriageDecision | None = None
+    outcome: Literal["candidate_resolved", "waiting_customer", "escalate_human", "failed"] = "waiting_customer"
+    missing_data: list[str] = Field(default_factory=list)
+    confidence: float = 1.0
+    risk_flags: list[str] = Field(default_factory=list)
+    supervisor_decision: SupervisorDecision | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        """Keep staging compatibility fields synchronized with the canonical decision."""
+        if self.decision is None:
+            return
+        self.outcome = self.decision.outcome
+        self.missing_data = list(self.decision.missing_data)
+        self.confidence = self.decision.confidence
+        self.risk_flags = list(self.decision.risk_flags)
+        self.supervisor_decision = self.decision
 
 
 # ---------------------------------------------------------------------------
@@ -79,24 +230,18 @@ _SUPERVISOR_INSTRUCTIONS = [
     "FLUXO OBRIGATÓRIO: SEMPRE acione o Heimdall PRIMEIRO para obter a "
     "classificação estruturada da mensagem (campos rota, prioridade, tags, "
     "dados_faltantes, sentimento).",
-    "Depois, faça o HAND-OFF para o agente correto usando o campo `rota` do "
-    "Heimdall — não decida sozinho e não responda diretamente ao usuário "
-    "antes da delegação:",
-    "  • rota ∈ {DUVIDAS_PLATAFORMA, ATENDIMENTO_IA} → delegar ao "
-    "KnowledgeRagAgent para consulta à base de conhecimento (Pinecone).",
-    "  • rota ∈ {BOLETO, MEIOS_DE_PAGAMENTO, FINANCEIRO, SUPORTE_TECNICO_N1, "
-    "EVENTOS, CUSTOMER_SUCCESS} → delegar ao HelpdeskAction para ações no "
-    "HubSpot, Jira, n8n e Central de Ajuda (criar/atualizar ticket, "
-    "registrar issue, disparar workflow).",
+    "Depois do Heimdall, SEMPRE delegue a geração da resposta ao SalomaoChat, "
+    "que é o adaptador oficial do Salomão v1. Não produza uma resposta "
+    "paralela com KnowledgeRagAgent ou HelpdeskActionAgent.",
+    "O Salomão v1 recebe rota, prioridade, tags, dados_faltantes, sentimento e "
+    "contexto da conversa; somente ele decide a resposta e se precisa de humano.",
     "  • rota == ESCALAR_IMEDIATAMENTE → NÃO tente resolver. Sinalize "
     "transbordo humano imediato incluindo 'requires_human_handoff: true' e "
     "'transbordo para atendimento humano' na resposta final.",
-    "Se prioridade == CRITICA, destaque a urgência na resposta final e "
-    "sinalize transbordo humano mesmo que a rota não seja ESCALAR_IMEDIATAMENTE.",
-    "Repasse tags, dados_faltantes e sentimento como contexto estruturado ao "
-    "agente delegado — não descarte o output do Heimdall.",
     "Sintetize a resposta final em português brasileiro, cordial e objetivo "
-    "(máx 3 parágrafos). Cite as fontes quando o KnowledgeRagAgent as retornar.",
+    "(máx 3 parágrafos), preservando o conteúdo devolvido pelo Salomão v1.",
+    "Não repita a saudação ou a apresentação do Salomão na mesma resposta.",
+    "Não acrescente a pergunta 'Isso resolveu sua solicitação?'.",
 ]
 
 
@@ -146,15 +291,19 @@ class SalomaoSupervisorAgent:
             extra_mcp_configs=extra_mcp_configs,
             db=db,
         )
+        # The adapter is part of the deterministic production flow whenever
+        # Salomao v1 is configured. SALOMAO_V1_AS_TEAM_AGENT controls only its
+        # exposure to the exploratory Agno Team, never the production bridge.
         self._salomao_chat = (
             SalomaoChatAgent(
                 session_id=session_id,
                 user_metadata=user_metadata,
                 db=db,
             )
-            if self._should_enable_salomao_chat_agent()
+            if is_salomao_v1_configured()
             else None
         )
+        team_salomao_chat = self._salomao_chat if self._should_enable_salomao_chat_agent() else None
 
         # --- Montagem do Team Agno ---
         # TeamMode.coordinate: o model do Team atua como maestro — decide quais
@@ -174,7 +323,7 @@ class SalomaoSupervisorAgent:
             ]
 
         salomao_chat_routing = []
-        if self._salomao_chat is not None:
+        if team_salomao_chat is not None:
             salomao_chat_routing = [
                 "CAPACIDADE INTERNA: O membro SalomaoChat encapsula o Salomao v1 como adapter agent.",
                 "Depois do Heimdall e antes da resposta final, acione o SalomaoChat para gerar um SalomaoChatDraft quando houver pergunta do cliente.",
@@ -201,7 +350,7 @@ class SalomaoSupervisorAgent:
             model=build_primary_model(),
             fallback_config=_build_fallback_config(),
             db=db or _build_redis_db(session_id),
-            members=[member for member in [self._triage, self._rag, self._action, self._salomao_chat] if member],
+            members=[member for member in [self._triage, self._rag, self._action, team_salomao_chat] if member],
             instructions=instructions,
             session_id=session_id,
             # Propaga o histórico do Team para os membros, permitindo
@@ -268,37 +417,19 @@ class SalomaoSupervisorAgent:
         """
         import time
 
-        from django.db.models import Sum
-
         from apps.ai_agents.models import TokenTrackingLog
 
         start = time.perf_counter()
         self._logger.info("pipeline_start", message_preview=message[:80])
         is_first_message = False
 
-        # 1. Circuit Breaker e Verificação de Primeira Mensagem
+        # TokenTrackingLog is a cost/observability ledger, not a context
+        # window. Accumulated usage must never block a later customer turn.
+        # Recent context is bounded separately before it reaches the model.
         try:
             query = TokenTrackingLog.objects.filter(session_id=self.session_id)
-            aggr = query.aggregate(total=Sum("prompt_tokens") + Sum("completion_tokens"))
-            total_acumulado = aggr["total"] or 0
             message_count = query.count()
             is_first_message = message_count == 0
-
-            if total_acumulado > 15000:
-                self._logger.warning("circuit_breaker_triggered", session_id=self.session_id, tokens=total_acumulado)
-                return SalomaoResponse(
-                    session_id=self.session_id,
-                    message="Limite técnico da sessão atingido. Por favor, transfira para um atendente ou inicie um novo chat.",
-                    sources=[],
-                    requires_human_handoff=True,
-                    handoff_reason="Token budget exceeded",
-                    agent_trace=["circuit_breaker: BLOCKED"],
-                    tokens_used=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    model_name="circuit_breaker",
-                    latency_ms=0,
-                )
 
             # Dinâmica da Primeira Mensagem (Greeting)
             if is_first_message:
@@ -317,7 +448,7 @@ class SalomaoSupervisorAgent:
             self._team.instructions.append(greeting_rule)
 
         except Exception as e:
-            self._logger.error("circuit_breaker_failed", error=str(e))
+            self._logger.error("session_greeting_detection_failed", error=str(e))
 
         try:
             deterministic_response = self._run_integrated_chain(message)
@@ -336,6 +467,8 @@ class SalomaoSupervisorAgent:
                         completion_tokens=deterministic_response.completion_tokens,
                         model_name=deterministic_response.model_name,
                         latency_ms=latency_ms,
+                        decision=deterministic_response.decision,
+                        triage_decision=deterministic_response.triage_decision,
                     ),
                     is_first_message=is_first_message,
                 )
@@ -351,6 +484,13 @@ class SalomaoSupervisorAgent:
                 team_response,
             )
             model_name = self._extract_model_name(team_response)
+            decision = SupervisorDecision(
+                outcome="escalate_human" if requires_handoff else "waiting_customer",
+                final_response=content,
+                trace_summary=agent_trace,
+                risk_flags=["unstructured_team_handoff"] if requires_handoff else ["unstructured_team_fallback"],
+                confidence=0.5 if requires_handoff else 0.4,
+            )
 
             self._logger.info(
                 "pipeline_complete",
@@ -375,6 +515,7 @@ class SalomaoSupervisorAgent:
                     completion_tokens=completion_tokens,
                     model_name=model_name,
                     latency_ms=latency_ms,
+                    decision=decision,
                 ),
                 is_first_message=is_first_message,
             )
@@ -386,10 +527,57 @@ class SalomaoSupervisorAgent:
 
     def _finalize_response(self, response: SalomaoResponse, *, is_first_message: bool) -> SalomaoResponse:
         """Enforce response invariants that must not depend on model compliance."""
-        if not is_first_message or response.message.startswith(FIRST_MESSAGE_GREETING):
-            return response
+        # Preserve complete Salomao v1 answers. The default guardrail limit is
+        # intentionally smaller for other call sites, while HubSpot supports
+        # the richer procedural answers returned by the official service.
+        guarded_output = apply_output_guardrails(response.message, max_chars=12_000)
+        response.risk_flags = list(
+            dict.fromkeys(
+                [
+                    *getattr(self, "_input_risk_flags", []),
+                    *response.risk_flags,
+                    *guarded_output.risk_flags,
+                ]
+            )
+        )
+        sanitized_message = _without_resolution_confirmation(guarded_output.text)
+        if sanitized_message:
+            response.message = sanitized_message
+        else:
+            response.message = (
+                "Não consegui gerar uma resposta segura agora. Vou encaminhar seu atendimento para o nosso time."
+            )
+            response.requires_human_handoff = True
+            response.handoff_reason = "Output guardrail rejected an empty response."
+            response.outcome = "escalate_human"
+            response.confidence = 0.0
 
-        response.message = f"{FIRST_MESSAGE_GREETING}\n\n{response.message.lstrip()}"
+        if is_first_message:
+            if "supervisor: greeting_clarification" in response.agent_trace:
+                response.message = f"{FIRST_MESSAGE_GREETING}\n\n{GREETING_CLARIFICATION}"
+            else:
+                body = response.message
+                if body.startswith(FIRST_MESSAGE_GREETING):
+                    body = body[len(FIRST_MESSAGE_GREETING) :].lstrip()
+                else:
+                    body = _without_leading_assistant_greeting(body)
+                response.message = FIRST_MESSAGE_GREETING if not body else f"{FIRST_MESSAGE_GREETING}\n\n{body}"
+
+        canonical = response.decision or SupervisorDecision(
+            outcome=response.outcome,
+            final_response=response.message,
+            trace_summary=response.agent_trace,
+            risk_flags=response.risk_flags,
+            missing_data=response.missing_data,
+            confidence=response.confidence,
+        )
+        canonical.final_response = response.message
+        canonical.risk_flags = response.risk_flags
+        canonical.outcome = response.outcome
+        canonical.missing_data = response.missing_data
+        canonical.confidence = response.confidence
+        response.decision = canonical
+        response.supervisor_decision = canonical
         return response
 
     def _run_integrated_chain(self, message: str) -> SalomaoResponse | None:
@@ -400,8 +588,29 @@ class SalomaoSupervisorAgent:
         member/tool. Heimdall and the Salomao v1 adapter are therefore called
         explicitly when the adapter is enabled.
         """
-        if self._salomao_chat is None:
-            return None
+        handoff_trigger = _deterministic_handoff_trigger(message)
+        if handoff_trigger is not None:
+            trace = [f"handoff_policy: {handoff_trigger}"]
+            severe_aggression = handoff_trigger == "severe_aggression"
+            triage = TriageDecision(
+                rota="ESCALAR_IMEDIATAMENTE",
+                prioridade="CRITICA" if severe_aggression else "MEDIA",
+                tags=[handoff_trigger],
+                dados_faltantes=[],
+                sentimento="negativo" if severe_aggression else "neutro",
+                confidence=1.0,
+                evidence=[_current_customer_message(message)[:160]],
+                policy_version="deterministic-handoff-v1",
+            )
+            return self._mandatory_handoff_response(
+                triage=triage,
+                agent_trace=trace,
+                reason=(
+                    "Severe customer aggression requires immediate human handoff."
+                    if severe_aggression
+                    else "Customer explicitly requested human assistance."
+                ),
+            )
 
         trace = []
         try:
@@ -413,59 +622,72 @@ class SalomaoSupervisorAgent:
             triage = None
             trace.append("heimdall: failed")
 
+        if triage is None:
+            return self._failed_triage_response(agent_trace=trace)
+
+        if _is_greeting_only(message):
+            trace.append("supervisor: greeting_clarification")
+            return self._greeting_clarification_response(triage=triage, agent_trace=trace)
+
         if self._requires_mandatory_handoff(triage):
             trace.append("supervisor: mandatory_human_handoff")
             return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
 
         context = self._build_conversation_context(message)
-        draft = self._salomao_chat.create_chat_draft(
-            message=message,
-            triage_decision=triage,
-            conversation_context=context,
-        )
+        if self._salomao_chat is None:
+            trace.append("salomao_chat: unavailable")
+            return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
+
+        try:
+            trace.append("salomao_chat: call_started")
+            draft = self._salomao_chat.create_chat_draft(
+                message=message,
+                triage_decision=triage,
+                conversation_context=context,
+            )
+        except Exception as exc:
+            self._logger.error("salomao_chat_failed", error=str(exc))
+            trace.append("salomao_chat: failed")
+            return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
 
         trace.append("salomao_chat: OK")
         if draft.recommended_actions:
             trace.append("helpdesk_action: pending_supervisor_decision")
-        if triage and triage.rota in {"DUVIDAS_PLATAFORMA", "ATENDIMENTO_IA"}:
-            rag = self._build_rag_agent()
-            trace.append("knowledge_rag: available" if rag else "knowledge_rag: unavailable")
 
-        return self._response_from_salomao_draft(draft, trace)
+        return self._response_from_salomao_draft(draft, trace, triage=triage)
 
     def _requires_mandatory_handoff(self, triage: TriageDecision | None) -> bool:
         """Return True when the triage contract forbids an automated answer."""
         if triage is None:
             return False
-        return (
-            triage.rota == "ESCALAR_IMEDIATAMENTE"
-            or triage.prioridade in {"ALTA", "CRITICA"}
-            or triage.sentimento == "negativo"
-        )
+        return triage.rota == "ESCALAR_IMEDIATAMENTE"
 
     def _mandatory_handoff_response(
         self,
         *,
         triage: TriageDecision | None,
         agent_trace: list[str],
+        reason: str = "Heimdall classified the ticket as requiring immediate human handoff.",
     ) -> SalomaoResponse:
         """Build the fixed response for triage decisions that require escalation."""
-        reason = "Heimdall classified the ticket as requiring immediate human handoff."
-        if triage and triage.prioridade in {"ALTA", "CRITICA"}:
-            reason = f"Heimdall classified the ticket as {triage.prioridade}."
+        tags = set(triage.tags) if triage else set()
+        if "explicit_human_request" in tags:
+            message = (
+                "Entendi. Vou encaminhar seu atendimento para uma pessoa do nosso time agora. "
+                "Ela continuará a conversa por aqui com o contexto que você já enviou."
+            )
         elif triage and triage.sentimento == "negativo":
-            reason = "Heimdall detected customer frustration."
-
-        frustrated = bool(triage and triage.sentimento == "negativo")
-        message = (
-            "Entendo como essa situação é frustrante e sinto muito pelo transtorno. "
-            "Para que você receba a atenção necessária, vou encaminhar seu atendimento "
-            "para uma pessoa do nosso time, que continuará por aqui com o contexto que você já enviou."
-            if frustrated
-            else "Sinto muito pelo transtorno. Como este caso precisa de uma atenção mais cuidadosa, "
-            "vou encaminhar seu atendimento para uma pessoa do nosso time, que continuará por aqui "
-            "com o contexto que você já enviou."
-        )
+            message = (
+                "Entendo como essa situação é frustrante e sinto muito pelo transtorno. "
+                "Para que você receba a atenção necessária, vou encaminhar seu atendimento "
+                "para uma pessoa do nosso time, que continuará por aqui com o contexto que você já enviou."
+            )
+        else:
+            message = (
+                "Sinto muito pelo transtorno. Como este caso precisa de uma atenção mais cuidadosa, "
+                "vou encaminhar seu atendimento para uma pessoa do nosso time, que continuará por aqui "
+                "com o contexto que você já enviou."
+            )
 
         return SalomaoResponse(
             session_id=self.session_id,
@@ -477,8 +699,163 @@ class SalomaoSupervisorAgent:
             tokens_used=0,
             prompt_tokens=0,
             completion_tokens=0,
+            model_name=(
+                "handoff_policy"
+                if triage and triage.policy_version == "deterministic-handoff-v1"
+                else "heimdall_triage"
+            ),
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="escalate_human",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="assign_ticket_to_human_queue",
+                    payload={"reason": reason},
+                    idempotency_key=f"{self.session_id}:human-handoff",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=self._risk_flags(triage),
+                confidence=triage.confidence if triage else 0.0,
+            ),
+        )
+
+    def _salomao_unavailable_response(
+        self,
+        *,
+        triage: TriageDecision,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Fail safely when the official Salomao v1 answer service is unavailable."""
+        reason = "Salomao v1 is unavailable; no alternative answer was generated."
+        message = (
+            "Não consegui consultar o Salomão agora. Para não fornecer uma resposta "
+            "incorreta, vou encaminhar a conversa para uma pessoa do nosso time."
+        )
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=True,
+            handoff_reason=reason,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            model_name="salomao_v1",
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="escalate_human",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="assign_ticket_to_human_queue",
+                    payload={"reason": reason},
+                    idempotency_key=f"{self.session_id}:salomao-v1-unavailable",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=[*self._risk_flags(triage), "salomao_v1_unavailable"],
+                confidence=0.0,
+            ),
+        )
+
+    def _greeting_clarification_response(
+        self,
+        *,
+        triage: TriageDecision | None,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Keep a greeting in AI service and ask for the actual request."""
+        message = GREETING_CLARIFICATION
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
             model_name="heimdall_triage",
             latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="waiting_customer",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="send_thread_reply",
+                    payload={"missing_data": ["descricao_da_solicitacao"]},
+                    idempotency_key=f"{self.session_id}:greeting-clarification",
+                ),
+                trace_summary=agent_trace,
+                missing_data=["descricao_da_solicitacao"],
+                confidence=triage.confidence if triage else 1.0,
+            ),
+        )
+
+    def _failed_triage_response(self, *, agent_trace: list[str]) -> SalomaoResponse:
+        """Fail safely when the triage contract cannot be produced."""
+        message = (
+            "Não consegui classificar seu atendimento com segurança agora. "
+            "Vou encaminhar a conversa para uma pessoa do nosso time."
+        )
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=True,
+            handoff_reason="Heimdall triage failed or returned an invalid contract.",
+            agent_trace=agent_trace,
+            tokens_used=0,
+            model_name="heimdall_triage",
+            latency_ms=0,
+            decision=SupervisorDecision(
+                outcome="escalate_human",
+                final_response=message,
+                trace_summary=agent_trace,
+                risk_flags=["triage_contract_failure"],
+                confidence=0.0,
+            ),
+        )
+
+    def _missing_data_response(
+        self,
+        *,
+        triage: TriageDecision,
+        agent_trace: list[str],
+        missing_data: list[str] | None = None,
+    ) -> SalomaoResponse:
+        """Ask one focused question and wait for the customer."""
+        fields = missing_data or triage.dados_faltantes
+        first_field = fields[0] if fields else "informação necessária"
+        readable = first_field.replace("_", " ")
+        if readable.lower().startswith("id "):
+            readable = f"ID {readable[3:]}"
+        message = f"Para continuar com segurança, preciso que você informe: {readable}."
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            model_name="heimdall_triage",
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="waiting_customer",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="send_thread_reply",
+                    payload={"missing_data": fields},
+                    idempotency_key=f"{self.session_id}:missing-data:{first_field}",
+                ),
+                trace_summary=agent_trace,
+                missing_data=fields,
+                confidence=triage.confidence,
+            ),
         )
 
     def _build_conversation_context(self, message: str) -> ConversationContext:
@@ -546,21 +923,113 @@ class SalomaoSupervisorAgent:
         self,
         draft: SalomaoChatDraft,
         agent_trace: list[str],
+        *,
+        triage: TriageDecision | None = None,
     ) -> SalomaoResponse:
         """Convert the SalomaoChatDraft contract into the public API response."""
+        effective_triage = triage or TriageDecision(
+            rota="ATENDIMENTO_IA",
+            prioridade="MEDIA",
+            sentimento="neutro",
+        )
+        if draft.missing_data:
+            return self._missing_data_response(
+                triage=effective_triage,
+                agent_trace=[*agent_trace, "supervisor: waiting_for_missing_data"],
+                missing_data=draft.missing_data,
+            )
+
+        if draft.requires_human_handoff:
+            outcome = "escalate_human"
+            requires_handoff = True
+            handoff_reason = draft.handoff_reason or "Salomao v1 requested human handoff."
+            message = draft.response_text
+        elif draft.resolved:
+            outcome = "candidate_resolved"
+            requires_handoff = False
+            handoff_reason = None
+            message = _without_resolution_confirmation(draft.response_text)
+        else:
+            outcome = "waiting_customer"
+            requires_handoff = False
+            handoff_reason = None
+            message = draft.response_text
+
         return SalomaoResponse(
             session_id=self.session_id,
-            message=draft.response_text,
+            message=message,
             sources=[],
-            requires_human_handoff=draft.requires_human_handoff,
-            handoff_reason=draft.handoff_reason,
+            requires_human_handoff=requires_handoff,
+            handoff_reason=handoff_reason,
             agent_trace=agent_trace,
             tokens_used=draft.total_tokens or draft.prompt_tokens + draft.completion_tokens,
             prompt_tokens=draft.prompt_tokens,
             completion_tokens=draft.completion_tokens,
             model_name=draft.model_name or "salomao_v1",
             latency_ms=0,
+            triage_decision=effective_triage,
+            decision=SupervisorDecision(
+                outcome=outcome,
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type=("assign_ticket_to_human_queue" if requires_handoff else "send_thread_reply"),
+                    payload={
+                        "recommended_actions": [action.model_dump(mode="json") for action in draft.recommended_actions]
+                    },
+                    idempotency_key=f"{self.session_id}:supervisor:{outcome}",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=self._risk_flags(effective_triage),
+                confidence=draft.confidence,
+            ),
         )
+
+    def _response_from_specialized_service(
+        self,
+        *,
+        content: str,
+        triage: TriageDecision,
+        agent_trace: list[str],
+        requires_handoff: bool,
+        handoff_reason: str | None,
+        sources: list[dict[str, Any]],
+        model_name: str,
+    ) -> SalomaoResponse:
+        """Build a structured decision from a deterministic service route."""
+        outcome = "escalate_human" if requires_handoff else "candidate_resolved"
+        message = _without_resolution_confirmation(content)
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=sources,
+            requires_human_handoff=requires_handoff,
+            handoff_reason=handoff_reason,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            model_name=model_name,
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome=outcome,
+                final_response=message,
+                trace_summary=agent_trace,
+                risk_flags=self._risk_flags(triage),
+                confidence=triage.confidence,
+            ),
+        )
+
+    def _risk_flags(self, triage: TriageDecision | None) -> list[str]:
+        """Translate triage dimensions into stable risk flags."""
+        if triage is None:
+            return ["triage_missing"]
+        flags: list[str] = []
+        if triage.prioridade in {"ALTA", "CRITICA"}:
+            flags.append(f"priority_{triage.prioridade.lower()}")
+        if triage.sentimento == "negativo":
+            flags.append("negative_sentiment")
+        if triage.confidence < 0.6:
+            flags.append("low_confidence")
+        return flags
 
     async def run_pipeline_async(
         self,
@@ -615,6 +1084,7 @@ class SalomaoSupervisorAgent:
             "escalado",
             "suporte humano",
             "atendente humano",
+            "atendimento humano",
             "requires_human_handoff",
         ]
         requires_handoff = any(kw in content for kw in handoff_keywords)
@@ -687,6 +1157,14 @@ class SalomaoSupervisorAgent:
                 value = getattr(team_model, attr, None)
                 if value:
                     return str(value)
+        return ""
+
+    def _extract_response_model_name(self, response: Any) -> str:
+        """Extract a model name without falling back to the Supervisor model."""
+        for attr in ("model", "model_name"):
+            value = getattr(response, attr, None)
+            if value:
+                return str(value)
         return ""
 
 
