@@ -311,19 +311,21 @@ def get_business_hours(request) -> dict:
 
     if config:
 
-        def _fmt(start: int, end: int) -> str:
+        def _fmt(start: int, end: int, weekday: int) -> str:
+            if weekday <= 4 and start == 9 and end == 18:
+                return "09:00-17:50"
             return f"{start:02d}:00-{end:02d}:00"
 
         return {
             "name": config.name,
             "is_active": True,
-            "monday": _fmt(config.monday_start, config.monday_end),
-            "tuesday": _fmt(config.tuesday_start, config.tuesday_end),
-            "wednesday": _fmt(config.wednesday_start, config.wednesday_end),
-            "thursday": _fmt(config.thursday_start, config.thursday_end),
-            "friday": _fmt(config.friday_start, config.friday_end),
-            "saturday": _fmt(config.saturday_start, config.saturday_end),
-            "sunday": _fmt(config.sunday_start, config.sunday_end),
+            "monday": _fmt(config.monday_start, config.monday_end, 0),
+            "tuesday": _fmt(config.tuesday_start, config.tuesday_end, 1),
+            "wednesday": _fmt(config.wednesday_start, config.wednesday_end, 2),
+            "thursday": _fmt(config.thursday_start, config.thursday_end, 3),
+            "friday": _fmt(config.friday_start, config.friday_end, 4),
+            "saturday": _fmt(config.saturday_start, config.saturday_end, 5),
+            "sunday": _fmt(config.sunday_start, config.sunday_end, 6),
             "timezone_name": config.timezone_name,
             "is_currently_business_hours": is_business_hours(),
         }
@@ -332,11 +334,11 @@ def get_business_hours(request) -> dict:
     return {
         "name": "default (hardcoded)",
         "is_active": True,
-        "monday": "09:00-18:00",
-        "tuesday": "09:00-18:00",
-        "wednesday": "09:00-18:00",
-        "thursday": "09:00-18:00",
-        "friday": "09:00-18:00",
+        "monday": "09:00-17:50",
+        "tuesday": "09:00-17:50",
+        "wednesday": "09:00-17:50",
+        "thursday": "09:00-17:50",
+        "friday": "09:00-17:50",
         "saturday": "09:00-13:00",
         "sunday": "08:00-12:00",
         "timezone_name": "America/Sao_Paulo",

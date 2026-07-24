@@ -16,6 +16,16 @@ from zoneinfo import ZoneInfo
 
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 
+WEEKLY_BUSINESS_HOURS: dict[int, tuple[time, time]] = {
+    0: (time(9, 0), time(17, 50)),
+    1: (time(9, 0), time(17, 50)),
+    2: (time(9, 0), time(17, 50)),
+    3: (time(9, 0), time(17, 50)),
+    4: (time(9, 0), time(17, 50)),
+    5: (time(9, 0), time(13, 0)),
+    6: (time(8, 0), time(12, 0)),
+}
+
 # Feriados hardcoded — mova para um banco/config quando a lista crescer.
 # Chave é a data, valor é a descrição humana (usada em logs).
 HOLIDAYS: dict[date, str] = {
@@ -68,7 +78,7 @@ def is_business_hours(now: datetime | None = None) -> bool:
     """True se estiver dentro do horário comercial InChurch.
 
     Grade oficial:
-      - Segunda a Sexta: 09:00 - 18:00
+      - Segunda a Sexta: 09:00 - 17:50
       - Sábado:          09:00 - 13:00
       - Domingo:         08:00 - 12:00
 
@@ -83,15 +93,8 @@ def is_business_hours(now: datetime | None = None) -> bool:
     if is_quinta_fire(local):
         return False
 
-    weekday = local.weekday()  # 0=seg ... 6=dom
-    current = local.time()
-
-    if weekday <= 4:  # seg-sex
-        return time(9, 0) <= current < time(18, 0)
-    if weekday == 5:  # sábado
-        return time(9, 0) <= current < time(13, 0)
-    # domingo
-    return time(8, 0) <= current < time(12, 0)
+    start, end = WEEKLY_BUSINESS_HOURS[local.weekday()]
+    return start <= local.time() < end
 
 
 def is_holiday(now: datetime | None = None) -> bool:
@@ -126,6 +129,7 @@ def off_hours_reason(now: datetime | None = None) -> str | None:
 __all__ = [
     "HOLIDAYS",
     "SAO_PAULO_TZ",
+    "WEEKLY_BUSINESS_HOURS",
     "holiday_name",
     "is_business_hours",
     "is_holiday",

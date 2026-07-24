@@ -12,6 +12,7 @@ from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, Tr
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
 from apps.ai_agents.services.execution import (
     HUMAN_HANDOFF_CONFIRMATION,
+    HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION,
     apply_supervisor_result,
     handle_resolution_confirmation,
 )
@@ -236,6 +237,93 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> N
         ).exists
     )()
     assert effects == ["reply", "route"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_off_hours_handoff_warns_customer_and_still_routes_to_novo() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir seu atendimento.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=["handoff_policy: explicit_human_request"],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir seu atendimento.",
+            confidence=1.0,
+        ),
+    )
+    send_reply = AsyncMock(return_value={"sent": True, "message_id": "out-off-hours"})
+    route_handoff = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=send_reply,
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=route_handoff,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context().model_copy(update={"is_off_hours": True}),
+            message="Quero falar com uma pessoa",
+            result=result,
+        )
+
+    assert send_reply.await_args.args[1] == HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
+    route_handoff.assert_awaited_once()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_off_hours_regular_support_still_replies_normally() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Claro, vou te ajudar com isso.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: OK"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response="Claro, vou te ajudar com isso.",
+            confidence=0.9,
+        ),
+    )
+    send_reply = AsyncMock(return_value={"sent": True, "message_id": "out-normal"})
+
+    with patch(
+        "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+        new=send_reply,
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context().model_copy(update={"is_off_hours": True}),
+            message="Como cadastro um membro?",
+            result=result,
+        )
+
+    assert send_reply.await_args.args[1] == "Claro, vou te ajudar com isso."
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
 
 
 @pytest.mark.django_db(transaction=True)

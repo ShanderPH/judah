@@ -239,6 +239,7 @@ async def test_pipeline_wrappers_success_and_failure() -> None:
     thread_context = {"ticket_id": "ticket-2", "conversation_history": [{"direction": "INCOMING", "text": "Oi"}]}
     with (
         patch("apps.ai_agents.api.webhooks.hydrate_thread_context", new=AsyncMock(return_value=thread_context)),
+        patch("apps.ai_agents.api.webhooks.off_hours_reason", return_value="off_hours"),
         patch(
             "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
             new=AsyncMock(),
@@ -247,6 +248,7 @@ async def test_pipeline_wrappers_success_and_failure() -> None:
         await webhooks._run_salomao_v1_thread_pipeline("thread-1")
     assert run.await_args.kwargs["require_incoming"] is True
     assert run.await_args.kwargs["session_id"] == "hubspot-thread-thread-1"
+    assert run.await_args.kwargs["is_off_hours"] is True
 
     with (
         patch(

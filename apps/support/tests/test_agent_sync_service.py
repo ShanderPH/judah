@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -60,30 +60,41 @@ class TestBusinessHoursLogic:
 
     def test_business_hours_config(self) -> None:
         """Verify _DEFAULT_BUSINESS_HOURS configuration is correct."""
-        # Monday-Friday: 9-18
+        # Monday-Friday: 9:00-17:50
         for day in range(5):
-            assert _DEFAULT_BUSINESS_HOURS[day] == (9, 18), f"Day {day} should be 9-18"
+            assert _DEFAULT_BUSINESS_HOURS[day] == (time(9), time(17, 50))
 
         # Saturday: 9-13
-        assert _DEFAULT_BUSINESS_HOURS[5] == (9, 13)
+        assert _DEFAULT_BUSINESS_HOURS[5] == (time(9), time(13))
 
         # Sunday: 8-12
-        assert _DEFAULT_BUSINESS_HOURS[6] == (8, 12)
+        assert _DEFAULT_BUSINESS_HOURS[6] == (time(8), time(12))
 
     @pytest.mark.parametrize(
-        "hour,expected",
+        "minute,expected",
         [
-            (7, False),
-            (8, True),
-            (11, True),
-            (12, False),
+            (49, True),
+            (50, False),
         ],
     )
-    def test_holiday_uses_sunday_hours(self, hour: int, expected: bool) -> None:
+    def test_weekday_closing_minute(self, minute: int, expected: bool) -> None:
+        wednesday = datetime(2024, 1, 3, 17, minute, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch.object(timezone, "localtime", return_value=wednesday):
+            assert is_business_hours() is expected
+
+    @pytest.mark.parametrize("hour", [8, 11])
+    def test_holiday_is_outside_business_hours(self, hour: int) -> None:
         holiday = datetime(2026, 4, 21, hour, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
 
         with patch.object(timezone, "localtime", return_value=holiday):
-            assert is_business_hours() is expected
+            assert is_business_hours() is False
+
+    def test_quinta_fire_is_outside_business_hours(self) -> None:
+        thursday = datetime(2026, 4, 23, 12, 30, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch.object(timezone, "localtime", return_value=thursday):
+            assert is_business_hours() is False
 
     def test_get_poll_interval_seconds_business_hours(self) -> None:
         """Test that interval is 30s during business hours."""

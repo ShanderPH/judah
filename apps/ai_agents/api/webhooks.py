@@ -750,6 +750,7 @@ async def _run_salomao_v1_thread_pipeline(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
+            is_off_hours=off_hours_reason() is not None,
             require_incoming=True,
         )
     except Exception as exc:
@@ -782,9 +783,9 @@ async def hubspot_ticket_change(
 
     Garantias:
         - Resposta em < 200ms (sem esperar LLM/HTTP externo).
-        - Nunca executa o Supervisor fora do horário comercial ou na
-          'Quinta Fire' — nestes casos, apenas a rotina de fora-de-horário
-          é agendada.
+        - Executa o Salomão normalmente também fora do horário comercial.
+          O indicador de fora-de-horário só altera a comunicação e o
+          tratamento de uma solicitação de atendimento humano.
         - Todo trabalho real roda em uma task do Celery, isolado do HTTP.
     """
     if not _signature_ok(request):

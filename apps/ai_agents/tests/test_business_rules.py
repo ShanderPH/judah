@@ -60,6 +60,13 @@ class TestIsBusinessHours:
         wed = datetime(2026, 4, 22, 18, 0, tzinfo=SAO_PAULO_TZ)
         assert is_business_hours(wed) is False
 
+    def test_weekday_closing_boundary_is_17_50(self) -> None:
+        before_close = datetime(2026, 4, 22, 17, 49, 59, tzinfo=SAO_PAULO_TZ)
+        at_close = datetime(2026, 4, 22, 17, 50, tzinfo=SAO_PAULO_TZ)
+
+        assert is_business_hours(before_close) is True
+        assert is_business_hours(at_close) is False
+
     def test_saturday_in_window(self) -> None:
         sat = datetime(2026, 4, 25, 10, 0, tzinfo=SAO_PAULO_TZ)
         assert is_business_hours(sat) is True

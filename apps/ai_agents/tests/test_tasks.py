@@ -128,6 +128,7 @@ def test_supervisor_task_success_duplicate_and_lock_failure() -> None:
     pipeline = Mock(return_value="coroutine")
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks.off_hours_reason", return_value="off_hours"),
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=pipeline),
         patch("apps.ai_agents.tasks.asyncio.run") as run,
     ):
@@ -166,6 +167,7 @@ def test_supervisor_task_accepts_staging_dispatch_contract_and_queues_followup()
 
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks.off_hours_reason", return_value=None),
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=pipeline),
         patch("apps.ai_agents.tasks.asyncio.run"),
         patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as followup,

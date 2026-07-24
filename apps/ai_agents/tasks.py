@@ -22,6 +22,7 @@ import redis
 import structlog
 from django.conf import settings
 
+from apps.ai_agents.utils.business_rules import off_hours_reason
 from celery import shared_task
 
 logger = structlog.get_logger(__name__)
@@ -265,11 +266,19 @@ def run_supervisor_pipeline_task(
     from apps.ai_agents.api.webhooks import _run_supervisor_pipeline
 
     succeeded = False
+    current_is_off_hours = off_hours_reason() is not None
+    if current_is_off_hours != is_off_hours:
+        logger.info(
+            "supervisor_pipeline_business_hours_refreshed",
+            ticket_id=ticket_id,
+            dispatched_is_off_hours=is_off_hours,
+            current_is_off_hours=current_is_off_hours,
+        )
     try:
         asyncio.run(
             _run_supervisor_pipeline(
                 ticket_id,
-                is_off_hours=is_off_hours,
+                is_off_hours=current_is_off_hours,
                 enforce_ai_pipeline=enforce_ai_pipeline,
             )
         )
@@ -300,7 +309,7 @@ def run_supervisor_pipeline_task(
         if run_followup:
             run_supervisor_pipeline_task.delay(
                 ticket_id,
-                is_off_hours,
+                current_is_off_hours,
                 enforce_ai_pipeline,
                 True,
             )

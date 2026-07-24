@@ -33,6 +33,13 @@ HUMAN_HANDOFF_CONFIRMATION = (
     "Entendi. Vou encaminhar seu atendimento para uma pessoa do nosso time agora. "
     "Ela continuará a conversa por aqui com o contexto que você já enviou."
 )
+HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION = (
+    "Entendi. Neste momento, nossa equipe humana está fora do horário de atendimento. "
+    "O atendimento humano funciona de segunda a sexta, das 9h às 17h50; aos sábados, "
+    "das 9h às 13h; e aos domingos, das 8h às 12h, no horário de Brasília. "
+    "Vou deixar sua conversa encaminhada para a fila da equipe, que dará continuidade "
+    "por aqui no próximo período de atendimento."
+)
 
 
 def _text_fingerprint(text: str) -> dict[str, Any]:
@@ -476,10 +483,15 @@ async def apply_supervisor_result(
 
     if decision.outcome == "escalate_human":
         if can_reply and reply_tool_allowed:
+            handoff_confirmation = (
+                HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
+                if conversation_context.is_off_hours
+                else HUMAN_HANDOFF_CONFIRMATION
+            )
             reply_result = await send_reply_with_audit(
                 instance=instance,
                 context=context,
-                text=HUMAN_HANDOFF_CONFIRMATION,
+                text=handoff_confirmation,
                 agent_run=agent_run,
                 idempotency_key=(
                     f"handoff-confirmation:v2:{instance.pk}:{instance.last_message_id or instance.last_event_id}"

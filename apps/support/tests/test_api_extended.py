@@ -119,6 +119,7 @@ def test_business_hours_config_and_default() -> None:
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=True):
         default = api.get_business_hours(None)
     assert default["name"] == "default (hardcoded)"
+    assert default["monday"] == "09:00-17:50"
     assert default["is_currently_business_hours"] is True
 
     BusinessHoursConfig.objects.create(name="custom", monday_start=8, monday_end=17)
