@@ -58,11 +58,14 @@ def test_ticket_placeholder_is_separate_from_conversation_threads() -> None:
 
     assert ticket_instance.pk != thread_instance.pk
     assert ticket_instance.hubspot_thread_id is None
-    assert ensure_conversation_instance(
-        context={"ticket_id": "ticket-2", "thread_ids": []},
-        ticket_id="ticket-2",
-        session_id="hubspot-ticket-ticket-2",
-    ).pk == ticket_instance.pk
+    assert (
+        ensure_conversation_instance(
+            context={"ticket_id": "ticket-2", "thread_ids": []},
+            ticket_id="ticket-2",
+            session_id="hubspot-ticket-ticket-2",
+        ).pk
+        == ticket_instance.pk
+    )
 
 
 @pytest.mark.django_db

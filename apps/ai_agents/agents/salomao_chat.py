@@ -23,6 +23,7 @@ from common.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
 
+
 def _current_customer_message(message: str) -> str:
     """Extract the current customer turn from Judah's HubSpot envelope."""
     return extract_current_customer_turn(message)

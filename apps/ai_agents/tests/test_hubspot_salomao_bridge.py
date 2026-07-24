@@ -614,13 +614,10 @@ def test_markdown_to_hubspot_rich_text_escapes_raw_html() -> None:
 
 
 def test_markdown_to_hubspot_rich_text_renders_safe_links() -> None:
-    rendered = hubspot.markdown_to_hubspot_rich_text(
-        "[Formulário](https://form.typeform.com/to/S7EC8j4N)"
-    )
+    rendered = hubspot.markdown_to_hubspot_rich_text("[Formulário](https://form.typeform.com/to/S7EC8j4N)")
 
     assert (
-        '<a href="https://form.typeform.com/to/S7EC8j4N" target="_blank" '
-        'rel="noopener noreferrer">Formulário</a>'
+        '<a href="https://form.typeform.com/to/S7EC8j4N" target="_blank" rel="noopener noreferrer">Formulário</a>'
     ) in rendered
     unsafe = hubspot.markdown_to_hubspot_rich_text("[Clique](javascript:alert(1))")
     assert "<a " not in unsafe

@@ -603,9 +603,7 @@ async def _run_supervisor_for_hubspot_context(
     # webhook, not conversation.newMessage. The hydrated history is the
     # authoritative signal: when its latest usable item is incoming, run the
     # deterministic case lookup regardless of which webhook woke the worker.
-    commercial_reply = (
-        handle_commercial_contact_from_hubspot_context(safe_context) if incoming_prompt else None
-    )
+    commercial_reply = handle_commercial_contact_from_hubspot_context(safe_context) if incoming_prompt else None
     if commercial_reply is not None:
         result = _deterministic_response(
             session_id=session_id,

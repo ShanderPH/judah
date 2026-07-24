@@ -712,11 +712,7 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
 
     history = context.get("conversation_history") or []
     last_outgoing_index = max(
-        (
-            index
-            for index, message in enumerate(history)
-            if str(message.get("direction") or "").upper() == "OUTGOING"
-        ),
+        (index for index, message in enumerate(history) if str(message.get("direction") or "").upper() == "OUTGOING"),
         default=-1,
     )
     history_lines = [
@@ -827,9 +823,7 @@ def _format_inline_markdown(value: str) -> str:
         key = f"\x00LINK{len(placeholders)}\x00"
         label = html.escape(match.group(1), quote=False)
         safe_url = html.escape(raw_url, quote=True)
-        placeholders[key] = (
-            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{label}</a>'
-        )
+        placeholders[key] = f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{label}</a>'
         return key
 
     value = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", preserve_link, value)

@@ -93,9 +93,7 @@ async def test_commercial_reply_bypasses_protocol_lookup_and_models(monkeypatch)
         "originating_channel": "chat",
         "thread_ids": ["thread-commercial"],
         "contact_ids": ["contact-commercial"],
-        "conversation_history": [
-            {"direction": "INCOMING", "text": "Quero falar com o Comercial", "id": "message-1"}
-        ],
+        "conversation_history": [{"direction": "INCOMING", "text": "Quero falar com o Comercial", "id": "message-1"}],
     }
 
     await webhooks._run_supervisor_for_hubspot_context(

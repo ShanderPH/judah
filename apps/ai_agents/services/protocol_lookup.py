@@ -200,9 +200,7 @@ class DjangoProtocolRepository:
                 Q(ticket_church__icontains=f"T{church_id}") | Q(ticket_church__iexact=church_id)
             ).order_by("-created_at")
         )
-        candidates = [
-            ticket for ticket in candidates if _church_id_from_ticket(ticket.ticket_church) == church_id
-        ]
+        candidates = [ticket for ticket in candidates if _church_id_from_ticket(ticket.ticket_church) == church_id]
         stage_ids = cls._latest_stage_ids([ticket.ticket_id for ticket in candidates])
         summaries: list[TicketSummary] = []
         for ticket in candidates:
@@ -381,9 +379,7 @@ class HubSpotProtocolClient:
                 max_results=max_results,
             )
             known_protocols = {ticket.protocol for ticket in tickets}
-            local_additions = [
-                ticket for ticket in local_tickets if ticket.protocol not in known_protocols
-            ]
+            local_additions = [ticket for ticket in local_tickets if ticket.protocol not in known_protocols]
             tickets.extend(local_additions[: max(0, max_results - len(tickets))])
             if local_additions:
                 logger.info(
@@ -570,8 +566,7 @@ class ProtocolConversationHandler:
             if str(message.get("direction") or "").upper() == "OUTGOING"
         ]
         return any(
-            "protocolo" in message
-            and ("id da igreja local" in message or "id numerico da igreja" in message)
+            "protocolo" in message and ("id da igreja local" in message or "id numerico da igreja" in message)
             for message in outgoing[-4:]
         )
 

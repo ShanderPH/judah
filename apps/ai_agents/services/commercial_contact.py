@@ -55,9 +55,7 @@ _AFFIRMATIVE_PATTERN = re.compile(
 
 def _normalize(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value.lower())
-    return " ".join(
-        "".join(char for char in normalized if not unicodedata.combining(char)).split()
-    )
+    return " ".join("".join(char for char in normalized if not unicodedata.combining(char)).split())
 
 
 def _recent_outgoing_text(context: dict[str, Any]) -> str:

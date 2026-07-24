@@ -109,7 +109,7 @@ def _schedule_customer_message_batch(
         started_raw = _decode_redis_value(client.get(started_key))
         try:
             started_at = float(started_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             started_at = now
         client.set(token_key, token, ex=_MESSAGE_BATCH_TTL_SECONDS)
         countdown = max(0.0, min(quiet_seconds, started_at + max_wait_seconds - now))
@@ -507,9 +507,7 @@ def request_human_handoff_task(
             context = asyncio.run(hydrate_ticket_context(str(ticket_id)))
             hydrated_thread_ids = context.get("thread_ids") or []
             session_id = (
-                f"hubspot-thread-{hydrated_thread_ids[0]}"
-                if hydrated_thread_ids
-                else f"hubspot-ticket-{ticket_id}"
+                f"hubspot-thread-{hydrated_thread_ids[0]}" if hydrated_thread_ids else f"hubspot-ticket-{ticket_id}"
             )
         else:
             raise ValueError("thread_id or ticket_id is required for human handoff.")
