@@ -8,18 +8,6 @@ from apps.ai_agents.utils.pricing import PRICING_PER_MILLION_TOKENS, calculate_c
 
 
 class TestCalculateCost:
-    def test_gpt56_luna_baseline(self) -> None:
-        cost = calculate_cost("gpt-5.6-luna", 1_000_000, 1_000_000)
-        assert cost == 11.0
-
-    def test_gpt56_luna_standard_context_pricing(self) -> None:
-        cost = calculate_cost("gpt-5.6-luna", 272_000, 1_000_000)
-        assert cost == 6.272
-
-    def test_gpt56_luna_long_context_pricing(self) -> None:
-        cost = calculate_cost("gpt-5.6-luna", 300_000, 1_000_000)
-        assert cost == 9.6
-
     def test_gpt55_baseline(self) -> None:
         cost = calculate_cost("gpt-5.5", 1_000_000, 1_000_000)
         assert cost == 35.0
@@ -67,7 +55,6 @@ class TestCalculateCost:
 
 class TestPricingTable:
     def test_has_canonical_models(self) -> None:
-        assert "gpt-5.6-luna" in PRICING_PER_MILLION_TOKENS
         assert "gpt-5.5" in PRICING_PER_MILLION_TOKENS
         assert "gpt-4o" in PRICING_PER_MILLION_TOKENS
         assert "gpt-4o-mini" in PRICING_PER_MILLION_TOKENS

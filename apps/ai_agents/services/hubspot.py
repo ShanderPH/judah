@@ -1054,65 +1054,9 @@ async def send_salomao_reply_to_hubspot_thread(
             return {"sent": False, "reason": exc.__class__.__name__}
 
 
-async def create_hubspot_thread_comment(
-    thread_id: str,
-    text: str,
-    *,
-    timeout_seconds: float = 20.0,
-) -> dict[str, Any]:
-    """Create an internal HubSpot observation without sending it to the visitor."""
-    normalized_thread_id = str(thread_id).strip()
-    normalized_text = text.strip()
-    if not normalized_thread_id:
-        return {"created": False, "reason": "missing_thread_id"}
-    if not normalized_text:
-        return {"created": False, "reason": "empty_comment"}
-
-    payload = {
-        "type": "COMMENT",
-        "text": normalized_text,
-        "richText": markdown_to_hubspot_rich_text(normalized_text),
-    }
-    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
-    async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
-        try:
-            response = await client.post(
-                f"{HUBSPOT_API_BASE}/conversations/v3/conversations/threads/{normalized_thread_id}/messages",
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            logger.info(
-                "hubspot_handoff_observation_created",
-                thread_id=normalized_thread_id,
-                message_id=data.get("id"),
-            )
-            return {
-                "created": True,
-                "thread_id": normalized_thread_id,
-                "message_id": data.get("id"),
-            }
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "hubspot_handoff_observation_http_error",
-                thread_id=normalized_thread_id,
-                status=exc.response.status_code,
-                body=exc.response.text[:300],
-            )
-            return {"created": False, "reason": f"http:{exc.response.status_code}"}
-        except httpx.HTTPError as exc:
-            logger.error(
-                "hubspot_handoff_observation_error",
-                thread_id=normalized_thread_id,
-                error=str(exc),
-            )
-            return {"created": False, "reason": exc.__class__.__name__}
-
-
 __all__ = [
     "build_conversation_context_from_hubspot_context",
     "build_salomao_prompt_from_hubspot_context",
-    "create_hubspot_thread_comment",
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "markdown_to_hubspot_rich_text",

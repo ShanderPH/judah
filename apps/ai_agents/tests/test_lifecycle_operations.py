@@ -9,11 +9,7 @@ from django.utils import timezone
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage, TriageDecision
 from apps.ai_agents.models import ConversationInstance
-from apps.ai_agents.services.handoff import (
-    assess_customer_tone,
-    build_handoff_package,
-    format_handoff_observation,
-)
+from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
 from apps.ai_agents.services.watchdog import run_lifecycle_watchdog
 
@@ -34,7 +30,6 @@ def test_build_handoff_package_includes_operational_context() -> None:
         hubspot_contact_id="contact-1",
         channel="chat",
         state=ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        last_message_id="m1",
     )
     context = ConversationContext(
         channel="hubspot",
@@ -59,44 +54,10 @@ def test_build_handoff_package_includes_operational_context() -> None:
     )
 
     assert package["hubspot_thread_id"] == "thread-1"
-    assert package["source_message_id"] == "m1"
     assert package["reason"] == "User requested a human."
     assert package["priority"] == "ALTA"
     assert package["tags"] == ["humano"]
     assert package["recent_messages"][0]["text"] == "Preciso falar com humano"
-    assert package["customer_tone"] == "Frustrado"
-    assert "Preciso falar com humano" in package["conversation_summary"]
-    assert "histórico" in package["recommended_next_step"]
-
-    observation = format_handoff_observation(package)
-    assert "## Resumo automático do Salomão para o N1" in observation
-    assert "**Tom percebido:** Frustrado" in observation
-    assert "**Resumo da conversa:**" in observation
-    assert "**Próximo passo recomendado:**" in observation
-    assert "**Prioridade da triagem:** ALTA" in observation
-
-
-def test_customer_tone_uses_observable_language_and_remains_conservative() -> None:
-    irritated_context = ConversationContext(
-        channel="hubspot",
-        session_id="tone-irritated",
-        recent_messages=[
-            ConversationMessage(
-                direction="INCOMING",
-                text="Isso é um absurdo, ninguém responde e essa porra não funciona.",
-            ),
-        ],
-    )
-    neutral_context = ConversationContext(
-        channel="hubspot",
-        session_id="tone-neutral",
-        recent_messages=[
-            ConversationMessage(direction="INCOMING", text="Preciso de ajuda para cadastrar um membro."),
-        ],
-    )
-
-    assert assess_customer_tone(irritated_context, None)[0] == "Irritado"
-    assert assess_customer_tone(neutral_context, None)[0] == "Calmo/neutro"
 
 
 @pytest.mark.django_db

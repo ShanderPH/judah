@@ -1,14 +1,14 @@
 """Heimdall — AI triage and routing agent for InChurch support."""
 
 from agno.agent import Agent
+from agno.models.openai import OpenAIChat
 
-from apps.ai_agents.agents.base import build_mini_model
 from apps.ai_agents.agents.tools.hubspot_tools import GetTicketInfo
 from apps.ai_agents.agents.tools.jira_tools import SearchJiraIssues
 
 heimdall_agent = Agent(
     name="Heimdall",
-    model=build_mini_model(),
+    model=OpenAIChat(id="gpt-5.5"),
     description="Agente de triagem inteligente para o suporte InChurch.",
     instructions=[
         "Você é Heimdall, o agente de triagem do suporte InChurch.",

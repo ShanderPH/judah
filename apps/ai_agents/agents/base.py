@@ -17,7 +17,7 @@ import structlog
 from agno.agent import Agent
 from agno.db.redis import RedisDb
 from agno.models.fallback import FallbackConfig
-from agno.models.openai import OpenAIResponses
+from agno.models.openai import OpenAIChat
 from django.conf import settings
 
 # ---------------------------------------------------------------------------
@@ -27,10 +27,8 @@ from django.conf import settings
 # Mantê-los como módulo-level constants permite trocar o provedor/modelo
 # em um só lugar sem tocar no corpo dos agentes.
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL_ID: str = os.getenv("DEFAULT_MODEL", "gpt-5.6-luna")
-DEFAULT_MINI_MODEL_ID: str = os.getenv("DEFAULT_MINI_MODEL", "gpt-5.6-luna")
-DEFAULT_REASONING_EFFORT: str = os.getenv("OPENAI_REASONING_EFFORT", "xhigh").strip().lower()
-_SUPPORTED_REASONING_EFFORTS: set[str] = {"none", "low", "medium", "high", "xhigh", "max"}
+DEFAULT_MODEL_ID: str = os.getenv("DEFAULT_MODEL", "gpt-5.5")
+DEFAULT_MINI_MODEL_ID: str = os.getenv("DEFAULT_MINI_MODEL", "gpt-5.5")
 
 
 def _get_openai_kwargs() -> dict[str, Any]:
@@ -47,29 +45,14 @@ def _get_openai_kwargs() -> dict[str, Any]:
     return kwargs
 
 
-def _get_reasoning_config() -> dict[str, str]:
-    if DEFAULT_REASONING_EFFORT not in _SUPPORTED_REASONING_EFFORTS:
-        supported = ", ".join(sorted(_SUPPORTED_REASONING_EFFORTS))
-        raise ValueError(f"OPENAI_REASONING_EFFORT must be one of: {supported}.")
-    return {"effort": DEFAULT_REASONING_EFFORT}
-
-
-def build_primary_model() -> OpenAIResponses:
+def build_primary_model() -> OpenAIChat:
     """Modelo primário (raciocínio complexo)."""
-    return OpenAIResponses(
-        id=DEFAULT_MODEL_ID,
-        reasoning=_get_reasoning_config(),
-        **_get_openai_kwargs(),
-    )
+    return OpenAIChat(id=DEFAULT_MODEL_ID, **_get_openai_kwargs())
 
 
-def build_mini_model() -> OpenAIResponses:
+def build_mini_model() -> OpenAIChat:
     """Modelo compacto para triagem e tarefas de alta frequência."""
-    return OpenAIResponses(
-        id=DEFAULT_MINI_MODEL_ID,
-        reasoning=_get_reasoning_config(),
-        **_get_openai_kwargs(),
-    )
+    return OpenAIChat(id=DEFAULT_MINI_MODEL_ID, **_get_openai_kwargs())
 
 
 @lru_cache(maxsize=4)
@@ -119,7 +102,7 @@ class BaseInChurchAgent(Agent):
     """Agente base para todos os agentes InChurch.
 
     Responsabilidades:
-    - Injetar GPT-5.6 Luna com reasoning xhigh como modelo primário e fallback padrão.
+    - Injetar GPT-5.5 como modelo primário e fallback padrão.
     - Conectar o armazenamento de sessão ao Redis usando o `session_id` do usuário Django.
     - Expor `user_metadata` para que sub-agentes possam personalizar respostas
       sem acessar o ORM diretamente (desacoplamento crítico em agentes assíncronos).

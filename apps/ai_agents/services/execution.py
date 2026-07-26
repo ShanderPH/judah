@@ -22,7 +22,7 @@ from apps.ai_agents.services.conversation_turn import (
     current_incoming_turn_audit,
     latest_incoming_message_id,
 )
-from apps.ai_agents.services.handoff import build_handoff_package, format_handoff_observation
+from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.instance_identity import conversation_idempotency_key, find_conversation_instance
 from apps.ai_agents.services.lifecycle import LifecycleEngine
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
@@ -297,60 +297,6 @@ async def send_reply_with_audit(
     return output
 
 
-def publish_handoff_observation(
-    *,
-    instance: ConversationInstance,
-    package: dict[str, Any],
-    agent_run: AgentRun | None = None,
-) -> dict[str, Any]:
-    """Publish one idempotent internal HubSpot observation for an N1 handoff."""
-    from apps.ai_agents.services.hubspot import create_hubspot_thread_comment
-
-    thread_id = str(instance.hubspot_thread_id or package.get("hubspot_thread_id") or "").strip()
-    if not thread_id:
-        return {"created": False, "reason": "missing_thread_id", "retryable": False}
-
-    observation = format_handoff_observation(package)
-    handoff_reference = (
-        package.get("source_message_id")
-        or instance.last_message_id
-        or instance.last_event_id
-        or instance.hubspot_ticket_id
-        or package.get("reason")
-        or "handoff"
-    )
-    reference_fingerprint = hashlib.sha256(str(handoff_reference).encode("utf-8")).hexdigest()[:20]
-    idempotency_key = f"handoff-observation:v1:{instance.pk}:{reference_fingerprint}"
-    prepared = _prepare_tool_call(
-        instance=instance,
-        tool_name="add_internal_note",
-        idempotency_key=idempotency_key,
-        input_payload={
-            "thread_id": thread_id,
-            "observation": _text_fingerprint(observation),
-        },
-        agent_run=agent_run,
-    )
-    if not prepared.should_execute:
-        return prepared.cached_output
-
-    try:
-        output = async_to_sync(create_hubspot_thread_comment)(thread_id, observation)
-        if not output.get("created"):
-            raise RuntimeError(str(output.get("reason") or "HubSpot internal observation failed."))
-    except Exception as exc:
-        _finish_tool_call(
-            prepared.audit_id,
-            output={},
-            succeeded=False,
-            error_message=str(exc),
-        )
-        raise
-
-    _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
-    return output
-
-
 def request_human_handoff(
     *,
     instance: ConversationInstance,
@@ -457,39 +403,6 @@ def request_human_handoff(
     if not output.get("route_updated"):
         raise RuntimeError("Human handoff did not complete its HubSpot routing effect.")
 
-    observation_output: dict[str, Any]
-    try:
-        observation_output = publish_handoff_observation(
-            instance=instance,
-            package=package,
-            agent_run=agent_run,
-        )
-    except Exception as exc:
-        observation_output = {
-            "created": False,
-            "reason": exc.__class__.__name__,
-            "retry_scheduled": False,
-        }
-        if instance.hubspot_thread_id or package.get("hubspot_thread_id"):
-            try:
-                from apps.ai_agents.tasks import publish_handoff_observation_task
-
-                publish_handoff_observation_task.delay(str(instance.pk))
-                observation_output["retry_scheduled"] = True
-            except Exception as scheduling_exc:
-                observation_output["retry_reason"] = scheduling_exc.__class__.__name__
-                logger.exception(
-                    "handoff_observation_retry_schedule_failed",
-                    conversation_instance_id=str(instance.pk),
-                )
-        logger.warning(
-            "handoff_observation_deferred",
-            conversation_instance_id=str(instance.pk),
-            retry_scheduled=observation_output["retry_scheduled"],
-            error=exc.__class__.__name__,
-        )
-
-    output = {**output, "observation": observation_output}
     engine.update_metadata(instance, human_handoff_dispatch=output)
 
     if instance.state != ConversationInstance.State.QUEUE_PENDING:
@@ -688,7 +601,6 @@ __all__ = [
     "ensure_conversation_instance",
     "handle_resolution_confirmation",
     "mark_retryable_failure",
-    "publish_handoff_observation",
     "record_supervisor_runs",
     "request_human_handoff",
     "send_reply_with_audit",

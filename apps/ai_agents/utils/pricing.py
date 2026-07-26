@@ -1,6 +1,6 @@
 """Tabela de preços e cálculo de custo por execução do pipeline.
 
-Fonte dos preços: documentação pública OpenAI (julho/2026). Valores em USD
+Fonte dos preços: documentação pública OpenAI (abril/2026). Valores em USD
 por 1 milhão de tokens. Mantenha este arquivo como a ÚNICA fonte de verdade
 para o cálculo — qualquer serviço que precise reportar custo deve chamar
 `calculate_cost()` em vez de replicar a tabela.
@@ -16,10 +16,6 @@ from decimal import Decimal
 _ONE_MILLION = Decimal("1000000")
 
 PRICING_PER_MILLION_TOKENS: dict[str, dict[str, Decimal]] = {
-    "gpt-5.6-luna": {
-        "input": Decimal("1.00"),
-        "output": Decimal("6.00"),
-    },
     "gpt-5.5": {
         "input": Decimal("5.00"),
         "output": Decimal("30.00"),
@@ -43,8 +39,6 @@ def _normalize_model_name(model_name: str) -> str:
     release do mesmo modelo.
     """
     lowered = (model_name or "").lower().strip()
-    if lowered.startswith("gpt-5.6-luna"):
-        return "gpt-5.6-luna"
     if lowered.startswith("gpt-5.5"):
         return "gpt-5.5"
     if lowered.startswith("gpt-4o-mini"):
@@ -58,7 +52,7 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> fl
     """Calcula o custo em USD de uma execução com base nos tokens consumidos.
 
     Args:
-        model_name: Nome do modelo (ex.: "gpt-5.6-luna", "gpt-4o" ou variantes
+        model_name: Nome do modelo (ex.: "gpt-5.5", "gpt-4o" ou variantes
             datadas como "gpt-4o-2024-08-06").
         input_tokens: Tokens de entrada (prompt).
         output_tokens: Tokens de saída (completion).
@@ -72,16 +66,8 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> fl
     if prices is None:
         return 0.0
 
-    input_rate = prices["input"]
-    output_rate = prices["output"]
-    # GPT-5.6 Luna prices the whole request at the long-context rates once
-    # the input exceeds 272K tokens.
-    if key == "gpt-5.6-luna" and input_tokens > 272_000:
-        input_rate *= Decimal("2")
-        output_rate *= Decimal("1.5")
-
-    input_cost = (Decimal(input_tokens) * input_rate) / _ONE_MILLION
-    output_cost = (Decimal(output_tokens) * output_rate) / _ONE_MILLION
+    input_cost = (Decimal(input_tokens) * prices["input"]) / _ONE_MILLION
+    output_cost = (Decimal(output_tokens) * prices["output"]) / _ONE_MILLION
     return float(input_cost + output_cost)
 
 

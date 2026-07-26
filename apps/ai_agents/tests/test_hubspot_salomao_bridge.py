@@ -20,7 +20,6 @@ from apps.ai_agents.services.hubspot import (
     _resolve_attachment_url,
     build_conversation_context_from_hubspot_context,
     build_salomao_prompt_from_hubspot_context,
-    create_hubspot_thread_comment,
     hydrate_thread_context,
     hydrate_ticket_context,
     send_salomao_reply_to_hubspot_thread,
@@ -715,55 +714,6 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
     assert "<ol><li>Acesse <strong>Financeiro</strong>.</li>" in payload["richText"]
     assert "<ul><li>O estorno depende do gateway.</li></ul>" in payload["richText"]
     assert "##" not in payload["richText"]
-
-
-@pytest.mark.asyncio
-async def test_create_thread_comment_publishes_internal_observation(monkeypatch) -> None:
-    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
-    response = MagicMock()
-    response.json.return_value = {"id": "comment-1"}
-    client = MagicMock()
-    client.post = AsyncMock(return_value=response)
-    observation = (
-        "## Resumo automático do Salomão para o N1\n\n"
-        "**Tom percebido:** Irritado\n\n"
-        "**Próximo passo recomendado:** Acolher e assumir o caso."
-    )
-
-    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
-        result = await create_hubspot_thread_comment("thread-1", observation)
-
-    assert result == {
-        "created": True,
-        "thread_id": "thread-1",
-        "message_id": "comment-1",
-    }
-    response.raise_for_status.assert_called_once()
-    payload = client.post.await_args.kwargs["json"]
-    assert payload["type"] == "COMMENT"
-    assert payload["text"] == observation
-    assert "<h4>Resumo automático do Salomão para o N1</h4>" in payload["richText"]
-    assert "recipients" not in payload
-    assert "senderActorId" not in payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error_kind", ["status", "network"])
-async def test_create_thread_comment_handles_http_errors(monkeypatch, error_kind: str) -> None:
-    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
-    request = httpx.Request("POST", "https://api.hubapi.com/messages")
-    if error_kind == "status":
-        response = httpx.Response(429, text="rate limit", request=request)
-        error: httpx.HTTPError = httpx.HTTPStatusError("limited", request=request, response=response)
-    else:
-        error = httpx.ConnectError("offline", request=request)
-    client = MagicMock()
-    client.post = AsyncMock(side_effect=error)
-
-    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
-        result = await create_hubspot_thread_comment("thread-1", "Resumo")
-
-    assert result["reason"] == ("http:429" if error_kind == "status" else "ConnectError")
 
 
 def test_markdown_to_hubspot_rich_text_escapes_raw_html() -> None:

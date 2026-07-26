@@ -138,7 +138,6 @@ class HandoffPackage(BaseModel):
     hubspot_thread_id: str | None = None
     hubspot_ticket_id: str | None = None
     hubspot_contact_id: str | None = None
-    source_message_id: str = ""
     channel: str = ""
     assigned_agent_id: str | None = None
     reason: str
@@ -147,10 +146,6 @@ class HandoffPackage(BaseModel):
     missing_data: list[str] = Field(default_factory=list)
     triage: dict[str, Any] | None = None
     ai_summary: str = ""
-    customer_tone: str = "Neutro"
-    customer_tone_context: str = ""
-    conversation_summary: str = ""
-    recommended_next_step: str = ""
     recent_messages: list[dict[str, Any]] = Field(default_factory=list)
     recommended_queue: str = "support_n1"
 

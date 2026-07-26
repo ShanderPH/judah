@@ -549,38 +549,6 @@ def request_human_handoff_task(
         raise self.retry(exc=exc, countdown=countdown) from exc
 
 
-@shared_task(
-    bind=True,
-    max_retries=3,
-    default_retry_delay=30,
-    name="ai_agents.publish_handoff_observation_task",
-)
-def publish_handoff_observation_task(self, instance_id: str) -> dict[str, Any]:
-    """Retry a failed HubSpot internal observation without repeating the handoff."""
-    from apps.ai_agents.models import ConversationInstance
-    from apps.ai_agents.services.execution import publish_handoff_observation
-
-    instance = ConversationInstance.objects.filter(pk=instance_id).first()
-    if instance is None:
-        return {"created": False, "reason": "instance_not_found", "retryable": False}
-
-    package = dict((instance.metadata or {}).get("handoff_package") or {})
-    if not package:
-        return {"created": False, "reason": "handoff_package_missing", "retryable": False}
-
-    try:
-        return publish_handoff_observation(instance=instance, package=package)
-    except Exception as exc:
-        countdown = min(30 * (2**self.request.retries), 300)
-        logger.warning(
-            "handoff_observation_retry",
-            conversation_instance_id=str(instance.pk),
-            retry=self.request.retries,
-            error=exc.__class__.__name__,
-        )
-        raise self.retry(exc=exc, countdown=countdown) from exc
-
-
 @shared_task(name="ai_agents.run_lifecycle_watchdog_task")
 def run_lifecycle_watchdog_task() -> dict[str, int]:
     """Detect stuck lifecycle instances on a periodic schedule."""
@@ -669,7 +637,6 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
 
 
 __all__ = [
-    "publish_handoff_observation_task",
     "request_human_handoff_task",
     "retry_failed_lifecycle_instances_task",
     "run_lifecycle_watchdog_task",
