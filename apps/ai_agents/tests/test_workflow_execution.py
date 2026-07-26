@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,8 +16,25 @@ from apps.ai_agents.services.execution import (
     HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION,
     apply_supervisor_result,
     handle_resolution_confirmation,
+    publish_handoff_observation,
 )
 from apps.support.models import NewConversation
+
+
+@pytest.fixture(autouse=True)
+def _mock_hubspot_internal_observation() -> Iterator[AsyncMock]:
+    observation = AsyncMock(
+        return_value={
+            "created": True,
+            "thread_id": "thread-1",
+            "message_id": "comment-1",
+        }
+    )
+    with patch(
+        "apps.ai_agents.services.hubspot.create_hubspot_thread_comment",
+        new=observation,
+    ):
+        yield observation
 
 
 def _context() -> ConversationContext:
@@ -174,7 +192,9 @@ async def test_each_customer_message_has_one_independent_reply() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> None:
+async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook(
+    _mock_hubspot_internal_observation: AsyncMock,
+) -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -206,6 +226,16 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> N
         assert text == HUMAN_HANDOFF_CONFIRMATION
         return {"sent": True, "message_id": "out-2"}
 
+    async def create_observation(*_args, **_kwargs):
+        effects.append("observation")
+        return {
+            "created": True,
+            "thread_id": "thread-1",
+            "message_id": "comment-1",
+        }
+
+    _mock_hubspot_internal_observation.side_effect = create_observation
+
     with (
         patch(
             "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
@@ -229,6 +259,10 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> N
     assert "handoff_package" in instance.metadata
     assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
     assert instance.metadata["human_handoff_dispatch"]["queue_admission"] == "hubspot_stage_webhook"
+    assert instance.metadata["human_handoff_dispatch"]["observation"]["created"] is True
+    assert instance.metadata["handoff_package"]["customer_tone"] == "Indeterminado"
+    assert instance.metadata["handoff_package"]["conversation_summary"]
+    assert instance.metadata["handoff_package"]["recommended_next_step"]
     assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
     assert await sync_to_async(
         ToolCallAuditLog.objects.filter(
@@ -236,7 +270,91 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook() -> N
             tool_name="assign_ticket_to_human_queue",
         ).exists
     )()
-    assert effects == ["reply", "route"]
+    assert effects == ["reply", "route", "observation"]
+
+
+@pytest.mark.django_db
+def test_handoff_observation_is_idempotent(_mock_hubspot_internal_observation: AsyncMock) -> None:
+    instance = _instance()
+    instance.state = ConversationInstance.State.HUMAN_HANDOFF_REQUESTED
+    instance.save(update_fields=["state", "updated_at"])
+    package = {
+        "hubspot_thread_id": "thread-1",
+        "source_message_id": "message-1",
+        "reason": "Customer explicitly requested human assistance.",
+        "priority": "ALTA",
+        "missing_data": [],
+        "customer_tone": "Calmo/neutro",
+        "customer_tone_context": "Sem sinais de irritação.",
+        "conversation_summary": "O cliente solicitou atendimento humano.",
+        "recommended_next_step": "Assumir a conversa e continuar pelo histórico.",
+    }
+
+    first = publish_handoff_observation(instance=instance, package=package)
+    instance.last_message_id = "message-2"
+    instance.save(update_fields=["last_message_id", "updated_at"])
+    second = publish_handoff_observation(instance=instance, package=package)
+
+    assert first["created"] is True
+    assert second == first
+    assert _mock_hubspot_internal_observation.await_count == 1
+    audit = ToolCallAuditLog.objects.get(instance=instance, tool_name="add_internal_note")
+    assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+    assert "conversation_summary" not in audit.input
+    assert audit.input["observation"]["sha256"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_observation_failure_never_cancels_novo_handoff() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir seu atendimento.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=["handoff_policy: explicit_human_request"],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir seu atendimento.",
+            confidence=1.0,
+        ),
+    )
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "reply-1"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(return_value={"updated": True}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.create_hubspot_thread_comment",
+            new=AsyncMock(return_value={"created": False, "reason": "http:503"}),
+        ),
+        patch("apps.ai_agents.tasks.publish_handoff_observation_task.delay") as retry_observation,
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Quero falar com uma pessoa",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
+    observation = instance.metadata["human_handoff_dispatch"]["observation"]
+    assert observation["created"] is False
+    assert observation["retry_scheduled"] is True
+    retry_observation.assert_called_once_with(str(instance.pk))
 
 
 @pytest.mark.django_db(transaction=True)

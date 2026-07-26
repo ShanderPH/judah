@@ -381,7 +381,7 @@ class SalomaoChatAgent(BaseInChurchAgent):
                 "Retorne ao Supervisor somente o draft estruturado e uma breve explicacao operacional.",
             ],
             tools=[self._chat_tool],
-            tool_choice={"type": "function", "function": {"name": "create_chat_draft"}},
+            tool_choice={"type": "function", "name": "create_chat_draft"},
             add_history_to_context=False,
             debug_mode=False,
             **kwargs,

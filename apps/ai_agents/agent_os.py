@@ -105,7 +105,7 @@ def build_agentos_supervisor_pipeline(_request_context):
             "Return the tool result exactly as structured JSON.",
         ],
         tools=[pipeline_tool],
-        tool_choice={"type": "function", "function": {"name": "run_salomao_supervisor_pipeline"}},
+        tool_choice={"type": "function", "name": "run_salomao_supervisor_pipeline"},
         markdown=False,
         debug_mode=False,
         telemetry=False,
