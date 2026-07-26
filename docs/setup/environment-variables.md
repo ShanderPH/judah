@@ -32,10 +32,11 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
-| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI para GPT-5.5. |
+| `OPENAI_API_KEY` | `apps/ai_agents/agents/base.py` | Chave da OpenAI usada pela Responses API. |
 | `ANTHROPIC_API_KEY` | `apps/ai_agents/agents/base.py` | Fallback opcional para modelos Anthropic. |
-| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-5.5`). |
-| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo de triagem/fallback (padrão: `gpt-5.5`). |
+| `DEFAULT_MODEL` | `apps/ai_agents/agents/base.py` | Modelo principal (padrão: `gpt-5.6-luna`). |
+| `DEFAULT_MINI_MODEL` | `apps/ai_agents/agents/base.py` | Modelo de triagem/fallback (padrão: `gpt-5.6-luna`). |
+| `OPENAI_REASONING_EFFORT` | `apps/ai_agents/agents/base.py` | Esforço de raciocínio da Responses API (padrão: `xhigh`). |
 | `PINECONE_API_KEY` | `apps/integrations/pinecone_client/client.py` | Chave da API Pinecone. |
 | `PINECONE_INDEX_NAME` | `apps/integrations/pinecone_client/client.py` | Nome do índice Pinecone (padrão: `inchurch-knowledge`). |
 | `PINECONE_HOST` | `apps/ai_agents/agents/rag.py` | URL do data-plane do Pinecone (evita adivinhar cloud/region). |
@@ -228,7 +229,7 @@ AGENT_STATUS_SYNC_ENABLED=true
 - `DJANGO_SECRET_KEY` é usada tanto pelo Django quanto pelo JWT; rotação invalida todas as sessões.
 - `AI_ROUTING_ENABLED=false` desmonta o router `/api/v1/ai/` por completo. O código usa `False` como padrão; `.env.example` foi ajustado para refletir isso.
 - Em `staging`, `AGENT_STATUS_SYNC_ENABLED` é sempre `false`: heartbeat, reconciliação e webhook não podem alterar `status_enum`. Alterações administrativas manuais continuam disponíveis.
-- `.env.example` foi atualizado com as variáveis documentadas acima. Verifique se o template local possui `HUBSPOT_N1_TEAM_ID`, `HUBSPOT_PORTAL_ID`, `JIRA_WEBHOOK_SECRET`, `PINECONE_HOST`, `PINECONE_CLOUD`, `PINECONE_REGION`, `PINECONE_DIMENSION`, `EMBEDDING_MODEL`, `DEFAULT_MODEL`, `DEFAULT_MINI_MODEL`, `USE_MOCK_HUBSPOT`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILES_SAMPLE_RATE` e `GIT_SHA`.
+- `.env.example` foi atualizado com as variáveis documentadas acima. Verifique se o template local possui `HUBSPOT_N1_TEAM_ID`, `HUBSPOT_PORTAL_ID`, `JIRA_WEBHOOK_SECRET`, `PINECONE_HOST`, `PINECONE_CLOUD`, `PINECONE_REGION`, `PINECONE_DIMENSION`, `EMBEDDING_MODEL`, `DEFAULT_MODEL`, `DEFAULT_MINI_MODEL`, `OPENAI_REASONING_EFFORT`, `USE_MOCK_HUBSPOT`, `SENTRY_TRACES_SAMPLE_RATE`, `SENTRY_PROFILES_SAMPLE_RATE` e `GIT_SHA`.
 
 ## Recomendações
 

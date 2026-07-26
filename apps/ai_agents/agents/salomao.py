@@ -1,14 +1,14 @@
 """Salomão — AI support agent for InChurch customers."""
 
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 
+from apps.ai_agents.agents.base import build_primary_model
 from apps.ai_agents.agents.tools.hubspot_tools import GetTicketInfo
 from apps.ai_agents.agents.tools.knowledge_tools import SearchKnowledgeBase
 
 salomao_agent = Agent(
     name="Salomão",
-    model=OpenAIChat(id="gpt-5.5"),
+    model=build_primary_model(),
     description="Assistente virtual da InChurch especializado em suporte ao cliente.",
     instructions=[
         "Você é Salomão, o assistente virtual da InChurch.",

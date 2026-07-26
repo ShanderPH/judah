@@ -3,6 +3,7 @@
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
 from django.test import override_settings
 
 from apps.ai_agents.agents import action, base
@@ -13,10 +14,11 @@ def test_openai_model_redis_and_fallback_builders(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "key")
     monkeypatch.setenv("OPENAI_ORG_ID", "org")
     monkeypatch.setenv("OPENAI_PROJECT_ID", "project")
-    with patch("apps.ai_agents.agents.base.OpenAIChat", side_effect=lambda **kwargs: kwargs):
+    with patch("apps.ai_agents.agents.base.OpenAIResponses", side_effect=lambda **kwargs: kwargs):
         primary = cast(dict[str, Any], base.build_primary_model())
         mini = cast(dict[str, Any], base.build_mini_model())
         assert primary["id"] == base.DEFAULT_MODEL_ID
+        assert primary["reasoning"] == {"effort": "xhigh"}
         assert mini["api_key"] == "key"
 
     with patch("apps.ai_agents.agents.base.RedisDb", return_value="redis") as redis_db:
@@ -29,6 +31,37 @@ def test_openai_model_redis_and_fallback_builders(monkeypatch) -> None:
     ):
         assert base._build_fallback_config() == "fallback"
     fallback.assert_called_once_with(on_error=["mini"], on_rate_limit=["mini"])
+
+
+def test_openai_responses_model_uses_luna_xhigh_and_responses_tool_choice() -> None:
+    model = base.build_primary_model()
+    params = model.get_request_params(
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        tool_choice={"type": "function", "name": "lookup"},
+    )
+
+    assert model.name == "OpenAIResponses"
+    assert model.id == "gpt-5.6-luna"
+    assert params["reasoning"] == {"effort": "xhigh"}
+    assert params["tool_choice"] == {"type": "function", "name": "lookup"}
+    assert params["tools"][0]["name"] == "lookup"
+
+
+def test_invalid_reasoning_effort_fails_fast() -> None:
+    with (
+        patch.object(base, "DEFAULT_REASONING_EFFORT", "extreme"),
+        pytest.raises(ValueError, match="OPENAI_REASONING_EFFORT"),
+    ):
+        base.build_primary_model()
 
 
 @override_settings(DEBUG=False)
