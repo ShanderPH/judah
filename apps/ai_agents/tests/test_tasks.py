@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
 from apps.ai_agents.tasks import (
+    publish_handoff_observation_task,
     request_human_handoff_task,
     retry_failed_lifecycle_instances_task,
     run_lifecycle_watchdog_task,
@@ -428,6 +429,34 @@ def test_handoff_task_retries_invalid_request() -> None:
     ):
         request_human_handoff_task.run(reason="missing identifiers")
     retry.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_handoff_observation_task_uses_persisted_package() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:observation-task",
+        hubspot_thread_id="observation-task",
+        state=ConversationInstance.State.QUEUE_PENDING,
+        metadata={
+            "handoff_package": {
+                "hubspot_thread_id": "observation-task",
+                "conversation_summary": "Cliente pediu ajuda.",
+                "recommended_next_step": "Assumir o atendimento.",
+            }
+        },
+    )
+    expected = {"created": True, "message_id": "comment-1"}
+
+    with patch(
+        "apps.ai_agents.services.execution.publish_handoff_observation",
+        return_value=expected,
+    ) as publish:
+        result = publish_handoff_observation_task.run(str(instance.pk))
+
+    assert result == expected
+    publish.assert_called_once()
+    assert publish.call_args.kwargs["instance"] == instance
+    assert publish.call_args.kwargs["package"]["conversation_summary"] == "Cliente pediu ajuda."
 
 
 def test_watchdog_task_maps_result() -> None:

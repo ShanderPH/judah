@@ -42,14 +42,14 @@ Backend unificado da InChurch: uma plataforma Django 5.2 que consolida suporte, 
                                                     │
                                                     ▼
                                              HeimdallTriage
-                                                (gpt-5.5)
+                                        (gpt-5.6-luna, xhigh)
                                                     │
                                                     ▼
                                              SalomaoChat adapter
                                                     │
                                                     ▼
                                               Salomao v1
-                                                (gpt-5.5)
+                                           (serviço externo)
 ```
 
 The production **Supervisor** calls Heimdall first to produce a structured `TriageResult`, then always delegates the customer answer to the official Salomao v1 adapter. Only `ESCALAR_IMEDIATAMENTE`, an unavailable v1 service, or a transfer requested by v1 enters human handoff. Sessions are persisted to Redis, keyed by `user-{id}` or `hubspot-ticket-{id}`.
@@ -181,8 +181,9 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `HUBSPOT_TICKET_CHURCH_PROPERTY` | HubSpot protocol lookup | Ticket property containing the local church ID; defaults to `codigo_de_igreja_local___ticket` |
 | `HUBSPOT_PORTAL_ID`             | Optional           | Used to build ticket URLs                               |
 | `SENTRY_DSN`                    | Recommended        | Auto-initialized if set                                 |
-| `DEFAULT_MODEL`                 | Optional           | Override `gpt-5.5`                                      |
-| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-5.5`                                      |
+| `DEFAULT_MODEL`                 | Optional           | Override `gpt-5.6-luna`                                 |
+| `DEFAULT_MINI_MODEL`            | Optional           | Override `gpt-5.6-luna`                                 |
+| `OPENAI_REASONING_EFFORT`       | Optional           | Reasoning da Responses API; padrão `xhigh`               |
 | `USE_MOCK_HUBSPOT`              | Dev only           | `True` bypasses signature verification (local simulator)|
 
 ---
@@ -217,7 +218,7 @@ OpenAPI docs: `http://localhost:8000/api/v1/docs`
 1. **Circuit breaker** — reject if the session has consumed >15k tokens (`TokenTrackingLog` aggregate). See Known Risks H4.
 2. **Greeting injection** — first-turn system rule prepended to Team instructions (per-request).
 3. **Deterministic chain** — Judah coordinates:
-   - `HeimdallTriageAgent` (gpt-5.5, `output_schema=TriageResult`) classifies the message.
+   - `HeimdallTriageAgent` (`gpt-5.6-luna`, Responses API, `xhigh`, `output_schema=TriageResult`) classifies the message.
    - `SalomaoChatAgent` sends the current customer turn, triage and normalized history to Salomao v1.
    - Judah preserves the complete Markdown response from v1.
    - `ESCALAR_IMEDIATAMENTE`, v1 unavailability, or a v1 transfer request triggers human handoff.
