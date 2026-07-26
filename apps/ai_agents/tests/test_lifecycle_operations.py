@@ -65,15 +65,15 @@ def test_build_handoff_package_includes_operational_context() -> None:
     assert package["tags"] == ["humano"]
     assert package["recent_messages"][0]["text"] == "Preciso falar com humano"
     assert package["customer_tone"] == "Frustrado"
-    assert "Preciso falar com humano" in package["conversation_summary"]
+    assert "pediu continuidade com um atendente humano" in package["conversation_summary"]
     assert "histórico" in package["recommended_next_step"]
 
     observation = format_handoff_observation(package)
     assert "## Resumo automático do Salomão para o N1" in observation
-    assert "**Tom percebido:** Frustrado" in observation
+    assert "**Tom do cliente:** Frustrado" in observation
     assert "**Resumo da conversa:**" in observation
     assert "**Próximo passo recomendado:**" in observation
-    assert "**Prioridade da triagem:** ALTA" in observation
+    assert "**Prioridade da triagem:** Alta" in observation
 
 
 def test_customer_tone_uses_observable_language_and_remains_conservative() -> None:
@@ -95,8 +95,108 @@ def test_customer_tone_uses_observable_language_and_remains_conservative() -> No
         ],
     )
 
-    assert assess_customer_tone(irritated_context, None)[0] == "Irritado"
+    assert assess_customer_tone(irritated_context, None)[0] == "Irritado/agressivo"
     assert assess_customer_tone(neutral_context, None)[0] == "Calmo/neutro"
+
+
+@pytest.mark.django_db
+def test_handoff_observation_synthesizes_long_event_conversation_for_n1() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:event-handoff",
+        hubspot_thread_id="event-handoff",
+        hubspot_ticket_id="ticket-event-handoff",
+        channel="chat",
+        state=ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        last_message_id="event-message-6",
+    )
+    context = ConversationContext(
+        channel="hubspot",
+        session_id="event-handoff",
+        recent_messages=[
+            ConversationMessage(
+                direction="INCOMING",
+                text="Quero criar um ingresso pago para o evento de Natal.",
+            ),
+            ConversationMessage(
+                direction="INCOMING",
+                text="Quero limitar a 200 ingressos, aceitar PIX e cartão e definir uma data final.",
+            ),
+            ConversationMessage(
+                direction="INCOMING",
+                text="Preciso pedir dados do participante e tamanho de camiseta na inscrição.",
+            ),
+            ConversationMessage(
+                direction="OUTGOING",
+                text=(
+                    "### Como configurar os campos da inscrição\n"
+                    "1. Acesse o **Painel v2** e vá em: **Programação > Eventos**.\n"
+                    "2. Abra o evento e configure todos os passos detalhados."
+                ),
+            ),
+            ConversationMessage(
+                direction="INCOMING",
+                text=(
+                    "Quero que a pessoa receba uma confirmação e o ingresso depois do pagamento. "
+                    "Também preciso saber como fazer o estorno e registrar o cancelamento."
+                ),
+            ),
+            ConversationMessage(
+                direction="INCOMING",
+                text=(
+                    "Obrigado pelas orientações, mas ainda não consegui concluir e estou ficando frustrado. "
+                    "Quero falar com um atendente humano agora, por favor."
+                ),
+                message_id="event-message-6",
+            ),
+        ],
+    )
+    triage = TriageDecision(
+        rota="ESCALAR_IMEDIATAMENTE",
+        prioridade="MEDIA",
+        sentimento="negativo",
+        tags=["explicit_human_request"],
+    )
+
+    package = build_handoff_package(
+        instance=instance,
+        reason="User requested a human.",
+        conversation_context=context,
+        triage_decision=triage,
+        ai_summary=(
+            "### Como configurar os campos da inscrição\n"
+            "1. Acesse o **Painel v2** e siga uma resposta longa que não deve ser copiada."
+        ),
+    )
+
+    assert package["customer_tone"] == "Frustrado, porém cordial"
+    assert package["customer_tone_context"] == (
+        "O cliente relata dificuldade para concluir, mas mantém uma comunicação respeitosa."
+    )
+    summary = package["conversation_summary"]
+    assert "ingresso pago para o evento de Natal" in summary
+    assert "200 ingressos" in summary
+    assert "PIX e cartão" in summary
+    assert "dados da inscrição" in summary
+    assert "envio automático" in summary
+    assert "estorno" in summary
+    assert "pediu continuidade com um atendente humano" in summary
+    assert len(summary) <= 900
+    assert "###" not in summary
+    assert "**" not in summary
+    assert "O Salomão já respondeu" not in summary
+
+    next_step = package["recommended_next_step"]
+    assert "configuração do ingresso" in next_step
+    assert "formas de pagamento e período de vendas" in next_step
+    assert "campos da inscrição e comunicação automática" in next_step
+    assert "elegibilidade do estorno" in next_step
+    assert "sem pedir" not in next_step
+
+    observation = format_handoff_observation(package)
+    assert "**Tom do cliente:** Frustrado, porém cordial" in observation
+    assert "**Prioridade da triagem:** Média" in observation
+    assert "_Observação interna gerada" not in observation
+    assert "### Como configurar" not in observation
 
 
 @pytest.mark.django_db
