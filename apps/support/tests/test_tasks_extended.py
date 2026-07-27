@@ -78,6 +78,30 @@ def test_matchmaker_assign_task_paths() -> None:
         task_matchmaker_assign_single.run("ticket-1")
 
 
+def test_matchmaker_off_hours_is_an_explanatory_info_not_an_error() -> None:
+    lock = Mock()
+    lock.acquire.return_value = True
+    with (
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.availability_runtime.may_assign", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
+        patch("apps.support.matchmaker_service.enqueue_new_ticket", return_value=SimpleNamespace()),
+        patch("apps.support.sat_service.sat_heartbeat", return_value={"skipped_off_hours": True}),
+        patch("apps.support.tasks.logger") as log,
+    ):
+        assert task_matchmaker_assign_single.run("ticket-off-hours") is False
+
+    log.info.assert_called_once_with(
+        "task_matchmaker_assignment_blocked_by_availability_reconciliation",
+        ticket_id="ticket-off-hours",
+        reason="skipped_off_hours",
+        expected=True,
+        action="queue_preserved_for_later_assignment",
+        retryable=False,
+    )
+    log.warning.assert_not_called()
+
+
 def test_matchmaker_drain_task_paths() -> None:
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=False):
         assert task_matchmaker_drain_queue.run() == {"skipped_off_hours": True}

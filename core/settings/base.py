@@ -174,6 +174,13 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_SOFT_TIME_LIMIT = 300
 CELERY_TASK_TIME_LIMIT = 600
+# Preserve Django/structlog's JSON handlers inside workers. Celery otherwise
+# removes the root handlers and wraps application INFO records in its plain
+# stderr formatter, which Railway misclassifies as severity=error.
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+CELERY_WORKER_REDIRECT_STDOUTS = True
+CELERY_WORKER_REDIRECT_STDOUTS_LEVEL = "INFO"
+CELERY_WORKER_LOG_COLOR = False
 
 # Dedicated queue for AI supervisor pipeline. Keeps long-running LLM
 # workloads isolated from the latency-sensitive support / matchmaker

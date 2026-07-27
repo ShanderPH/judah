@@ -148,7 +148,8 @@ class BaseInChurchAgent(Agent):
         # dinâmicas (que referenciam user_metadata) possam ser construídas
         # nas sub-classes antes de chamar super().
         self.user_metadata = user_metadata
-        self._agent_logger = structlog.get_logger(self.__class__.__name__).bind(
+        self._agent_logger = structlog.get_logger(__name__).bind(
+            agent_name=self.__class__.__name__,
             session_id=session_id,
             user_id=user_metadata.get("user_id"),
             church_id=user_metadata.get("church_id"),

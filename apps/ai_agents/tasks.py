@@ -287,12 +287,20 @@ def run_supervisor_pipeline_task(
         succeeded = True
     except Exception as exc:
         countdown = min(30 * (2**self.request.retries), 300)
-        logger.warning(
-            "supervisor_pipeline_retry",
+        max_retries = int(self.max_retries or 0)
+        will_retry = self.request.retries < max_retries
+        log_method = logger.warning if will_retry else logger.error
+        log_method(
+            "supervisor_pipeline_retry_scheduled" if will_retry else "supervisor_pipeline_retries_exhausted",
             ticket_id=ticket_id,
-            retry=self.request.retries,
-            countdown=countdown,
+            attempt_number=self.request.retries + 1,
+            max_attempts=max_retries + 1,
+            next_attempt_number=self.request.retries + 2 if will_retry else None,
+            countdown_seconds=countdown if will_retry else None,
             error=str(exc),
+            error_type=type(exc).__name__,
+            action="celery_retry_scheduled" if will_retry else "task_will_fail",
+            retryable=will_retry,
         )
         raise self.retry(exc=exc, countdown=countdown) from exc
     finally:
@@ -421,12 +429,21 @@ def run_salomao_v1_thread_pipeline_task(
         succeeded = True
     except Exception as exc:
         countdown = min(30 * (2**self.request.retries), 300)
-        logger.warning(
-            "supervisor_thread_retry",
+        max_retries = int(self.max_retries or 0)
+        will_retry = self.request.retries < max_retries
+        log_method = logger.warning if will_retry else logger.error
+        log_method(
+            "supervisor_thread_retry_scheduled" if will_retry else "supervisor_thread_retries_exhausted",
             thread_id=thread_id,
-            retry=self.request.retries,
-            countdown=countdown,
+            ticket_id=ticket_id or None,
+            attempt_number=self.request.retries + 1,
+            max_attempts=max_retries + 1,
+            next_attempt_number=self.request.retries + 2 if will_retry else None,
+            countdown_seconds=countdown if will_retry else None,
             error=str(exc),
+            error_type=type(exc).__name__,
+            action="celery_retry_scheduled" if will_retry else "task_will_fail",
+            retryable=will_retry,
         )
         raise self.retry(exc=exc, countdown=countdown) from exc
     finally:

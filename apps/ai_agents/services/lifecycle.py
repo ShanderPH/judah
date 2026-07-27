@@ -199,6 +199,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.QUEUE_PENDING: {
+        ConversationInstance.State.CONTEXT_HYDRATING,
         ConversationInstance.State.HUMAN_ASSIGNED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
@@ -474,8 +475,10 @@ class LifecycleEngine:
                         source_event_id=event.source_event_id,
                     )
                 elif decision.route != "IGNORE":
-                    can_reopen_terminal = event.event_type == "ticket_entered_n1" or (
-                        event.event_type == "conversation_message_received" and event.direction == "INCOMING"
+                    can_reopen_terminal = (
+                        event.event_type == "ticket_entered_n1"
+                        or decision.route in {"AI_TRIAGE", "AI_SERVICE"}
+                        or (event.event_type == "conversation_message_received" and event.direction == "INCOMING")
                     )
                     self.transition(
                         instance,
@@ -703,7 +706,11 @@ class LifecycleEngine:
                 return instance, False
 
         try:
-            return ConversationInstance.objects.create(idempotency_key=idempotency_key, **defaults), True
+            # The savepoint is required because this method runs inside the
+            # outer lifecycle transaction. Catching an IntegrityError without
+            # it leaves that outer transaction unusable for the recovery read.
+            with transaction.atomic():
+                return ConversationInstance.objects.create(idempotency_key=idempotency_key, **defaults), True
         except IntegrityError:
             instance = ConversationInstance.objects.select_for_update().get(idempotency_key=idempotency_key)
             return instance, False

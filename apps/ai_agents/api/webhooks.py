@@ -52,6 +52,7 @@ from apps.ai_agents.services.hubspot import (
 )
 from apps.ai_agents.services.instance_identity import find_conversation_instance
 from apps.ai_agents.services.lifecycle import (
+    TERMINAL_STATES,
     InvalidStateTransitionError,
     LifecycleEngine,
     is_lifecycle_schema_ready,
@@ -421,8 +422,12 @@ def _sanitize_latest_incoming_customer_text(context: dict[str, Any]) -> tuple[di
 
 
 @sync_to_async
-def _prepare_instance_for_supervisor(instance: ConversationInstance) -> None:
-    """Refresh a retryable instance so the worker can restart hydration."""
+def _prepare_instance_for_supervisor(
+    instance: ConversationInstance,
+    *,
+    allow_verified_route_reopen: bool = False,
+) -> None:
+    """Prepare an instance after the current HubSpot AI route is verified."""
     instance.refresh_from_db()
     if instance.state == ConversationInstance.State.FAILED_RETRYABLE:
         LifecycleEngine().transition(
@@ -431,6 +436,26 @@ def _prepare_instance_for_supervisor(instance: ConversationInstance) -> None:
             reason="Retry worker restarted context hydration.",
             actor_type="retry_worker",
         )
+        return
+    if allow_verified_route_reopen and instance.state in TERMINAL_STATES:
+        LifecycleEngine().transition(
+            instance,
+            ConversationInstance.State.CONTEXT_HYDRATING,
+            reason="Current HubSpot route and customer turn reopened AI processing.",
+            actor_type="supervisor_worker",
+            allow_terminal_reopen=True,
+        )
+        instance.failure_count = 0
+        instance.current_error = ""
+        instance.next_retry_at = None
+        instance.save(
+            update_fields=[
+                "failure_count",
+                "current_error",
+                "next_retry_at",
+                "updated_at",
+            ]
+        )
 
 
 @sync_to_async
@@ -438,7 +463,7 @@ def _waiting_turn_already_has_reply(instance: ConversationInstance) -> bool:
     """Avoid invoking agents again for a customer turn already answered."""
     instance.refresh_from_db()
     turn_id = instance.last_message_id or instance.last_event_id
-    if instance.state != ConversationInstance.State.WAITING_FOR_CUSTOMER or not turn_id:
+    if not turn_id:
         return False
     return ToolCallAuditLog.objects.filter(
         instance=instance,
@@ -470,8 +495,20 @@ def _mark_pipeline_failure(
 ) -> None:
     """Correlate uncaught worker failures with the lifecycle retry budget."""
     instance = find_conversation_instance(thread_id=thread_id, ticket_id=ticket_id)
-    if instance is not None and instance.state != ConversationInstance.State.FAILED_RETRYABLE:
-        mark_retryable_failure(instance, error)
+    if instance is None or instance.state == ConversationInstance.State.FAILED_RETRYABLE:
+        return
+    if instance.state in TERMINAL_STATES:
+        logger.warning(
+            "pipeline_failure_terminal_instance_unchanged",
+            conversation_instance_id=str(instance.pk),
+            ticket_id=ticket_id,
+            thread_id=thread_id,
+            state=instance.state,
+            original_error=str(error),
+            original_error_type=type(error).__name__,
+        )
+        return
+    mark_retryable_failure(instance, error)
 
 
 async def _resume_pending_effect_for_context(
@@ -536,10 +573,16 @@ async def _run_supervisor_for_hubspot_context(
     ticket_id: str | None = None,
     is_off_hours: bool = False,
     source_instance_id: str | None = None,
+    verified_ai_route: bool = False,
 ) -> None:
     """Run the backend-authoritative HubSpot workflow."""
     incoming_prompt = build_salomao_prompt_from_hubspot_context(context)
     if not incoming_prompt:
+        history = context.get("conversation_history") or []
+        latest_content_message = next(
+            (item for item in reversed(history) if str(item.get("text") or "").strip() or item.get("attachments")),
+            None,
+        )
         await _suppress_stale_processing_instance(
             context,
             ticket_id=ticket_id,
@@ -549,6 +592,13 @@ async def _run_supervisor_for_hubspot_context(
             "supervisor_hubspot_no_new_incoming_message",
             ticket_id=ticket_id,
             session_id=session_id,
+            history_count=len(history),
+            latest_message_direction=(
+                str(latest_content_message.get("direction") or "").upper() if latest_content_message else None
+            ),
+            reason="latest_content_message_is_not_incoming",
+            action="safe_noop_without_model_call",
+            retryable=False,
         )
         return
 
@@ -557,7 +607,6 @@ async def _run_supervisor_for_hubspot_context(
         ticket_id=ticket_id,
         session_id=session_id,
     )
-    await _prepare_instance_for_supervisor(instance)
 
     if await _waiting_turn_already_has_reply(instance):
         logger.info(
@@ -567,6 +616,10 @@ async def _run_supervisor_for_hubspot_context(
             message_id=instance.last_message_id or None,
         )
         return
+    await _prepare_instance_for_supervisor(
+        instance,
+        allow_verified_route_reopen=verified_ai_route,
+    )
 
     latest_customer_text = _latest_incoming_customer_text(context)
     if latest_customer_text and await sync_to_async(handle_resolution_confirmation)(instance, latest_customer_text):
@@ -763,6 +816,7 @@ async def _run_supervisor_pipeline(
             ticket_id=ticket_id,
             is_off_hours=is_off_hours,
             source_instance_id=source_instance_id,
+            verified_ai_route=True,
         )
     except Exception as exc:
         thread_ids = context.get("thread_ids") or []
@@ -771,11 +825,13 @@ async def _run_supervisor_pipeline(
             thread_id=str(thread_ids[0]) if thread_ids else None,
             error=exc,
         )
-        logger.error(
-            "supervisor_pipeline_failed",
+        logger.warning(
+            "supervisor_pipeline_attempt_failed",
             ticket_id=ticket_id,
             error=str(exc),
             error_type=type(exc).__name__,
+            action="propagate_to_celery_retry",
+            retryable=True,
         )
         raise
 
@@ -825,14 +881,18 @@ async def _run_salomao_v1_thread_pipeline(
             session_id=session_id,
             ticket_id=ticket_id,
             is_off_hours=off_hours_reason() is not None,
+            verified_ai_route=True,
         )
     except Exception as exc:
         await _mark_pipeline_failure(thread_id=thread_id, error=exc)
-        logger.error(
-            "supervisor_thread_pipeline_failed",
+        logger.warning(
+            "supervisor_thread_pipeline_attempt_failed",
             thread_id=thread_id,
+            ticket_id=(context or {}).get("ticket_id") or None,
             error=str(exc),
             error_type=type(exc).__name__,
+            action="propagate_to_celery_retry",
+            retryable=True,
         )
         raise
 

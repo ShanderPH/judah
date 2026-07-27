@@ -234,6 +234,39 @@ class TestProcessWebhookEvent:
         assert event.processed is True
         assert event.retry_count == 0
 
+    def test_lifecycle_failure_log_keeps_ticket_and_recovery_context(self) -> None:
+        event = WebhookEvent.objects.create(
+            event_type="ticket.propertyChange",
+            object_id="ticket-observable",
+            property_name="hs_pipeline_stage",
+            property_value="ai-new",
+            payload={
+                "eventId": "evt-observable",
+                "objectId": "ticket-observable",
+                "propertyName": "hs_pipeline_stage",
+                "propertyValue": "ai-new",
+            },
+        )
+
+        with (
+            patch("apps.ai_agents.services.lifecycle.is_lifecycle_schema_ready", return_value=True),
+            patch(
+                "apps.ai_agents.services.lifecycle.record_lifecycle_for_webhook_event",
+                side_effect=RuntimeError("lifecycle unavailable"),
+            ),
+            patch("apps.webhooks.handlers.hubspot_handler.handle_hubspot_event") as handler,
+            patch("apps.webhooks.services.logger") as log,
+        ):
+            assert process_webhook_event(event.pk) is True
+
+        handler.assert_called_once_with(event)
+        failure = log.warning.call_args_list[0]
+        assert failure.args == ("webhook_event_lifecycle_record_failed",)
+        assert failure.kwargs["ticket_id"] == "ticket-observable"
+        assert failure.kwargs["property_name"] == "hs_pipeline_stage"
+        assert failure.kwargs["deterministic_handler_continues"] is True
+        assert failure.kwargs["action"] == "continue_without_lifecycle_projection"
+
     @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
     def test_lifecycle_ai_route_controls_dispatch(self, mock_pipeline) -> None:
         event = WebhookEvent.objects.create(
