@@ -185,6 +185,7 @@ CELERY_TASK_ROUTES = {
     "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
     "ai_agents.run_salomao_v1_thread_pipeline_task": {"queue": "ai_tasks"},
     "ai_agents.request_human_handoff_task": {"queue": "ai_tasks"},
+    "ai_agents.publish_handoff_observation_task": {"queue": "ai_tasks"},
     "ai_agents.retry_failed_lifecycle_instances_task": {"queue": "ai_tasks"},
     "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }

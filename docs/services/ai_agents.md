@@ -24,14 +24,14 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 
 ### `HeimdallTriageAgent`
 
-- Modelo: `DEFAULT_MINI_MODEL` (gpt-5.5).
+- Modelo: `DEFAULT_MINI_MODEL` (`gpt-5.6-luna`, Responses API, reasoning `xhigh`).
 - Saída estruturada: `TriageResult` (rota, prioridade, tags, dados faltantes,
   sentimento, confiança, evidências e versão da política).
 - Sem histórico.
 
 ### `KnowledgeRagAgent`
 
-- Modelo: `DEFAULT_MODEL` (gpt-5.5).
+- Modelo: `DEFAULT_MODEL` (`gpt-5.6-luna`, Responses API, reasoning `xhigh`).
 - Conectado ao Pinecone via `Knowledge` do Agno.
 - Busca automática habilitada.
 - Encerra com `<REQUIRES_ESCALATION>` quando não encontra resposta.
