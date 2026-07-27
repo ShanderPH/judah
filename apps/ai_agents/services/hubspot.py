@@ -36,6 +36,8 @@ from apps.ai_agents.services.conversation_turn import (
     CURRENT_CUSTOMER_TURN_MARKER,
     current_incoming_turn,
     current_incoming_turn_text,
+    incoming_message_id,
+    latest_incoming_message_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -199,6 +201,8 @@ async def _fetch_conversation_history(
     for raw in payload.get("results", []):
         senders = raw.get("senders") or []
         recipients = raw.get("recipients") or []
+        client = raw.get("client") if isinstance(raw.get("client"), dict) else {}
+        integration_app_id = client.get("integrationAppId")
         messages.append(
             {
                 "id": raw.get("id"),
@@ -212,10 +216,27 @@ async def _fetch_conversation_history(
                 "senders": senders,
                 "recipients": recipients,
                 "attachments": raw.get("attachments") or [],
+                "client_type": str(client.get("clientType") or ""),
+                "integration_app_id": str(integration_app_id) if integration_app_id is not None else None,
                 "raw": raw,
             }
         )
     return messages
+
+
+def _conversation_message_sources(messages: list[dict[str, Any]]) -> list[dict[str, str | None]]:
+    """Return distinct PII-free HubSpot client origins for structured logs."""
+    sources = {
+        (
+            str(message.get("client_type") or "UNKNOWN"),
+            str(message["integration_app_id"]) if message.get("integration_app_id") is not None else None,
+        )
+        for message in messages
+    }
+    return [
+        {"client_type": client_type, "integration_app_id": integration_app_id}
+        for client_type, integration_app_id in sorted(sources, key=lambda item: (item[0], item[1] or ""))
+    ]
 
 
 def _image_mime_type(content: bytes) -> str | None:
@@ -445,22 +466,67 @@ async def update_hubspot_ticket_route(
     stage_id: str,
     *,
     pipeline_id: str | None = None,
+    owner_id: str | None = None,
+    eligibility_thread_id: str | None = None,
+    expected_customer_turn_id: str | None = None,
     timeout_seconds: float = 20.0,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
-    """Move a ticket to a stage and, when provided, to another pipeline."""
+    """Update a ticket route after an optional fresh Salomao eligibility check."""
+    result_route = {
+        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+        "stage_id": str(stage_id),
+        **({"owner_id": str(owner_id)} if owner_id is not None else {}),
+    }
     if USE_MOCK_HUBSPOT:
         return {
             "updated": True,
             "ticket_id": str(ticket_id),
-            **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-            "stage_id": str(stage_id),
+            **result_route,
             "attempts": 1,
         }
+
+    if eligibility_thread_id:
+        fresh_context = await hydrate_thread_context(
+            eligibility_thread_id,
+            timeout_seconds=timeout_seconds,
+        )
+        if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
+            return {
+                "updated": False,
+                "suppressed": False,
+                "retryable": True,
+                "ticket_id": str(ticket_id),
+                **result_route,
+                "reason": "eligibility_refresh_failed",
+            }
+        eligibility = evaluate_salomao_ticket_eligibility(fresh_context)
+        if not eligibility["eligible"]:
+            return {
+                "updated": False,
+                "suppressed": not bool(eligibility["retryable"]),
+                "retryable": bool(eligibility["retryable"]),
+                "ticket_id": str(ticket_id),
+                **result_route,
+                "reason": str(eligibility["reason"]),
+            }
+        if expected_customer_turn_id:
+            fresh_turn_id = latest_incoming_message_id(fresh_context)
+            if fresh_turn_id != expected_customer_turn_id:
+                return {
+                    "updated": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "ticket_id": str(ticket_id),
+                    **result_route,
+                    "reason": "customer_turn_changed",
+                }
 
     properties = {"hs_pipeline_stage": str(stage_id)}
     if pipeline_id:
         properties["hs_pipeline"] = str(pipeline_id)
+    if owner_id is not None:
+        properties["hubspot_owner_id"] = str(owner_id)
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
         for attempt in range(1, max_attempts + 1):
@@ -478,13 +544,13 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     attempts=attempt,
                 )
                 return {
                     "updated": True,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                 }
             except httpx.HTTPStatusError as exc:
@@ -493,14 +559,14 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     status=exc.response.status_code,
                     attempts=attempt,
                 )
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                     "reason": f"http:{exc.response.status_code}",
                 }
@@ -513,14 +579,14 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     error_type=type(exc).__name__,
                     attempts=attempt,
                 )
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                     "reason": type(exc).__name__,
                 }
@@ -528,8 +594,7 @@ async def update_hubspot_ticket_route(
     return {
         "updated": False,
         "ticket_id": str(ticket_id),
-        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-        "stage_id": str(stage_id),
+        **result_route,
         "attempts": max_attempts,
         "reason": "unknown",
     }
@@ -666,6 +731,7 @@ async def hydrate_ticket_context(
         "hubspot_context_hydrated",
         ticket_id=ticket_id,
         history_count=len(context["conversation_history"]),
+        message_sources=_conversation_message_sources(context["conversation_history"]),
         owner_id=context["owner_id"] or None,
         errors=errors or None,
     )
@@ -753,6 +819,7 @@ async def hydrate_thread_context(
         thread_id=thread_id,
         ticket_id=context["ticket_id"] or None,
         history_count=len(context["conversation_history"]),
+        message_sources=_conversation_message_sources(context["conversation_history"]),
         errors=errors or None,
     )
     return context
@@ -761,6 +828,142 @@ async def hydrate_thread_context(
 def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
     turn = current_incoming_turn(context)
     return turn[-1] if turn else None
+
+
+def _configured_salomao_sender_actor_id() -> str:
+    return str(
+        os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID") or getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or ""
+    ).strip()
+
+
+def _message_is_from_human_agent(message: dict[str, Any]) -> bool:
+    """Identify an outgoing HubSpot agent message that was not sent by Salomao."""
+    sender = (message.get("senders") or [{}])[0]
+    actor_id = str(sender.get("actorId") or message.get("sender") or "").strip()
+    actor_type = str(sender.get("actorType") or sender.get("type") or "").strip().upper()
+    configured_sender = _configured_salomao_sender_actor_id()
+    if configured_sender and actor_id == configured_sender:
+        return False
+    return actor_id.upper().startswith("A-") or actor_type in {"AGENT", "USER"}
+
+
+def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed unless this ticket is still in Salomao's exclusive route."""
+    expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "") or "").strip()
+    expected_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "") or "").strip()
+    pipeline = str(context.get("pipeline") or "").strip()
+    stage = str(context.get("pipeline_stage") or "").strip()
+
+    if not expected_pipeline or not expected_stage:
+        return {
+            "eligible": False,
+            "reason": "ai_route_not_configured",
+            "retryable": False,
+        }
+    if not pipeline or not stage:
+        return {
+            "eligible": False,
+            "reason": "ticket_route_unavailable",
+            "retryable": True,
+        }
+    if pipeline != expected_pipeline:
+        return {
+            "eligible": False,
+            "reason": "ticket_left_ai_pipeline",
+            "retryable": False,
+        }
+    if stage != expected_stage:
+        return {
+            "eligible": False,
+            "reason": "ticket_left_ai_stage",
+            "retryable": False,
+        }
+
+    current_owner = str(context.get("owner_id") or "").strip()
+    if current_owner:
+        return {
+            "eligible": False,
+            "reason": "ticket_owned_by_human",
+            "retryable": False,
+        }
+
+    # An unassigned ticket can still be answered manually from the inbox.
+    # Any human participation takes precedence over an already-running AI task.
+    latest_outgoing = next(
+        (
+            message
+            for message in reversed(context.get("conversation_history") or [])
+            if str(message.get("direction") or "").upper() == "OUTGOING"
+        ),
+        None,
+    )
+    if latest_outgoing is not None and _message_is_from_human_agent(latest_outgoing):
+        return {
+            "eligible": False,
+            "reason": "human_agent_participating",
+            "retryable": False,
+        }
+
+    return {
+        "eligible": True,
+        "reason": "eligible",
+        "retryable": False,
+    }
+
+
+async def refresh_salomao_reply_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Revalidate provider state immediately before a customer-visible write."""
+    original_latest = _latest_incoming_message(context)
+    if not original_latest:
+        return {
+            "eligible": False,
+            "reason": "no_incoming_message",
+            "retryable": False,
+            "context": context,
+        }
+    thread_id = str(original_latest.get("thread_id") or "").strip()
+    if not thread_id:
+        return {
+            "eligible": False,
+            "reason": "missing_thread_id",
+            "retryable": True,
+            "context": context,
+        }
+
+    fresh_context = await hydrate_thread_context(thread_id)
+    if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
+        return {
+            "eligible": False,
+            "reason": "eligibility_refresh_failed",
+            "retryable": True,
+            "context": fresh_context,
+        }
+
+    eligibility = evaluate_salomao_ticket_eligibility(fresh_context)
+    if not eligibility["eligible"]:
+        return {**eligibility, "context": fresh_context}
+
+    fresh_latest = _latest_incoming_message(fresh_context)
+    if not fresh_latest:
+        return {
+            "eligible": False,
+            "reason": "latest_message_not_incoming",
+            "retryable": False,
+            "context": fresh_context,
+        }
+    if incoming_message_id(fresh_latest) != incoming_message_id(original_latest):
+        return {
+            "eligible": False,
+            "reason": "customer_turn_changed",
+            "retryable": False,
+            "context": fresh_context,
+        }
+    return {
+        "eligible": True,
+        "reason": "eligible",
+        "retryable": False,
+        "context": fresh_context,
+    }
 
 
 def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | None:
@@ -1014,6 +1217,38 @@ async def send_salomao_reply_to_hubspot_thread(
         )
         return {"sent": False, "reason": "missing_fields", "missing": missing}
 
+    freshness = await refresh_salomao_reply_context(context)
+    if not freshness["eligible"]:
+        reason = str(freshness["reason"])
+        retryable = bool(freshness["retryable"])
+        logger.warning(
+            "hubspot_salomao_reply_suppressed",
+            thread_id=thread_id,
+            reason=reason,
+            retryable=retryable,
+        )
+        return {
+            "sent": False,
+            "suppressed": not retryable,
+            "retryable": retryable,
+            "reason": reason,
+        }
+
+    context = freshness["context"]
+    latest = _latest_incoming_message(context)
+    assert latest is not None
+    thread_id = latest.get("thread_id")
+    channel_id = latest.get("channel_id")
+    channel_account_id = latest.get("channel_account_id")
+    incoming_recipients = latest.get("recipients") or []
+    fallback_sender_actor_id = next(
+        (str(recipient.get("actorId")) for recipient in incoming_recipients if recipient.get("actorId")),
+        "",
+    )
+    sender_actor_id = configured_sender_actor_id or fallback_sender_actor_id
+    recipients = [_recipient_from_sender(sender) for sender in latest.get("senders", [])]
+    recipients = [recipient for recipient in recipients if recipient]
+
     headers = _auth_headers()
     payload = {
         "attachments": [],
@@ -1113,9 +1348,11 @@ __all__ = [
     "build_conversation_context_from_hubspot_context",
     "build_salomao_prompt_from_hubspot_context",
     "create_hubspot_thread_comment",
+    "evaluate_salomao_ticket_eligibility",
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "markdown_to_hubspot_rich_text",
+    "refresh_salomao_reply_context",
     "send_salomao_reply_to_hubspot_thread",
     "update_hubspot_ticket_route",
     "update_hubspot_ticket_stage",

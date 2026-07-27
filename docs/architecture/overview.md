@@ -21,7 +21,7 @@ A arquitetura segue uma adaptação de Clean Architecture ao ecossistema Django:
 | Framework web | Django 5.2 LTS + Django Ninja 1.6 |
 | Autenticação | django-ninja-jwt (HS256) |
 | Banco de dados | PostgreSQL 16 (Supabase) |
-| Cache / broker | Redis 7 |
+| Cache / broker | Redis 8.6 |
 | Workers | Celery 5 + django-celery-beat |
 | Runtime de IA | Agno 2.5 |
 | Modelos LLM | OpenAI GPT-4o / GPT-4o-mini, Anthropic fallback |

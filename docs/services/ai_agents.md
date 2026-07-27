@@ -133,9 +133,14 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `build_salomao_prompt_from_hubspot_context(context)`: extrai a mensagem atual do cliente para eventos de conversa.
 - `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
-- `request_human_handoff(...)`: primeiro move o ticket para o pipeline/estágio
-  humano e persiste a fila do Matchmaker; a confirmação ao cliente só é
-  enviada depois desses efeitos concluírem.
+- `request_human_handoff(...)`: depois da confirmação visível ao cliente,
+  revalida o turno e a exclusividade da IA, move o ticket para o pipeline
+  humano no estágio `Novo` e aguarda a admissão canônica do Matchmaker.
+- `complete_ai_resolution(...)`: depois de entregar uma resposta conclusiva,
+  revalida o turno, move o ticket para `Triagem N1 / Fechado` e fecha o
+  lifecycle local.
+- O Salomão nunca escreve `hubspot_owner_id`; a propriedade e a atribuição
+  humana permanecem sob responsabilidade do HubSpot/Matchmaker.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
@@ -144,6 +149,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `run_supervisor_pipeline_task(ticket_id, is_off_hours)`: executa pipeline com lock Redis.
 - `run_salomao_v1_thread_pipeline_task(thread_id)`: executa o Supervisor para HubSpot Conversations com lock Redis; o nome foi mantido por compatibilidade.
 - `request_human_handoff_task(...)`: hidrata o contexto mínimo e cria handoff.
+- `retry_pending_ticket_effect_task(instance_id)`: retoma somente um PATCH
+  durável de rota/fechamento, sem executar novamente o modelo ou a resposta ao
+  cliente.
 - `run_lifecycle_watchdog_task()`: detecta execuções presas.
 - `retry_failed_lifecycle_instances_task()`: reexecuta falhas elegíveis e faz
   handoff quando o orçamento termina.
@@ -164,8 +172,13 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   encaminhamento. Em seguida, o ticket é movido para
   `HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`) e persistido na fila do Matchmaker;
   retries são idempotentes e não duplicam a confirmação.
-- Dados faltantes ou resposta candidata → `WAITING_FOR_CUSTOMER`.
-- Resolução por IA só fecha após confirmação explícita do cliente.
+- Dados faltantes ou pergunta de esclarecimento → `WAITING_FOR_CUSTOMER`,
+  sem fechar o ticket.
+- Resposta conclusiva (`candidate_resolved`) fecha o ticket somente depois
+  que a mensagem foi entregue ao cliente e o HubSpot confirmou a mudança para
+  `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_CLOSED_STAGE_ID`.
+- Uma nova mensagem `INCOMING` reabre o lifecycle fechado da mesma conversa
+  para que uma nova dúvida nunca seja perdida.
 - Tools externas exigem estado permitido, chave de idempotência e
   `ToolCallAuditLog`.
 - `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma
@@ -182,6 +195,14 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.
+- A resposta automática só é elegível enquanto o ticket permanecer exatamente
+  em `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID`, sem owner humano.
+  Um ticket sem owner também deixa de ser elegível quando o histórico mostra
+  participação de um agente humano diferente do actor configurado do Salomão.
+- A elegibilidade é consultada novamente no HubSpot imediatamente antes do
+  `POST` da resposta. Se o ticket tiver mudado de rota, sido assumido por um
+  humano, recebido uma resposta humana ou avançado para outro turno enquanto o
+  modelo processava, a saída obsoleta é suprimida, auditada e não é repetida.
 
 ## Arquivos relacionados
 

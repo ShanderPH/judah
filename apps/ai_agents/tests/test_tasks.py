@@ -14,6 +14,7 @@ from apps.ai_agents.tasks import (
     publish_handoff_observation_task,
     request_human_handoff_task,
     retry_failed_lifecycle_instances_task,
+    retry_pending_ticket_effect_task,
     run_lifecycle_watchdog_task,
     run_salomao_v1_thread_pipeline_task,
     run_supervisor_pipeline_task,
@@ -138,6 +139,7 @@ def test_supervisor_task_success_duplicate_and_lock_failure() -> None:
         "ticket-1",
         is_off_hours=True,
         enforce_ai_pipeline=False,
+        source_instance_id=None,
     )
     run.assert_called_once_with("coroutine")
     assert client.delete.call_count == 2
@@ -179,6 +181,7 @@ def test_supervisor_task_accepts_staging_dispatch_contract_and_queues_followup()
         "ticket-1",
         is_off_hours=False,
         enforce_ai_pipeline=True,
+        source_instance_id=None,
     )
     followup.assert_called_once_with("ticket-1", False, True, True)
 
@@ -496,9 +499,67 @@ def test_retry_dispatcher_ticket_and_terminal_paths() -> None:
     with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as delay:
         result = retry_failed_lifecycle_instances_task.run(limit=10)
 
-    assert result == {"scanned": 3, "redispatched": 1, "handed_off": 0, "terminal": 2}
-    delay.assert_called_once_with(ticket.hubspot_ticket_id, False)
+    assert result == {
+        "scanned": 3,
+        "redispatched": 1,
+        "effect_replays": 0,
+        "handed_off": 0,
+        "terminal": 2,
+    }
+    delay.assert_called_once_with(
+        ticket.hubspot_ticket_id,
+        False,
+        source_instance_id=str(ticket.pk),
+    )
     no_identifier.refresh_from_db()
     exhausted.refresh_from_db()
     assert no_identifier.state == ConversationInstance.State.FAILED_TERMINAL
     assert exhausted.state == ConversationInstance.State.FAILED_TERMINAL
+
+
+@pytest.mark.django_db
+def test_pending_effect_task_replays_without_supervisor() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:effect-task",
+        hubspot_thread_id="effect-task",
+        state=ConversationInstance.State.FAILED_RETRYABLE,
+    )
+    expected = {"closed": True}
+
+    with patch(
+        "apps.ai_agents.services.execution.resume_pending_ticket_effect",
+        return_value=expected,
+    ) as resume:
+        result = retry_pending_ticket_effect_task.run(str(instance.pk))
+
+    assert result == {
+        "conversation_instance_id": str(instance.pk),
+        "resumed": True,
+        "output": expected,
+    }
+    resume.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_pending_effect_task_records_retry_when_provider_still_fails() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:effect-task-failure",
+        hubspot_thread_id="effect-task-failure",
+        state=ConversationInstance.State.FAILED_RETRYABLE,
+        failure_count=1,
+    )
+
+    with (
+        patch(
+            "apps.ai_agents.services.execution.resume_pending_ticket_effect",
+            side_effect=RuntimeError("provider unavailable"),
+        ),
+        pytest.raises(RuntimeError, match="provider unavailable"),
+    ):
+        retry_pending_ticket_effect_task.run(str(instance.pk))
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.FAILED_RETRYABLE
+    assert instance.failure_count == 2
+    assert instance.current_error == "provider unavailable"
+    assert instance.next_retry_at is not None

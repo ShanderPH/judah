@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from django.test import override_settings
 
 from apps.ai_agents.services import hubspot
 from apps.ai_agents.services.hubspot import (
@@ -21,9 +22,11 @@ from apps.ai_agents.services.hubspot import (
     build_conversation_context_from_hubspot_context,
     build_salomao_prompt_from_hubspot_context,
     create_hubspot_thread_comment,
+    evaluate_salomao_ticket_eligibility,
     hydrate_thread_context,
     hydrate_ticket_context,
     send_salomao_reply_to_hubspot_thread,
+    update_hubspot_ticket_route,
 )
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"image-content"
@@ -34,6 +37,154 @@ def _async_client_context(client: MagicMock) -> MagicMock:
     context.__aenter__ = AsyncMock(return_value=client)
     context.__aexit__ = AsyncMock(return_value=False)
     return context
+
+
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-active",
+    HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
+)
+@pytest.mark.parametrize(
+    ("context", "eligible", "reason"),
+    [
+        (
+            {
+                "pipeline": "ai-pipeline",
+                "pipeline_stage": "ai-active",
+                "owner_id": "",
+                "conversation_history": [],
+            },
+            True,
+            "eligible",
+        ),
+        (
+            {
+                "pipeline": "support-pipeline",
+                "pipeline_stage": "ai-active",
+                "owner_id": "",
+                "conversation_history": [],
+            },
+            False,
+            "ticket_left_ai_pipeline",
+        ),
+        (
+            {
+                "pipeline": "ai-pipeline",
+                "pipeline_stage": "waiting",
+                "owner_id": "",
+                "conversation_history": [],
+            },
+            False,
+            "ticket_left_ai_stage",
+        ),
+        (
+            {
+                "pipeline": "ai-pipeline",
+                "pipeline_stage": "ai-active",
+                "owner_id": "human-owner",
+                "conversation_history": [],
+            },
+            False,
+            "ticket_owned_by_human",
+        ),
+        (
+            {
+                "pipeline": "ai-pipeline",
+                "pipeline_stage": "ai-active",
+                "owner_id": "",
+                "conversation_history": [
+                    {
+                        "direction": "OUTGOING",
+                        "senders": [{"actorId": "A-human", "actorType": "AGENT"}],
+                    },
+                    {"direction": "INCOMING", "senders": [{"actorId": "visitor"}]},
+                ],
+            },
+            False,
+            "human_agent_participating",
+        ),
+    ],
+)
+def test_salomao_ticket_eligibility_is_exclusive(
+    context: dict[str, object],
+    eligible: bool,
+    reason: str,
+) -> None:
+    result = evaluate_salomao_ticket_eligibility(context)
+
+    assert result["eligible"] is eligible
+    assert result["reason"] == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_id", ["ai-owner", ""])
+async def test_update_ticket_route_sets_pipeline_stage_and_owner(monkeypatch, owner_id: str) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    response = MagicMock()
+    response.status_code = 200
+    client = MagicMock()
+    client.patch = AsyncMock(return_value=response)
+
+    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
+        result = await update_hubspot_ticket_route(
+            "ticket-1",
+            "closed",
+            pipeline_id="ai-triage",
+            owner_id=owner_id,
+        )
+
+    assert result["updated"] is True
+    assert result["owner_id"] == owner_id
+    response.raise_for_status.assert_called_once()
+    assert client.patch.await_args.kwargs["json"] == {
+        "properties": {
+            "hs_pipeline_stage": "closed",
+            "hs_pipeline": "ai-triage",
+            "hubspot_owner_id": owner_id,
+        }
+    }
+
+
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+)
+async def test_guarded_route_never_patches_after_concurrent_human_ownership() -> None:
+    fresh_context = {
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "human-owner",
+        "errors": [],
+        "conversation_history": [
+            {
+                "id": "turn-1",
+                "direction": "INCOMING",
+                "text": "Aguardando",
+            }
+        ],
+    }
+
+    with (
+        patch.object(
+            hubspot,
+            "hydrate_thread_context",
+            new=AsyncMock(return_value=fresh_context),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient") as client_factory,
+    ):
+        result = await update_hubspot_ticket_route(
+            "ticket-1",
+            "closed",
+            pipeline_id="ai-pipeline",
+            eligibility_thread_id="thread-1",
+            expected_customer_turn_id="turn-1",
+        )
+
+    assert result["updated"] is False
+    assert result["suppressed"] is True
+    assert result["reason"] == "ticket_owned_by_human"
+    client_factory.assert_not_called()
 
 
 def test_build_salomao_prompt_uses_latest_incoming_message() -> None:
@@ -134,6 +285,7 @@ async def test_fetch_history_keeps_hubspot_attachments() -> None:
                         "direction": "INCOMING",
                         "text": "",
                         "attachments": [{"type": "FILE", "fileUsageType": "IMAGE", "fileId": "42"}],
+                        "client": {"clientType": "INTEGRATION", "integrationAppId": 19550369},
                     }
                 ]
             },
@@ -143,6 +295,8 @@ async def test_fetch_history_keeps_hubspot_attachments() -> None:
         history = await _fetch_conversation_history(client, "thread-1")
 
     assert history[0]["attachments"][0]["fileId"] == "42"
+    assert history[0]["client_type"] == "INTEGRATION"
+    assert history[0]["integration_app_id"] == "19550369"
 
 
 async def test_download_image_attachment_detects_image_and_encodes_base64(monkeypatch) -> None:
@@ -704,7 +858,21 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
         "2. Localize a transação.\n\n"
         "## Atenção\n\n- O estorno depende do gateway."
     )
-    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
+    with (
+        patch.object(
+            hubspot,
+            "refresh_salomao_reply_context",
+            new=AsyncMock(
+                return_value={
+                    "eligible": True,
+                    "reason": "eligible",
+                    "retryable": False,
+                    "context": context,
+                }
+            ),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
+    ):
         result = await send_salomao_reply_to_hubspot_thread(context, reply)
     assert result["sent"] is True
     assert result["message_id"] == "reply-1"
@@ -715,6 +883,111 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
     assert "<ol><li>Acesse <strong>Financeiro</strong>.</li>" in payload["richText"]
     assert "<ul><li>O estorno depende do gateway.</li></ul>" in payload["richText"]
     assert "##" not in payload["richText"]
+
+
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-active",
+    HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
+)
+async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    context = {
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-active",
+        "owner_id": "",
+        "conversation_history": [
+            {
+                "id": "customer-turn",
+                "thread_id": "thread-1",
+                "channel_id": "channel",
+                "channel_account_id": "account",
+                "direction": "INCOMING",
+                "text": "Aguardando",
+                "senders": [{"actorId": "visitor"}],
+            }
+        ],
+    }
+    fresh_context = {
+        **context,
+        "pipeline": "support-pipeline",
+        "pipeline_stage": "human-active",
+        "owner_id": "human-owner",
+    }
+
+    with (
+        patch.object(
+            hubspot,
+            "hydrate_thread_context",
+            new=AsyncMock(return_value=fresh_context),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient") as client_factory,
+    ):
+        result = await send_salomao_reply_to_hubspot_thread(context, "Resposta tardia")
+
+    assert result == {
+        "sent": False,
+        "suppressed": True,
+        "retryable": False,
+        "reason": "ticket_left_ai_pipeline",
+    }
+    client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-active",
+    HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
+)
+async def test_customer_turn_change_suppresses_stale_reply_without_retry(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    first_message = {
+        "id": "customer-turn-1",
+        "thread_id": "thread-1",
+        "channel_id": "channel",
+        "channel_account_id": "account",
+        "direction": "INCOMING",
+        "text": "Primeira mensagem",
+        "senders": [{"actorId": "visitor"}],
+    }
+    context = {
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-active",
+        "owner_id": "",
+        "conversation_history": [first_message],
+    }
+    fresh_context = {
+        **context,
+        "errors": [],
+        "conversation_history": [
+            first_message,
+            {
+                **first_message,
+                "id": "customer-turn-2",
+                "text": "Complemento mais recente",
+            },
+        ],
+    }
+
+    with (
+        patch.object(
+            hubspot,
+            "hydrate_thread_context",
+            new=AsyncMock(return_value=fresh_context),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient") as client_factory,
+    ):
+        result = await send_salomao_reply_to_hubspot_thread(context, "Resposta antiga")
+
+    assert result == {
+        "sent": False,
+        "suppressed": True,
+        "retryable": False,
+        "reason": "customer_turn_changed",
+    }
+    client_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -810,6 +1083,20 @@ async def test_send_reply_handles_http_errors(monkeypatch, error_kind: str) -> N
         error = httpx.ConnectError("offline", request=request)
     client = MagicMock()
     client.post = AsyncMock(side_effect=error)
-    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
+    with (
+        patch.object(
+            hubspot,
+            "refresh_salomao_reply_context",
+            new=AsyncMock(
+                return_value={
+                    "eligible": True,
+                    "reason": "eligible",
+                    "retryable": False,
+                    "context": context,
+                }
+            ),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
+    ):
         result = await send_salomao_reply_to_hubspot_thread(context, "Olá")
     assert result["reason"] == ("http:429" if error_kind == "status" else "ConnectError")

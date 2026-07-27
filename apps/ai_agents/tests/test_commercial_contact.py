@@ -100,7 +100,6 @@ async def test_commercial_reply_bypasses_protocol_lookup_and_models(monkeypatch)
         context,
         session_id="hubspot-thread-thread-commercial",
         ticket_id="ticket-commercial",
-        require_incoming=True,
     )
 
     protocol_lookup.assert_not_awaited()

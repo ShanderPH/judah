@@ -130,15 +130,27 @@ não é montado; ele concentra o worker reutilizado pelas tasks Celery.
    `escalate_human` ou `failed`.
 8. Respostas e handoffs são aplicados pela camada de execução com permissão
    por estado, chave de idempotência, `AgentRun` e `ToolCallAuditLog`.
-9. Uma resolução candidata permanece em `WAITING_FOR_CUSTOMER`; somente uma
-   confirmação determinística do cliente leva a `RESOLVED_BY_AI` e `CLOSED`.
-10. Handoffs criam `HandoffPackage`, entram no Matchmaker e avançam para os
-    estados humanos. Falhas transitórias usam retry limitado, watchdog e
-    fallback seguro para atendimento humano.
+9. Uma pergunta de esclarecimento permanece em `WAITING_FOR_CUSTOMER`. Uma
+   resposta conclusiva fecha o ticket somente depois que a resposta foi
+   entregue e o HubSpot confirmou `Triagem N1 / Fechado`; uma nova mensagem
+   recebida reabre a mesma conversa para outro turno.
+10. Antes de iniciar o modelo e novamente antes de publicar a resposta, o Judah
+    confirma no HubSpot que o ticket continua em
+    `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID` e sem atendimento
+    humano. Se um agente assumir a conversa durante o processamento, a resposta
+    tardia é descartada e a instância registra `IGNORED`, sem fechar, rotear ou
+    responder no ticket.
+11. Handoffs primeiro avisam o cliente, depois revalidam a exclusividade da IA
+    e movem o ticket para `Support N1 / Novo`. A atribuição humana fica para o
+    Matchmaker. Falhas transitórias retomam somente o efeito externo pendente,
+    sem repetir o modelo ou a mensagem visível.
 
 ### Decisões
 
 - Eventos duplicados não repetem dispatch nem efeitos externos.
+- O Salomão não altera `hubspot_owner_id` em handoff nem em fechamento. Assim,
+  uma atribuição concorrente nunca é apagada ou substituída por snapshot
+  obsoleto; o HubSpot/Matchmaker é a autoridade de proprietário.
 - Fora do horário comercial, `ConversationContext.is_off_hours` informa a
   política e o handoff continua disponível.
 - Sem `HUBSPOT_APP_SECRET` fora de DEBUG, o endpoint falha fechado.

@@ -31,7 +31,7 @@ Antes de propor mudanças, leia:
 - Python 3.14
 - Django 5.2 + Django Ninja 1.6
 - Celery 5
-- PostgreSQL 16 (Supabase) + Redis 7
+- PostgreSQL 16 (Supabase) + Redis 8.6
 - Agno 2.5+ + OpenAI API
 - Pinecone serverless
 - Railway

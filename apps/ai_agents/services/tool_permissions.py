@@ -15,6 +15,7 @@ TOOL_PERMISSIONS_BY_STATE: dict[str, set[str]] = {
         "search_knowledge",
         "send_message",
         "add_internal_note",
+        "move_ticket",
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         "add_internal_note",
@@ -25,6 +26,12 @@ TOOL_PERMISSIONS_BY_STATE: dict[str, set[str]] = {
     # permission supports an idempotent retry if HubSpot accepted the route
     # before its Conversations API briefly failed.
     ConversationInstance.State.QUEUE_PENDING: {"add_internal_note", "send_message"},
+    # A retryable instance may replay only its already-audited provider effect.
+    # The retry path never grants permission to send another customer message.
+    ConversationInstance.State.FAILED_RETRYABLE: {
+        "move_ticket",
+        "enqueue_assignment",
+    },
 }
 
 TOOL_ALIASES: dict[str, str] = {

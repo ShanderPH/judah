@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import UUID
 
 import structlog
 from django.conf import settings
@@ -135,6 +136,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.CONTACT_REQUIRED,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.CONTEXT_READY: {
@@ -181,6 +183,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.WAITING_FOR_CUSTOMER: {
@@ -192,6 +195,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         ConversationInstance.State.QUEUE_PENDING,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.QUEUE_PENDING: {
@@ -214,6 +218,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.TRIAGE_PENDING,
         ConversationInstance.State.AI_SERVICE_PENDING,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.RESOLVED_BY_AI,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_TERMINAL,
     },
 }
@@ -468,12 +474,15 @@ class LifecycleEngine:
                         source_event_id=event.source_event_id,
                     )
                 elif decision.route != "IGNORE":
+                    can_reopen_terminal = event.event_type == "ticket_entered_n1" or (
+                        event.event_type == "conversation_message_received" and event.direction == "INCOMING"
+                    )
                     self.transition(
                         instance,
                         decision.target_state,
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
-                        allow_terminal_reopen=event.event_type == "ticket_entered_n1",
+                        allow_terminal_reopen=can_reopen_terminal,
                     )
                 elif instance_created and not event.hubspot_ticket_id:
                     # A ticket can emit metadata/property events before the
@@ -487,12 +496,43 @@ class LifecycleEngine:
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                     )
+                if decision.route == "CLOSE" and event.hubspot_ticket_id:
+                    self._close_all_ticket_instances(
+                        event.hubspot_ticket_id,
+                        primary_instance_id=instance.pk,
+                        source_event_id=event.source_event_id,
+                    )
         return LifecycleRecordResult(
             instance=instance,
             event=lifecycle_event,
             decision=decision,
             event_created=event_created,
         )
+
+    def _close_all_ticket_instances(
+        self,
+        ticket_id: str,
+        *,
+        primary_instance_id: UUID,
+        source_event_id: str,
+    ) -> None:
+        """Converge every persisted conversation for a closed HubSpot ticket."""
+        siblings = (
+            ConversationInstance.objects.select_for_update()
+            .filter(hubspot_ticket_id=str(ticket_id))
+            .exclude(pk=primary_instance_id)
+        )
+        for sibling in siblings:
+            if sibling.state == ConversationInstance.State.CLOSED:
+                continue
+            self.transition(
+                sibling,
+                ConversationInstance.State.CLOSED,
+                reason="HubSpot ticket closure converged across conversation instances.",
+                actor_type="ticket_lifecycle_convergence",
+                source_event_id=source_event_id,
+                allow_terminal_reopen=sibling.state in TERMINAL_STATES,
+            )
 
     def transition(
         self,

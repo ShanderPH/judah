@@ -14,7 +14,7 @@ O `docker-compose.yml` define uma stack completa para desenvolvimento, com volum
 |---------|--------------|-------|--------|
 | `app` | `Dockerfile` (target `builder`) | `8000` | API Django via Uvicorn com reload |
 | `db` | `postgres:16-alpine` | `5432` | Banco de dados PostgreSQL |
-| `redis` | `redis:7-alpine` | `6379` | Cache e broker Celery |
+| `redis` | `redis:8.6-alpine` | `6379` | Cache e broker Celery |
 | `celery_worker` | `Dockerfile` (target `builder`) | — | Processa tasks assíncronas |
 | `celery_beat` | `Dockerfile` (target `builder`) | — | Scheduler periódico |
 

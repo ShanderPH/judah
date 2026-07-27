@@ -11,7 +11,7 @@
 
 - **Linguagens:** Python 3.14 (versão exata obrigatória)
 - **Frameworks:** Django 5.2 LTS + Django Ninja 1.6, Celery 5
-- **Banco / Storage:** PostgreSQL 16 (via Supabase), Redis 7
+- **Banco / Storage:** PostgreSQL 16 (via Supabase), Redis 8.6
 - **AI infra:** Agno 2.5+, OpenAI Responses API (GPT-5.6 Luna, reasoning xhigh), Pinecone serverless, MCP 1.x (FastMCP)
 - **Deploy:** Railway (API, Celery Worker, Celery Beat)
 - **Tooling obrigatório:** ruff (target py314), mypy, pytest, pytest-django, pre-commit

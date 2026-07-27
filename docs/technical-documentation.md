@@ -55,7 +55,7 @@ Essa fragmentação gerava: duplicação de dados, inconsistência de métricas,
 | Framework Web       | Django 5.2 LTS + Django Ninja 1.6                 |
 | Autenticação        | django-ninja-jwt (HS256)                          |
 | Banco de Dados      | PostgreSQL 16 (Supabase)                          |
-| Cache / Broker      | Redis 7                                           |
+| Cache / Broker      | Redis 8.6                                         |
 | Workers Assíncronos | Celery 5 + django-celery-beat                     |
 | Runtime de IA       | Agno 2.5 (agents, teams, knowledge)               |
 | Modelos de IA       | OpenAI (GPT-4o, GPT-4o-mini), Anthropic fallback  |

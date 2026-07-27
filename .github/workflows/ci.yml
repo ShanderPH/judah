@@ -63,6 +63,10 @@ jobs:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: lint
+    permissions:
+      contents: read
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     strategy:
       matrix:
@@ -84,7 +88,7 @@ jobs:
           --health-retries 5
 
       redis:
-        image: redis:7-alpine
+        image: redis:8.6-alpine
         ports:
           - 6379:6379
         options: >-
@@ -123,11 +127,17 @@ jobs:
             -v
 
       - name: Upload coverage to Codecov
-        if: matrix.python-version == '3.14'
-        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.14' && env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
-          fail_ci_if_error: false
+          fail_ci_if_error: true
+          token: ${{ env.CODECOV_TOKEN }}
+
+      - name: Report disabled Codecov integration
+        if: matrix.python-version == '3.14' && env.CODECOV_TOKEN == ''
+        run: |
+          echo "::notice::Codecov upload skipped because CODECOV_TOKEN is not configured; pytest coverage remains a required gate."
 
   security:
     name: Security Scan
@@ -173,7 +183,7 @@ jobs:
           --health-retries 5
 
       redis:
-        image: redis:7-alpine
+        image: redis:8.6-alpine
         ports:
           - 6379:6379
         options: >-
