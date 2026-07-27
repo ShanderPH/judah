@@ -134,6 +134,12 @@ não é montado; ele concentra o worker reutilizado pelas tasks Celery.
    resposta conclusiva fecha o ticket somente depois que a resposta foi
    entregue e o HubSpot confirmou `Triagem N1 / Fechado`; uma nova mensagem
    recebida reabre a mesma conversa para outro turno.
+10. Antes de iniciar o modelo e novamente antes de publicar a resposta, o Judah
+    confirma no HubSpot que o ticket continua em
+    `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID` e sem atendimento
+    humano. Se um agente assumir a conversa durante o processamento, a resposta
+    tardia é descartada e a instância registra `IGNORED`, sem fechar, rotear ou
+    responder no ticket.
 10. Handoffs primeiro avisam o cliente, depois movem o ticket para
     `Support N1 / Novo`, limpam somente o owner da IA e deixam a atribuição
     humana para o Matchmaker. Falhas transitórias usam retry limitado,

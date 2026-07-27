@@ -142,6 +142,66 @@ async def test_candidate_resolution_closes_ticket_after_reply() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_stale_reply_is_safely_suppressed_without_closing_or_retrying() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Resposta que ficou obsoleta.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: OK"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response="Resposta que ficou obsoleta.",
+            confidence=0.9,
+        ),
+    )
+    close_route = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(
+                return_value={
+                    "sent": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "reason": "ticket_owned_by_human",
+                }
+            ),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Aguardando",
+            result=result,
+        )
+
+    close_route.assert_not_awaited()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.IGNORED
+    assert instance.failure_count == 0
+    assert instance.metadata["ai_reply_suppressed"]["reason"] == "ticket_owned_by_human"
+    audit = await sync_to_async(ToolCallAuditLog.objects.get)(
+        instance=instance,
+        tool_name="send_thread_reply",
+    )
+    assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+    assert audit.output["suppressed"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-triage",
     HUBSPOT_CLOSED_STAGE_ID="ai-closed",

@@ -14,6 +14,11 @@
 6. A new incoming customer message reopens a closed conversation instance.
 7. Failed provider mutations are audited and become retryable.
 8. Effects are idempotent per conversation turn.
+9. The Supervisor starts only when the ticket is in
+   `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID`, with no human
+   owner or active human participation.
+10. Eligibility is refreshed immediately before reply delivery. A stale reply
+    is suppressed without closing, rerouting or retrying against the ticket.
 
 ## Verification
 
@@ -22,3 +27,4 @@
 - Mypy.
 - Full local SQLite test suite under Python 3.14.
 - Django system checks using test settings.
+- Race tests for route changes and human takeover during model processing.

@@ -191,6 +191,14 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.
+- A resposta automática só é elegível enquanto o ticket permanecer exatamente
+  em `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID`, sem owner humano.
+  Um ticket sem owner também deixa de ser elegível quando o histórico mostra
+  participação de um agente humano diferente do actor configurado do Salomão.
+- A elegibilidade é consultada novamente no HubSpot imediatamente antes do
+  `POST` da resposta. Se o ticket tiver mudado de rota, sido assumido por um
+  humano, recebido uma resposta humana ou avançado para outro turno enquanto o
+  modelo processava, a saída obsoleta é suprimida, auditada e não é repetida.
 
 ## Arquivos relacionados
 

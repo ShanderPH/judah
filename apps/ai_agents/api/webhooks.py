@@ -43,6 +43,7 @@ from apps.ai_agents.services.hubspot import (
     USE_MOCK_HUBSPOT,
     build_conversation_context_from_hubspot_context,
     build_salomao_prompt_from_hubspot_context,
+    evaluate_salomao_ticket_eligibility,
     hydrate_thread_context,
     hydrate_ticket_context,
 )
@@ -696,13 +697,17 @@ async def _run_supervisor_pipeline(
             logger.error("supervisor_pipeline_aborted", ticket_id=ticket_id, errors=context["errors"])
             raise RuntimeError(f"HubSpot ticket context hydration failed: {context['errors']}")
 
-        expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", ""))
-        if enforce_ai_pipeline and expected_pipeline and str(context.get("pipeline") or "") != expected_pipeline:
+        eligibility = evaluate_salomao_ticket_eligibility(context)
+        if not eligibility["eligible"]:
+            if eligibility["retryable"]:
+                raise RuntimeError(f"Salomao ticket eligibility unavailable: {eligibility['reason']}")
             logger.info(
-                "supervisor_pipeline_wrong_pipeline_skipped",
+                "supervisor_pipeline_ineligible_ticket_skipped",
                 ticket_id=ticket_id,
                 pipeline=context.get("pipeline"),
-                expected_pipeline=expected_pipeline,
+                pipeline_stage=context.get("pipeline_stage"),
+                reason=eligibility["reason"],
+                enforce_ai_pipeline=enforce_ai_pipeline,
             )
             return
 
@@ -745,6 +750,19 @@ async def _run_salomao_v1_thread_pipeline(
 
         ticket_id = context.get("ticket_id") or None
         session_id = f"hubspot-thread-{thread_id}"
+        eligibility = evaluate_salomao_ticket_eligibility(context)
+        if not eligibility["eligible"]:
+            if eligibility["retryable"]:
+                raise RuntimeError(f"Salomao ticket eligibility unavailable: {eligibility['reason']}")
+            logger.info(
+                "supervisor_thread_ineligible_ticket_skipped",
+                thread_id=thread_id,
+                ticket_id=ticket_id,
+                pipeline=context.get("pipeline"),
+                pipeline_stage=context.get("pipeline_stage"),
+                reason=eligibility["reason"],
+            )
+            return
 
         await _run_supervisor_for_hubspot_context(
             context,

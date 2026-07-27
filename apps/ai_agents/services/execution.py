@@ -291,10 +291,31 @@ async def send_reply_with_audit(
     await sync_to_async(_finish_tool_call)(
         prepared.audit_id,
         output=output,
-        succeeded=bool(output.get("sent")),
-        error_message="" if output.get("sent") else str(output.get("reason") or "reply_failed"),
+        succeeded=bool(output.get("sent") or output.get("suppressed")),
+        error_message=(
+            "" if output.get("sent") or output.get("suppressed") else str(output.get("reason") or "reply_failed")
+        ),
     )
     return output
+
+
+def suppress_ai_reply(instance: ConversationInstance, *, reason: str) -> None:
+    """Terminalize a stale AI turn without treating a safe suppression as failure."""
+    engine = LifecycleEngine()
+    engine.update_metadata(
+        instance,
+        ai_reply_suppressed={
+            "reason": reason,
+            "customer_turn_id": instance.last_message_id or instance.last_event_id,
+        },
+    )
+    if instance.state != ConversationInstance.State.IGNORED:
+        engine.transition(
+            instance,
+            ConversationInstance.State.IGNORED,
+            reason=f"Customer-visible AI reply suppressed: {reason}.",
+            actor_type="reply_eligibility_guard",
+        )
 
 
 def publish_handoff_observation(
@@ -732,6 +753,18 @@ async def apply_supervisor_result(
             idempotency_key=reply_key,
         )
         if not reply_result.get("sent"):
+            if reply_result.get("suppressed"):
+                await sync_to_async(suppress_ai_reply)(
+                    instance,
+                    reason=str(reply_result.get("reason") or "ticket_not_eligible_for_ai"),
+                )
+                logger.info(
+                    "supervisor_reply_safely_suppressed",
+                    conversation_instance_id=str(instance.pk),
+                    ticket_id=conversation_context.ticket_id,
+                    reason=reply_result.get("reason"),
+                )
+                return
             await sync_to_async(mark_retryable_failure)(
                 instance,
                 reply_result.get("reason") or "HubSpot reply failed.",
@@ -819,4 +852,5 @@ __all__ = [
     "record_supervisor_runs",
     "request_human_handoff",
     "send_reply_with_audit",
+    "suppress_ai_reply",
 ]

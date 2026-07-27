@@ -214,9 +214,23 @@ async def test_pipeline_failure_is_recorded_only_on_the_target_thread() -> None:
 
 
 @pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+)
 async def test_pipeline_wrappers_success_and_failure() -> None:
     with (
-        patch("apps.ai_agents.api.webhooks.hydrate_ticket_context", new=AsyncMock(return_value={"subject": "A"})),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_ticket_context",
+            new=AsyncMock(
+                return_value={
+                    "subject": "A",
+                    "pipeline": "ai-pipeline",
+                    "pipeline_stage": "ai-stage",
+                    "owner_id": "",
+                }
+            ),
+        ),
         patch(
             "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
             new=AsyncMock(),
@@ -236,7 +250,13 @@ async def test_pipeline_wrappers_success_and_failure() -> None:
         await webhooks._run_supervisor_pipeline("ticket-1")
     mark.assert_awaited_once()
 
-    thread_context = {"ticket_id": "ticket-2", "conversation_history": [{"direction": "INCOMING", "text": "Oi"}]}
+    thread_context = {
+        "ticket_id": "ticket-2",
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "",
+        "conversation_history": [{"direction": "INCOMING", "text": "Oi"}],
+    }
     with (
         patch("apps.ai_agents.api.webhooks.hydrate_thread_context", new=AsyncMock(return_value=thread_context)),
         patch("apps.ai_agents.api.webhooks.off_hours_reason", return_value="off_hours"),
@@ -267,9 +287,13 @@ async def test_ticket_pipeline_enforcement_skips_non_ai_pipeline() -> None:
     context = {
         "subject": "A",
         "pipeline": "support-pipeline",
+        "pipeline_stage": "ai-stage",
     }
     with (
-        override_settings(HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline"),
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+        ),
         patch(
             "apps.ai_agents.api.webhooks.hydrate_ticket_context",
             new=AsyncMock(return_value=context),
@@ -283,6 +307,35 @@ async def test_ticket_pipeline_enforcement_skips_non_ai_pipeline() -> None:
             "ticket-1",
             enforce_ai_pipeline=True,
         )
+
+    run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_pipeline_skips_ticket_owned_by_human() -> None:
+    context = {
+        "ticket_id": "ticket-1",
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "human-owner",
+        "conversation_history": [{"direction": "INCOMING", "text": "Aguardando"}],
+    }
+    with (
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+            HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_thread_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
+            new=AsyncMock(),
+        ) as run,
+    ):
+        await webhooks._run_salomao_v1_thread_pipeline("thread-1")
 
     run.assert_not_awaited()
 

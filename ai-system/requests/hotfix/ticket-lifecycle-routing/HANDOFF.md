@@ -13,6 +13,10 @@
   reabre a instância fechada da mesma conversa.
 - Alterações no HubSpot são idempotentes, auditadas e falhas ficam
   retryable.
+- O Salomão só inicia e só publica respostas em
+  `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_N1_NEW_STAGE_ID`. A rota é lida
+  novamente imediatamente antes do envio; owner humano, participação humana,
+  mudança de status ou novo turno suprimem a saída obsoleta sem retry.
 
 ## Arquivos modificados
 
@@ -58,3 +62,5 @@ comandos Django e mypy, carregue as mesmas variáveis seguras definidas em
 - Confirmar uma resposta conclusiva em `Triagem N1 / Fechado`.
 - Confirmar que owners humanos não são substituídos e que uma nova mensagem
   recebida após fechamento inicia outro turno.
+- Confirmar que uma task iniciada antes de um atendimento humano não publica
+  resposta tardia nem altera o ticket depois da tomada humana.

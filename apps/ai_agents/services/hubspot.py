@@ -36,6 +36,7 @@ from apps.ai_agents.services.conversation_turn import (
     CURRENT_CUSTOMER_TURN_MARKER,
     current_incoming_turn,
     current_incoming_turn_text,
+    incoming_message_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -769,6 +770,145 @@ def _latest_incoming_message(context: dict[str, Any]) -> dict[str, Any] | None:
     return turn[-1] if turn else None
 
 
+def _configured_salomao_sender_actor_id() -> str:
+    return str(
+        os.getenv("HUBSPOT_SALOMAO_SENDER_ACTOR_ID") or getattr(settings, "HUBSPOT_SALOMAO_SENDER_ACTOR_ID", "") or ""
+    ).strip()
+
+
+def _message_is_from_human_agent(message: dict[str, Any]) -> bool:
+    """Identify an outgoing HubSpot agent message that was not sent by Salomao."""
+    sender = (message.get("senders") or [{}])[0]
+    actor_id = str(sender.get("actorId") or message.get("sender") or "").strip()
+    actor_type = str(sender.get("actorType") or sender.get("type") or "").strip().upper()
+    configured_sender = _configured_salomao_sender_actor_id()
+    if configured_sender and actor_id == configured_sender:
+        return False
+    return actor_id.upper().startswith("A-") or actor_type in {"AGENT", "USER"}
+
+
+def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed unless this ticket is still in Salomao's exclusive route."""
+    expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "") or "").strip()
+    expected_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "") or "").strip()
+    pipeline = str(context.get("pipeline") or "").strip()
+    stage = str(context.get("pipeline_stage") or "").strip()
+
+    if not expected_pipeline or not expected_stage:
+        return {
+            "eligible": False,
+            "reason": "ai_route_not_configured",
+            "retryable": False,
+        }
+    if not pipeline or not stage:
+        return {
+            "eligible": False,
+            "reason": "ticket_route_unavailable",
+            "retryable": True,
+        }
+    if pipeline != expected_pipeline:
+        return {
+            "eligible": False,
+            "reason": "ticket_left_ai_pipeline",
+            "retryable": False,
+        }
+    if stage != expected_stage:
+        return {
+            "eligible": False,
+            "reason": "ticket_left_ai_stage",
+            "retryable": False,
+        }
+
+    configured_ai_owner = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
+    current_owner = str(context.get("owner_id") or "").strip()
+    if current_owner and current_owner != configured_ai_owner:
+        return {
+            "eligible": False,
+            "reason": "ticket_owned_by_human",
+            "retryable": False,
+        }
+
+    # An unassigned ticket can still be answered manually from the inbox.
+    # Once an agent has participated, only an explicit reassignment to the
+    # configured AI owner may return the ticket to Salomao.
+    if not current_owner:
+        latest_outgoing = next(
+            (
+                message
+                for message in reversed(context.get("conversation_history") or [])
+                if str(message.get("direction") or "").upper() == "OUTGOING"
+            ),
+            None,
+        )
+        if latest_outgoing is not None and _message_is_from_human_agent(latest_outgoing):
+            return {
+                "eligible": False,
+                "reason": "human_agent_participating",
+                "retryable": False,
+            }
+
+    return {
+        "eligible": True,
+        "reason": "eligible",
+        "retryable": False,
+    }
+
+
+async def refresh_salomao_reply_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Revalidate provider state immediately before a customer-visible write."""
+    original_latest = _latest_incoming_message(context)
+    if not original_latest:
+        return {
+            "eligible": False,
+            "reason": "no_incoming_message",
+            "retryable": False,
+            "context": context,
+        }
+    thread_id = str(original_latest.get("thread_id") or "").strip()
+    if not thread_id:
+        return {
+            "eligible": False,
+            "reason": "missing_thread_id",
+            "retryable": True,
+            "context": context,
+        }
+
+    fresh_context = await hydrate_thread_context(thread_id)
+    if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
+        return {
+            "eligible": False,
+            "reason": "eligibility_refresh_failed",
+            "retryable": True,
+            "context": fresh_context,
+        }
+
+    eligibility = evaluate_salomao_ticket_eligibility(fresh_context)
+    if not eligibility["eligible"]:
+        return {**eligibility, "context": fresh_context}
+
+    fresh_latest = _latest_incoming_message(fresh_context)
+    if not fresh_latest:
+        return {
+            "eligible": False,
+            "reason": "latest_message_not_incoming",
+            "retryable": False,
+            "context": fresh_context,
+        }
+    if incoming_message_id(fresh_latest) != incoming_message_id(original_latest):
+        return {
+            "eligible": False,
+            "reason": "customer_turn_changed",
+            "retryable": True,
+            "context": fresh_context,
+        }
+    return {
+        "eligible": True,
+        "reason": "eligible",
+        "retryable": False,
+        "context": fresh_context,
+    }
+
+
 def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | None:
     """Build a prompt whose current turn groups consecutive customer messages."""
     latest = _latest_incoming_message(context)
@@ -1020,6 +1160,38 @@ async def send_salomao_reply_to_hubspot_thread(
         )
         return {"sent": False, "reason": "missing_fields", "missing": missing}
 
+    freshness = await refresh_salomao_reply_context(context)
+    if not freshness["eligible"]:
+        reason = str(freshness["reason"])
+        retryable = bool(freshness["retryable"])
+        logger.warning(
+            "hubspot_salomao_reply_suppressed",
+            thread_id=thread_id,
+            reason=reason,
+            retryable=retryable,
+        )
+        return {
+            "sent": False,
+            "suppressed": not retryable,
+            "retryable": retryable,
+            "reason": reason,
+        }
+
+    context = freshness["context"]
+    latest = _latest_incoming_message(context)
+    assert latest is not None
+    thread_id = latest.get("thread_id")
+    channel_id = latest.get("channel_id")
+    channel_account_id = latest.get("channel_account_id")
+    incoming_recipients = latest.get("recipients") or []
+    fallback_sender_actor_id = next(
+        (str(recipient.get("actorId")) for recipient in incoming_recipients if recipient.get("actorId")),
+        "",
+    )
+    sender_actor_id = configured_sender_actor_id or fallback_sender_actor_id
+    recipients = [_recipient_from_sender(sender) for sender in latest.get("senders", [])]
+    recipients = [recipient for recipient in recipients if recipient]
+
     headers = _auth_headers()
     payload = {
         "attachments": [],
@@ -1119,9 +1291,11 @@ __all__ = [
     "build_conversation_context_from_hubspot_context",
     "build_salomao_prompt_from_hubspot_context",
     "create_hubspot_thread_comment",
+    "evaluate_salomao_ticket_eligibility",
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "markdown_to_hubspot_rich_text",
+    "refresh_salomao_reply_context",
     "send_salomao_reply_to_hubspot_thread",
     "update_hubspot_ticket_route",
     "update_hubspot_ticket_stage",

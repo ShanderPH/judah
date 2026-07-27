@@ -4,8 +4,8 @@ Date: 2026-07-27
 
 ## Automated gates
 
-- Full suite: `906 passed, 10 skipped` on Python 3.14.4.
-- Coverage: `90.11%`, above the required `90.00%`.
+- Full suite: `914 passed, 10 skipped` on Python 3.14.4.
+- Coverage: `90.05%`, above the required `90.00%`.
 - Ruff lint: clean.
 - Ruff formatting: 338 files already formatted.
 - Mypy: clean for 335 source files with the isolated test environment.
@@ -25,6 +25,12 @@ Date: 2026-07-27
 - Clarification keeps the ticket open.
 - Provider failure is audited and marked retryable.
 - Incoming message reopens a closed conversation instance.
+- Wrong pipeline, wrong stage and human ownership stop execution before the
+  model is called.
+- A route change during model execution suppresses the pending reply before
+  the HubSpot message endpoint is called.
+- Safe suppression records a successful policy audit, leaves failure count at
+  zero and never closes or reroutes the ticket.
 
 ## Scope notes
 
