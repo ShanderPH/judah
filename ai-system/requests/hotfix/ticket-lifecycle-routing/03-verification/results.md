@@ -13,7 +13,9 @@ Date: 2026-07-27
 - Django system check: no issues.
 - Migration check: no changes detected.
 - `git diff --check`: clean.
-- Hosted PostgreSQL 16 / Redis 8.6 tests passed. Codecov OIDC reached the
+- Hosted CI passed on SHA `b097d5f`: lint/type, PostgreSQL 16 / Redis 8.6
+  tests, Django checks and security.
+- In the preceding run, Codecov OIDC reached the
   provider but returned `Repository not found`; upload is now conditional on
   repository secret `CODECOV_TOKEN`, while pytest keeps the 90% gate mandatory.
 
