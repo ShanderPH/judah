@@ -356,3 +356,27 @@ def test_ticket_entered_n1_reopens_terminal_lifecycle(terminal_state: str) -> No
         from_state=terminal_state,
         to_state=ConversationInstance.State.QUEUE_PENDING,
     ).exists()
+
+
+@pytest.mark.django_db
+def test_new_customer_message_reopens_closed_conversation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:thread-123",
+        hubspot_thread_id="thread-123",
+        state=ConversationInstance.State.CLOSED,
+        closed_at=timezone.now(),
+    )
+
+    result = record_lifecycle_for_webhook_event(
+        _conversation_event(eventId="evt-reopen-message", messageId="msg-reopen")
+    )
+
+    result.instance.refresh_from_db()
+    assert result.instance.pk == instance.pk
+    assert result.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert result.instance.closed_at is None
+    assert ConversationStateTransition.objects.filter(
+        instance=instance,
+        from_state=ConversationInstance.State.CLOSED,
+        to_state=ConversationInstance.State.CONTEXT_HYDRATING,
+    ).exists()

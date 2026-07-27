@@ -15,6 +15,7 @@ TOOL_PERMISSIONS_BY_STATE: dict[str, set[str]] = {
         "search_knowledge",
         "send_message",
         "add_internal_note",
+        "move_ticket",
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         "add_internal_note",

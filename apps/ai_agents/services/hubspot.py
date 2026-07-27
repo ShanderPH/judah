@@ -445,22 +445,29 @@ async def update_hubspot_ticket_route(
     stage_id: str,
     *,
     pipeline_id: str | None = None,
+    owner_id: str | None = None,
     timeout_seconds: float = 20.0,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
-    """Move a ticket to a stage and, when provided, to another pipeline."""
+    """Update a ticket route and optionally set or clear its owner."""
+    result_route = {
+        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
+        "stage_id": str(stage_id),
+        **({"owner_id": str(owner_id)} if owner_id is not None else {}),
+    }
     if USE_MOCK_HUBSPOT:
         return {
             "updated": True,
             "ticket_id": str(ticket_id),
-            **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-            "stage_id": str(stage_id),
+            **result_route,
             "attempts": 1,
         }
 
     properties = {"hs_pipeline_stage": str(stage_id)}
     if pipeline_id:
         properties["hs_pipeline"] = str(pipeline_id)
+    if owner_id is not None:
+        properties["hubspot_owner_id"] = str(owner_id)
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     async with httpx.AsyncClient(headers=_auth_headers(), timeout=timeout) as client:
         for attempt in range(1, max_attempts + 1):
@@ -478,13 +485,13 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     attempts=attempt,
                 )
                 return {
                     "updated": True,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                 }
             except httpx.HTTPStatusError as exc:
@@ -493,14 +500,14 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     status=exc.response.status_code,
                     attempts=attempt,
                 )
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                     "reason": f"http:{exc.response.status_code}",
                 }
@@ -513,14 +520,14 @@ async def update_hubspot_ticket_route(
                     ticket_id=ticket_id,
                     pipeline_id=pipeline_id,
                     stage_id=stage_id,
+                    owner_changed=owner_id is not None,
                     error_type=type(exc).__name__,
                     attempts=attempt,
                 )
                 return {
                     "updated": False,
                     "ticket_id": str(ticket_id),
-                    **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-                    "stage_id": str(stage_id),
+                    **result_route,
                     "attempts": attempt,
                     "reason": type(exc).__name__,
                 }
@@ -528,8 +535,7 @@ async def update_hubspot_ticket_route(
     return {
         "updated": False,
         "ticket_id": str(ticket_id),
-        **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
-        "stage_id": str(stage_id),
+        **result_route,
         "attempts": max_attempts,
         "reason": "unknown",
     }

@@ -24,6 +24,7 @@ from apps.ai_agents.services.hubspot import (
     hydrate_thread_context,
     hydrate_ticket_context,
     send_salomao_reply_to_hubspot_thread,
+    update_hubspot_ticket_route,
 )
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"image-content"
@@ -34,6 +35,35 @@ def _async_client_context(client: MagicMock) -> MagicMock:
     context.__aenter__ = AsyncMock(return_value=client)
     context.__aexit__ = AsyncMock(return_value=False)
     return context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_id", ["ai-owner", ""])
+async def test_update_ticket_route_sets_pipeline_stage_and_owner(monkeypatch, owner_id: str) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    response = MagicMock()
+    response.status_code = 200
+    client = MagicMock()
+    client.patch = AsyncMock(return_value=response)
+
+    with patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)):
+        result = await update_hubspot_ticket_route(
+            "ticket-1",
+            "closed",
+            pipeline_id="ai-triage",
+            owner_id=owner_id,
+        )
+
+    assert result["updated"] is True
+    assert result["owner_id"] == owner_id
+    response.raise_for_status.assert_called_once()
+    assert client.patch.await_args.kwargs["json"] == {
+        "properties": {
+            "hs_pipeline_stage": "closed",
+            "hs_pipeline": "ai-triage",
+            "hubspot_owner_id": owner_id,
+        }
+    }
 
 
 def test_build_salomao_prompt_uses_latest_incoming_message() -> None:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
+from django.test import override_settings
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
@@ -70,7 +71,12 @@ def _triage() -> TriageDecision:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -> None:
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-triage",
+    HUBSPOT_CLOSED_STAGE_ID="ai-closed",
+    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
+)
+async def test_candidate_resolution_closes_ticket_after_reply() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -90,9 +96,16 @@ async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -
         ),
     )
 
-    with patch(
-        "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
-        new=AsyncMock(return_value={"sent": True, "message_id": "out-1"}),
+    close_route = AsyncMock(return_value={"updated": True})
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-1"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
     ):
         await apply_supervisor_result(
             instance=instance,
@@ -103,8 +116,21 @@ async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -
         )
 
     await sync_to_async(instance.refresh_from_db)()
-    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.state == ConversationInstance.State.CLOSED
     assert instance.metadata["awaiting_resolution_confirmation"] is False
+    assert instance.metadata["ai_resolution_dispatch"] == {
+        "closed": True,
+        "ticket_id": "ticket-1",
+        "pipeline_id": "ai-triage",
+        "stage_id": "ai-closed",
+        "owner_assigned": True,
+    }
+    close_route.assert_awaited_once_with(
+        "ticket-1",
+        "ai-closed",
+        pipeline_id="ai-triage",
+        owner_id="ai-owner",
+    )
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="Heimdall").exists)()
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="SalomaoSupervisor").exists)()
     audit = await sync_to_async(ToolCallAuditLog.objects.get)(
@@ -112,6 +138,63 @@ async def test_candidate_resolution_waits_without_hidden_confirmation_prompt() -
         tool_name="send_thread_reply",
     )
     assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-triage",
+    HUBSPOT_CLOSED_STAGE_ID="ai-closed",
+    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
+)
+async def test_candidate_resolution_preserves_existing_human_owner() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Ajuste concluído.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: OK"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response="Ajuste concluído.",
+            confidence=0.9,
+        ),
+    )
+    conversation_context = _context().model_copy(update={"owner_id": "human-owner"})
+
+    close_route = AsyncMock(return_value={"updated": True})
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-human-owner"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=conversation_context,
+            message="Meu acesso foi normalizado",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.CLOSED
+    assert instance.metadata["ai_resolution_dispatch"]["owner_assigned"] is False
+    close_route.assert_awaited_once_with(
+        "ticket-1",
+        "ai-closed",
+        pipeline_id="ai-triage",
+        owner_id=None,
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -131,7 +214,7 @@ async def test_each_customer_message_has_one_independent_reply() -> None:
             model_name="test-model",
             latency_ms=1,
             decision=SupervisorDecision(
-                outcome="candidate_resolved",
+                outcome="waiting_customer",
                 final_response=text,
                 confidence=0.9,
             ),
@@ -221,6 +304,8 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook(
         effects.append("route")
         return {"updated": True}
 
+    route_update = AsyncMock(side_effect=route_handoff)
+
     async def send_confirmation(_context, text):
         effects.append("reply")
         assert text == HUMAN_HANDOFF_CONFIRMATION
@@ -243,7 +328,7 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook(
         ),
         patch(
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
-            new=AsyncMock(side_effect=route_handoff),
+            new=route_update,
         ),
     ):
         await apply_supervisor_result(
@@ -270,7 +355,99 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook(
             tool_name="assign_ticket_to_human_queue",
         ).exists
     )()
+    route_call = route_update.await_args
+    assert route_call.args == ("ticket-1", "939275049")
+    assert route_call.kwargs == {
+        "pipeline_id": "636459134",
+        "owner_id": None,
+    }
     assert effects == ["reply", "route", "observation"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_handoff_route_is_idempotent_per_customer_turn() -> None:
+    instance = await sync_to_async(_instance)()
+
+    def handoff_result() -> SalomaoResponse:
+        return SalomaoResponse(
+            session_id="hubspot-ticket-ticket-1",
+            message="Vou transferir seu atendimento.",
+            sources=[],
+            requires_human_handoff=True,
+            handoff_reason="Customer requested a human.",
+            agent_trace=["supervisor: mandatory_human_handoff"],
+            tokens_used=2,
+            model_name="test-model",
+            latency_ms=1,
+            triage_decision=_triage(),
+            decision=SupervisorDecision(
+                outcome="escalate_human",
+                final_response="Vou transferir seu atendimento.",
+                confidence=1.0,
+            ),
+        )
+
+    send_confirmation = AsyncMock(
+        side_effect=[
+            {"sent": True, "message_id": "handoff-confirmation-1"},
+            {"sent": True, "message_id": "handoff-confirmation-2"},
+        ]
+    )
+    route_update = AsyncMock(return_value={"updated": True})
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=send_confirmation,
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=route_update,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Quero falar com uma pessoa",
+            result=handoff_result(),
+        )
+
+        instance.state = ConversationInstance.State.AI_SERVICE_RUNNING
+        instance.last_message_id = "message-2"
+        await sync_to_async(instance.save)(update_fields=["state", "last_message_id", "updated_at"])
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Ainda quero falar com uma pessoa",
+            result=handoff_result(),
+        )
+
+        instance.state = ConversationInstance.State.AI_SERVICE_RUNNING
+        await sync_to_async(instance.save)(update_fields=["state", "updated_at"])
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Ainda quero falar com uma pessoa",
+            result=handoff_result(),
+        )
+
+    assert send_confirmation.await_count == 2
+    assert route_update.await_count == 2
+    keys = await sync_to_async(list)(
+        ToolCallAuditLog.objects.filter(
+            instance=instance,
+            tool_name="assign_ticket_to_human_queue",
+        )
+        .order_by("created_at")
+        .values_list("idempotency_key", flat=True)
+    )
+    assert keys == [
+        f"handoff:v3:{instance.pk}:ticket-1:message-1",
+        f"handoff:v3:{instance.pk}:ticket-1:message-2",
+    ]
 
 
 @pytest.mark.django_db
@@ -427,9 +604,16 @@ async def test_off_hours_regular_support_still_replies_normally() -> None:
     )
     send_reply = AsyncMock(return_value={"sent": True, "message_id": "out-normal"})
 
-    with patch(
-        "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
-        new=send_reply,
+    close_route = AsyncMock(return_value={"updated": True})
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=send_reply,
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
     ):
         await apply_supervisor_result(
             instance=instance,
@@ -440,8 +624,167 @@ async def test_off_hours_regular_support_still_replies_normally() -> None:
         )
 
     assert send_reply.await_args.args[1] == "Claro, vou te ajudar com isso."
+    close_route.assert_awaited_once()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.CLOSED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_waiting_customer_reply_keeps_ticket_open() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Qual tipo de pagamento você deseja estornar?",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: clarification"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="waiting_customer",
+            final_response="Qual tipo de pagamento você deseja estornar?",
+            missing_data=["payment_type"],
+            confidence=0.9,
+        ),
+    )
+    close_route = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-question"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Como faço estorno?",
+            result=result,
+        )
+
+    close_route.assert_not_awaited()
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.metadata["waiting_for_fields"] == ["payment_type"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_ai_resolution_route_failure_is_retryable() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Orientação concluída.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=[],
+        tokens_used=1,
+        model_name="test-model",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response="Orientação concluída.",
+            confidence=0.9,
+        ),
+    )
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-resolution"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(return_value={"updated": False, "reason": "http:503"}),
+        ),
+        pytest.raises(RuntimeError, match="http:503"),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Como faço?",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.FAILED_RETRYABLE
+    audit = await sync_to_async(ToolCallAuditLog.objects.get)(
+        instance=instance,
+        tool_name="update_ticket_stage",
+    )
+    assert audit.status == ToolCallAuditLog.Status.FAILED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@override_settings(HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner")
+@pytest.mark.parametrize(
+    ("current_owner_id", "expected_owner_id", "owner_cleared"),
+    [
+        ("ai-owner", "", True),
+        ("human-owner", None, False),
+    ],
+)
+async def test_handoff_only_clears_ai_owner_before_n1_assignment(
+    current_owner_id: str,
+    expected_owner_id: str | None,
+    owner_cleared: bool,
+) -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=[],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir.",
+            confidence=1.0,
+        ),
+    )
+    route_handoff = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-handoff"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=route_handoff,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context().model_copy(update={"owner_id": current_owner_id}),
+            message="Quero falar com um humano",
+            result=result,
+        )
+
+    route_handoff.assert_awaited_once_with(
+        "ticket-1",
+        "939275049",
+        pipeline_id="636459134",
+        owner_id=expected_owner_id,
+    )
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.metadata["human_handoff_dispatch"]["owner_cleared"] is owner_cleared
 
 
 @pytest.mark.django_db(transaction=True)

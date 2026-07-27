@@ -130,15 +130,21 @@ não é montado; ele concentra o worker reutilizado pelas tasks Celery.
    `escalate_human` ou `failed`.
 8. Respostas e handoffs são aplicados pela camada de execução com permissão
    por estado, chave de idempotência, `AgentRun` e `ToolCallAuditLog`.
-9. Uma resolução candidata permanece em `WAITING_FOR_CUSTOMER`; somente uma
-   confirmação determinística do cliente leva a `RESOLVED_BY_AI` e `CLOSED`.
-10. Handoffs criam `HandoffPackage`, entram no Matchmaker e avançam para os
-    estados humanos. Falhas transitórias usam retry limitado, watchdog e
-    fallback seguro para atendimento humano.
+9. Uma pergunta de esclarecimento permanece em `WAITING_FOR_CUSTOMER`. Uma
+   resposta conclusiva fecha o ticket somente depois que a resposta foi
+   entregue e o HubSpot confirmou `Triagem N1 / Fechado`; uma nova mensagem
+   recebida reabre a mesma conversa para outro turno.
+10. Handoffs primeiro avisam o cliente, depois movem o ticket para
+    `Support N1 / Novo`, limpam somente o owner da IA e deixam a atribuição
+    humana para o Matchmaker. Falhas transitórias usam retry limitado,
+    watchdog e fallback seguro.
 
 ### Decisões
 
 - Eventos duplicados não repetem dispatch nem efeitos externos.
+- `HUBSPOT_SALOMAO_TICKET_OWNER_ID` controla o proprietário usado nos tickets
+  concluídos pela IA quando ainda não há owner; vazio ou owner humano existente
+  preserva a atribuição atual.
 - Fora do horário comercial, `ConversationContext.is_off_hours` informa a
   política e o handoff continua disponível.
 - Sem `HUBSPOT_APP_SECRET` fora de DEBUG, o endpoint falha fechado.

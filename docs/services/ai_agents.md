@@ -133,9 +133,13 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `build_salomao_prompt_from_hubspot_context(context)`: extrai a mensagem atual do cliente para eventos de conversa.
 - `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
-- `request_human_handoff(...)`: primeiro move o ticket para o pipeline/estágio
-  humano e persiste a fila do Matchmaker; a confirmação ao cliente só é
-  enviada depois desses efeitos concluírem.
+- `request_human_handoff(...)`: depois da confirmação visível ao cliente,
+  move o ticket para o pipeline humano no estágio `Novo`, remove somente o
+  proprietário configurado da IA e aguarda a admissão canônica do Matchmaker.
+- `complete_ai_resolution(...)`: depois de entregar uma resposta conclusiva,
+  move o ticket para `Triagem N1 / Fechado`, atribui opcionalmente o owner
+  configurado em `HUBSPOT_SALOMAO_TICKET_OWNER_ID` somente quando o ticket
+  ainda não possui proprietário e fecha o lifecycle local.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
@@ -164,8 +168,13 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   encaminhamento. Em seguida, o ticket é movido para
   `HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`) e persistido na fila do Matchmaker;
   retries são idempotentes e não duplicam a confirmação.
-- Dados faltantes ou resposta candidata → `WAITING_FOR_CUSTOMER`.
-- Resolução por IA só fecha após confirmação explícita do cliente.
+- Dados faltantes ou pergunta de esclarecimento → `WAITING_FOR_CUSTOMER`,
+  sem fechar o ticket.
+- Resposta conclusiva (`candidate_resolved`) fecha o ticket somente depois
+  que a mensagem foi entregue ao cliente e o HubSpot confirmou a mudança para
+  `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_CLOSED_STAGE_ID`.
+- Uma nova mensagem `INCOMING` reabre o lifecycle fechado da mesma conversa
+  para que uma nova dúvida nunca seja perdida.
 - Tools externas exigem estado permitido, chave de idempotência e
   `ToolCallAuditLog`.
 - `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma

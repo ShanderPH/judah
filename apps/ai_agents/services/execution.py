@@ -405,8 +405,11 @@ def request_human_handoff(
     )
     if not ticket_id:
         raise ValueError("Human handoff requires a HubSpot ticket ID.")
+    turn_id = instance.last_message_id or instance.last_event_id
+    if not turn_id:
+        raise ValueError("Human handoff requires a customer turn identifier.")
 
-    idempotency_key = f"handoff:v2:{instance.pk}:{ticket_id}"
+    idempotency_key = f"handoff:v3:{instance.pk}:{ticket_id}:{turn_id}"
     prepared = _prepare_tool_call(
         instance=instance,
         tool_name="assign_ticket_to_human_queue",
@@ -426,10 +429,16 @@ def request_human_handoff(
 
             support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
             support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
+            configured_ai_owner_id = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
+            current_owner_id = str(
+                (conversation_context.owner_id if conversation_context is not None else "") or ""
+            ).strip()
+            route_owner_id = "" if configured_ai_owner_id and current_owner_id == configured_ai_owner_id else None
             route_result = async_to_sync(update_hubspot_ticket_route)(
                 str(ticket_id),
                 support_stage_id,
                 pipeline_id=support_pipeline_id,
+                owner_id=route_owner_id,
             )
             if not route_result.get("updated"):
                 raise RuntimeError(
@@ -442,6 +451,7 @@ def request_human_handoff(
                 "ticket_id": str(ticket_id),
                 "pipeline_id": support_pipeline_id,
                 "stage_id": support_stage_id,
+                "owner_cleared": route_owner_id == "",
                 "route_updated": True,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
@@ -500,6 +510,103 @@ def request_human_handoff(
             actor_type="system",
         )
     return {**package, "dispatch": output}
+
+
+def complete_ai_resolution(
+    *,
+    instance: ConversationInstance,
+    conversation_context: ConversationContext,
+    decision: SupervisorDecision,
+    agent_run: AgentRun | None = None,
+) -> dict[str, Any]:
+    """Close a conclusively answered ticket in the AI triage pipeline."""
+    ticket_id = instance.hubspot_ticket_id or conversation_context.ticket_id
+    if not ticket_id:
+        raise ValueError("AI resolution requires a HubSpot ticket ID.")
+    if conversation_context.allowed_actions and "update_ticket_stage" not in conversation_context.allowed_actions:
+        raise PermissionError("Ticket closure is not allowed for this conversation context.")
+
+    turn_id = instance.last_message_id or instance.last_event_id
+    if not turn_id:
+        raise ValueError("AI resolution requires a customer turn identifier.")
+
+    pipeline_id = str(settings.HUBSPOT_AI_TRIAGE_PIPELINE_ID)
+    stage_id = str(settings.HUBSPOT_CLOSED_STAGE_ID)
+    configured_owner_id = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
+    current_owner_id = str(conversation_context.owner_id or "").strip()
+    owner_id = configured_owner_id if configured_owner_id and not current_owner_id else None
+    idempotency_key = f"ai-resolution-close:v1:{instance.pk}:{turn_id}"
+    prepared = _prepare_tool_call(
+        instance=instance,
+        tool_name="update_ticket_stage",
+        idempotency_key=idempotency_key,
+        input_payload={
+            "ticket_id": str(ticket_id),
+            "pipeline_id": pipeline_id,
+            "stage_id": stage_id,
+            "assigns_ai_owner": owner_id is not None,
+        },
+        agent_run=agent_run,
+    )
+
+    output = prepared.cached_output
+    if prepared.should_execute:
+        try:
+            from apps.ai_agents.services.hubspot import update_hubspot_ticket_route
+
+            route_result = async_to_sync(update_hubspot_ticket_route)(
+                str(ticket_id),
+                stage_id,
+                pipeline_id=pipeline_id,
+                owner_id=owner_id,
+            )
+            if not route_result.get("updated"):
+                raise RuntimeError(
+                    f"HubSpot rejected the AI resolution route: {route_result.get('reason') or 'unknown error'}"
+                )
+            output = {
+                "closed": True,
+                "ticket_id": str(ticket_id),
+                "pipeline_id": pipeline_id,
+                "stage_id": stage_id,
+                "owner_assigned": owner_id is not None,
+            }
+            _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
+        except Exception as exc:
+            _finish_tool_call(
+                prepared.audit_id,
+                output={},
+                succeeded=False,
+                error_message=str(exc),
+            )
+            raise
+
+    if not output.get("closed"):
+        raise RuntimeError("AI resolution did not complete its HubSpot closing effect.")
+
+    engine = LifecycleEngine()
+    if instance.state != ConversationInstance.State.CLOSED:
+        if instance.state != ConversationInstance.State.RESOLVED_BY_AI:
+            engine.transition(
+                instance,
+                ConversationInstance.State.RESOLVED_BY_AI,
+                reason="Supervisor produced a conclusive answer and HubSpot accepted the closed route.",
+                actor_type="supervisor",
+            )
+        engine.transition(
+            instance,
+            ConversationInstance.State.CLOSED,
+            reason="AI resolution completed after the customer-visible reply was delivered.",
+            actor_type="system",
+        )
+    engine.update_metadata(
+        instance,
+        awaiting_resolution_confirmation=False,
+        waiting_for_fields=[],
+        last_supervisor_decision=decision.model_dump(mode="json"),
+        ai_resolution_dispatch=output,
+    )
+    return output
 
 
 def mark_retryable_failure(instance: ConversationInstance, error: Exception | str) -> None:
@@ -608,6 +715,7 @@ async def apply_supervisor_result(
         )
         return
 
+    reply_sent = False
     if can_reply and decision.final_response:
         turn_id = instance.last_message_id or instance.last_event_id
         if not turn_id:
@@ -629,6 +737,24 @@ async def apply_supervisor_result(
                 reply_result.get("reason") or "HubSpot reply failed.",
             )
             raise RuntimeError(reply_result.get("reason") or "HubSpot reply failed.")
+        reply_sent = True
+
+    if decision.outcome == "candidate_resolved":
+        if not reply_sent:
+            error = RuntimeError("Cannot close a ticket before delivering the AI resolution.")
+            await sync_to_async(mark_retryable_failure)(instance, error)
+            raise error
+        try:
+            await sync_to_async(complete_ai_resolution)(
+                instance=instance,
+                conversation_context=conversation_context,
+                decision=decision,
+                agent_run=agent_run,
+            )
+        except Exception as exc:
+            await sync_to_async(mark_retryable_failure)(instance, exc)
+            raise
+        return
 
     await sync_to_async(_set_waiting_state)(instance, decision=decision)
 
@@ -685,6 +811,7 @@ def handle_resolution_confirmation(instance: ConversationInstance, message: str)
 
 __all__ = [
     "apply_supervisor_result",
+    "complete_ai_resolution",
     "ensure_conversation_instance",
     "handle_resolution_confirmation",
     "mark_retryable_failure",

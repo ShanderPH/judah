@@ -468,12 +468,15 @@ class LifecycleEngine:
                         source_event_id=event.source_event_id,
                     )
                 elif decision.route != "IGNORE":
+                    can_reopen_terminal = event.event_type == "ticket_entered_n1" or (
+                        event.event_type == "conversation_message_received" and event.direction == "INCOMING"
+                    )
                     self.transition(
                         instance,
                         decision.target_state,
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
-                        allow_terminal_reopen=event.event_type == "ticket_entered_n1",
+                        allow_terminal_reopen=can_reopen_terminal,
                     )
                 elif instance_created and not event.hubspot_ticket_id:
                     # A ticket can emit metadata/property events before the
