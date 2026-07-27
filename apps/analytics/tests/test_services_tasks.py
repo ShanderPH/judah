@@ -1,6 +1,6 @@
 """Tests for analytics services and Celery tasks."""
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -13,12 +13,16 @@ from apps.analytics.tasks import backfill_reports, generate_daily_report
 
 @pytest.mark.django_db
 def test_daily_report_queries_and_recent_ordering() -> None:
-    older = DailyReport.objects.create(date=date(2026, 7, 14))
-    newer = DailyReport.objects.create(date=date(2026, 7, 15))
+    today = date.today()
+    outside_window = DailyReport.objects.create(date=today - timedelta(days=11))
+    older = DailyReport.objects.create(date=today - timedelta(days=2))
+    newer = DailyReport.objects.create(date=today - timedelta(days=1))
 
     assert get_daily_report(newer.date) == newer
     assert get_daily_report(date(2020, 1, 1)) is None
-    assert get_recent_reports(days=10)[:2] == [newer, older]
+    recent = get_recent_reports(days=10)
+    assert recent == [newer, older]
+    assert outside_window not in recent
 
 
 def test_compute_daily_report_aggregates_ticket_counts() -> None:
