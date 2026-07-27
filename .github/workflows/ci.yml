@@ -65,7 +65,8 @@ jobs:
     needs: lint
     permissions:
       contents: read
-      id-token: write
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     strategy:
       matrix:
@@ -126,12 +127,17 @@ jobs:
             -v
 
       - name: Upload coverage to Codecov
-        if: matrix.python-version == '3.14'
+        if: matrix.python-version == '3.14' && env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
           fail_ci_if_error: true
-          use_oidc: true
+          token: ${{ env.CODECOV_TOKEN }}
+
+      - name: Report disabled Codecov integration
+        if: matrix.python-version == '3.14' && env.CODECOV_TOKEN == ''
+        run: |
+          echo "::notice::Codecov upload skipped because CODECOV_TOKEN is not configured; pytest coverage remains a required gate."
 
   security:
     name: Security Scan

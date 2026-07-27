@@ -59,6 +59,9 @@ comandos Django e mypy, carregue as mesmas variáveis seguras definidas em
 - A API pública de Tickets do HubSpot não documenta compare-and-swap para
   PATCH. Por isso o Salomão não inclui owner no payload e revalida a rota
   imediatamente antes da mutação.
+- O repositório público ainda não está habilitado no Codecov. O upload só roda
+  quando `CODECOV_TOKEN` existir; a cobertura continua sendo gate obrigatório
+  e independente por `pytest --cov-fail-under=90`.
 - O smoke real depende do deploy simultâneo de web e worker e do webhook Judah
   canônico; o webhook separado do Salomão-Supremo permanece desativado.
 
