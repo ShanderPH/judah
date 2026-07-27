@@ -672,6 +672,26 @@ async def test_hydrate_ticket_context_success(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_thread_requests_ticket_association() -> None:
+    client = MagicMock()
+    response = MagicMock()
+    response.json.return_value = {
+        "id": "thread-1",
+        "threadAssociations": {"associatedTicketId": "ticket-1"},
+    }
+    client.get = AsyncMock(return_value=response)
+
+    thread = await hubspot._fetch_thread(client, "thread-1")
+
+    client.get.assert_awaited_once_with(
+        f"{hubspot.HUBSPOT_API_BASE}/conversations/v3/conversations/threads/thread-1",
+        params={"association": "TICKET"},
+    )
+    response.raise_for_status.assert_called_once_with()
+    assert thread["threadAssociations"]["associatedTicketId"] == "ticket-1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error_kind", ["status", "network"])
 async def test_hydrate_ticket_context_returns_partial_error(monkeypatch, error_kind: str) -> None:
     monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")

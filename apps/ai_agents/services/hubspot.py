@@ -411,7 +411,15 @@ async def _hydrate_latest_incoming_image(client: httpx.AsyncClient, context: dic
 
 
 async def _fetch_thread(client: httpx.AsyncClient, thread_id: str) -> dict[str, Any]:
-    response = await client.get(f"{HUBSPOT_API_BASE}/conversations/v3/conversations/threads/{thread_id}")
+    # HubSpot only includes ``threadAssociations.associatedTicketId`` when the
+    # association is explicitly requested. The ticket route is revalidated
+    # immediately before every AI reply, so omitting this parameter makes a
+    # valid thread look detached and causes the fail-closed guard to suppress
+    # the response with ``ticket_route_unavailable``.
+    response = await client.get(
+        f"{HUBSPOT_API_BASE}/conversations/v3/conversations/threads/{thread_id}",
+        params={"association": "TICKET"},
+    )
     response.raise_for_status()
     return response.json()
 
