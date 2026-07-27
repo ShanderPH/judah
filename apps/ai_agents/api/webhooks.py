@@ -39,6 +39,7 @@ from apps.ai_agents.services.execution import (
     mark_retryable_failure,
     request_human_handoff,
     resume_pending_ticket_effect,
+    suppress_ai_reply,
 )
 from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.hubspot import (
@@ -398,26 +399,6 @@ def _advance_lifecycle_for_hubspot_context(
             break
 
 
-def _build_hubspot_supervisor_message(context: dict[str, Any], ticket_id: str | None) -> str | None:
-    prompt = build_salomao_prompt_from_hubspot_context(context)
-    if prompt:
-        return prompt
-
-    history_lines = [
-        f"[{m.get('direction')}] {m.get('text')}" for m in context.get("conversation_history", []) if m.get("text")
-    ]
-    history_block = "\n".join(history_lines) or context.get("content", "")
-    if not history_block and not context.get("subject"):
-        return None
-
-    return (
-        f"Ticket HubSpot #{ticket_id or context.get('ticket_id') or 'desconhecido'}\n"
-        f"Assunto: {context.get('subject', '(sem assunto)')}\n"
-        f"Canal: {context.get('originating_channel', 'desconhecido')}\n\n"
-        f"Conteudo / Historico:\n{history_block}"
-    )
-
-
 def _latest_incoming_customer_text(context: dict[str, Any]) -> str:
     """Return only the latest raw customer text for deterministic policies."""
     for item in reversed(context.get("conversation_history") or []):
@@ -498,18 +479,54 @@ async def _resume_pending_effect_for_context(
     *,
     ticket_id: str | None = None,
     thread_id: str | None = None,
+    source_instance_id: str | None = None,
 ) -> bool:
     """Complete an audited provider effect before considering another model run."""
-    context_thread_id = str((context.get("thread_ids") or [""])[0]) or None
-    context_ticket_id = str(context.get("ticket_id") or "") or None
-    instance = await sync_to_async(find_conversation_instance)(
-        thread_id=thread_id or context_thread_id,
-        ticket_id=ticket_id or context_ticket_id,
-    )
+    if source_instance_id:
+        instance = await ConversationInstance.objects.filter(pk=source_instance_id).afirst()
+    else:
+        context_thread_id = str((context.get("thread_ids") or [""])[0]) or None
+        context_ticket_id = str(context.get("ticket_id") or "") or None
+        instance = await sync_to_async(find_conversation_instance)(
+            thread_id=thread_id or context_thread_id,
+            ticket_id=ticket_id or context_ticket_id,
+        )
     if instance is None or not await sync_to_async(has_pending_ticket_effect)(instance):
         return False
     await sync_to_async(resume_pending_ticket_effect)(instance)
     return True
+
+
+@sync_to_async
+def _suppress_stale_processing_instance(
+    context: dict[str, Any],
+    *,
+    ticket_id: str | None = None,
+    source_instance_id: str | None = None,
+) -> None:
+    """Terminalize an active/retryable run that has no current customer turn."""
+    if source_instance_id:
+        instance = ConversationInstance.objects.filter(pk=source_instance_id).first()
+    else:
+        thread_ids = context.get("thread_ids") or []
+        thread_id = str(thread_ids[0]) if thread_ids else None
+        instance = find_conversation_instance(
+            thread_id=thread_id,
+            ticket_id=ticket_id or str(context.get("ticket_id") or "") or None,
+        )
+    if instance is None:
+        return
+    suppressible_states = {
+        ConversationInstance.State.CONTEXT_HYDRATING,
+        ConversationInstance.State.CONTEXT_READY,
+        ConversationInstance.State.TRIAGE_PENDING,
+        ConversationInstance.State.TRIAGE_RUNNING,
+        ConversationInstance.State.AI_SERVICE_PENDING,
+        ConversationInstance.State.AI_SERVICE_RUNNING,
+        ConversationInstance.State.FAILED_RETRYABLE,
+    }
+    if instance.state in suppressible_states:
+        suppress_ai_reply(instance, reason="no_current_customer_turn")
 
 
 async def _run_supervisor_for_hubspot_context(
@@ -518,18 +535,16 @@ async def _run_supervisor_for_hubspot_context(
     session_id: str,
     ticket_id: str | None = None,
     is_off_hours: bool = False,
-    require_incoming: bool = False,
+    source_instance_id: str | None = None,
 ) -> None:
     """Run the backend-authoritative HubSpot workflow."""
-    instance = await sync_to_async(ensure_conversation_instance)(
-        context=context,
-        ticket_id=ticket_id,
-        session_id=session_id,
-    )
-    await _prepare_instance_for_supervisor(instance)
-
     incoming_prompt = build_salomao_prompt_from_hubspot_context(context)
-    if require_incoming and not incoming_prompt:
+    if not incoming_prompt:
+        await _suppress_stale_processing_instance(
+            context,
+            ticket_id=ticket_id,
+            source_instance_id=source_instance_id,
+        )
         logger.info(
             "supervisor_hubspot_no_new_incoming_message",
             ticket_id=ticket_id,
@@ -537,7 +552,14 @@ async def _run_supervisor_for_hubspot_context(
         )
         return
 
-    if incoming_prompt and await _waiting_turn_already_has_reply(instance):
+    instance = await sync_to_async(ensure_conversation_instance)(
+        context=context,
+        ticket_id=ticket_id,
+        session_id=session_id,
+    )
+    await _prepare_instance_for_supervisor(instance)
+
+    if await _waiting_turn_already_has_reply(instance):
         logger.info(
             "supervisor_hubspot_turn_already_replied",
             ticket_id=ticket_id,
@@ -556,18 +578,9 @@ async def _run_supervisor_for_hubspot_context(
         return
 
     safe_context, content_risk_flags = _sanitize_latest_incoming_customer_text(context)
-    if require_incoming:
-        message = build_salomao_prompt_from_hubspot_context(safe_context)
-        if not message:
-            logger.info(
-                "supervisor_hubspot_no_new_incoming_message",
-                ticket_id=ticket_id,
-                session_id=session_id,
-            )
-            return
-    else:
-        message = _build_hubspot_supervisor_message(safe_context, ticket_id)
+    message = build_salomao_prompt_from_hubspot_context(safe_context)
     if not message:
+        await sync_to_async(suppress_ai_reply)(instance, reason="no_current_customer_turn")
         logger.info("supervisor_hubspot_no_message", ticket_id=ticket_id, session_id=session_id)
         return
 
@@ -709,6 +722,7 @@ async def _run_supervisor_pipeline(
     ticket_id: str,
     is_off_hours: bool = False,
     enforce_ai_pipeline: bool = False,
+    source_instance_id: str | None = None,
 ) -> None:
     """Hydrate and execute the Supervisor, propagating failures to Celery."""
     context: dict[str, Any] = {}
@@ -718,7 +732,11 @@ async def _run_supervisor_pipeline(
             logger.error("supervisor_pipeline_aborted", ticket_id=ticket_id, errors=context["errors"])
             raise RuntimeError(f"HubSpot ticket context hydration failed: {context['errors']}")
 
-        if await _resume_pending_effect_for_context(context, ticket_id=ticket_id):
+        if await _resume_pending_effect_for_context(
+            context,
+            ticket_id=ticket_id,
+            source_instance_id=source_instance_id,
+        ):
             logger.info("supervisor_pipeline_pending_effect_resumed", ticket_id=ticket_id)
             return
 
@@ -744,6 +762,7 @@ async def _run_supervisor_pipeline(
             session_id=session_id,
             ticket_id=ticket_id,
             is_off_hours=is_off_hours,
+            source_instance_id=source_instance_id,
         )
     except Exception as exc:
         thread_ids = context.get("thread_ids") or []
@@ -806,7 +825,6 @@ async def _run_salomao_v1_thread_pipeline(
             session_id=session_id,
             ticket_id=ticket_id,
             is_off_hours=off_hours_reason() is not None,
-            require_incoming=True,
         )
     except Exception as exc:
         await _mark_pipeline_failure(thread_id=thread_id, error=exc)

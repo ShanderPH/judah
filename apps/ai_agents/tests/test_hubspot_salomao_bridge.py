@@ -285,6 +285,7 @@ async def test_fetch_history_keeps_hubspot_attachments() -> None:
                         "direction": "INCOMING",
                         "text": "",
                         "attachments": [{"type": "FILE", "fileUsageType": "IMAGE", "fileId": "42"}],
+                        "client": {"clientType": "INTEGRATION", "integrationAppId": 19550369},
                     }
                 ]
             },
@@ -294,6 +295,8 @@ async def test_fetch_history_keeps_hubspot_attachments() -> None:
         history = await _fetch_conversation_history(client, "thread-1")
 
     assert history[0]["attachments"][0]["fileId"] == "42"
+    assert history[0]["client_type"] == "INTEGRATION"
+    assert history[0]["integration_app_id"] == "19550369"
 
 
 async def test_download_image_attachment_detects_image_and_encodes_base64(monkeypatch) -> None:

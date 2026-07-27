@@ -201,6 +201,8 @@ async def _fetch_conversation_history(
     for raw in payload.get("results", []):
         senders = raw.get("senders") or []
         recipients = raw.get("recipients") or []
+        client = raw.get("client") if isinstance(raw.get("client"), dict) else {}
+        integration_app_id = client.get("integrationAppId")
         messages.append(
             {
                 "id": raw.get("id"),
@@ -214,10 +216,27 @@ async def _fetch_conversation_history(
                 "senders": senders,
                 "recipients": recipients,
                 "attachments": raw.get("attachments") or [],
+                "client_type": str(client.get("clientType") or ""),
+                "integration_app_id": str(integration_app_id) if integration_app_id is not None else None,
                 "raw": raw,
             }
         )
     return messages
+
+
+def _conversation_message_sources(messages: list[dict[str, Any]]) -> list[dict[str, str | None]]:
+    """Return distinct PII-free HubSpot client origins for structured logs."""
+    sources = {
+        (
+            str(message.get("client_type") or "UNKNOWN"),
+            str(message["integration_app_id"]) if message.get("integration_app_id") is not None else None,
+        )
+        for message in messages
+    }
+    return [
+        {"client_type": client_type, "integration_app_id": integration_app_id}
+        for client_type, integration_app_id in sorted(sources, key=lambda item: (item[0], item[1] or ""))
+    ]
 
 
 def _image_mime_type(content: bytes) -> str | None:
@@ -712,6 +731,7 @@ async def hydrate_ticket_context(
         "hubspot_context_hydrated",
         ticket_id=ticket_id,
         history_count=len(context["conversation_history"]),
+        message_sources=_conversation_message_sources(context["conversation_history"]),
         owner_id=context["owner_id"] or None,
         errors=errors or None,
     )
@@ -799,6 +819,7 @@ async def hydrate_thread_context(
         thread_id=thread_id,
         ticket_id=context["ticket_id"] or None,
         history_count=len(context["conversation_history"]),
+        message_sources=_conversation_message_sources(context["conversation_history"]),
         errors=errors or None,
     )
     return context

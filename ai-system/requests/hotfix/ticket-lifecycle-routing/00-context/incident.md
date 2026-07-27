@@ -11,6 +11,10 @@
   The task had hydrated the ticket before the human participation and did not
   revalidate exclusive ownership immediately before its customer-visible
   write.
+- Ticket `47206585351` exposed a second stale-processing path: a human moved
+  the ticket back to `IA / NOVO` without a new visitor turn. The ticket-level
+  worker and a later lifecycle retry could rebuild input from old history,
+  while ticket and thread lifecycle instances diverged on closure.
 - Production logs recorded five `hubspot_webhook_event_skipped_bad_signature`
   events for the two tickets. They were emitted by the separately signed
   Salomão-Supremo app.
@@ -30,6 +34,10 @@
 4. Reply delivery trusted the context captured before model execution. A route
    or owner change during inference could therefore make the pending answer
    stale without invalidating its outbound write.
+5. Ticket-triggered processing allowed a full-history fallback when the latest
+   usable message was not `INCOMING`.
+6. Ticket closure updated only the ticket placeholder instance and did not
+   converge thread instances associated with the same ticket.
 
 ## Constraints
 

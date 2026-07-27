@@ -4,9 +4,9 @@ Date: 2026-07-27
 
 ## Automated gates
 
-- Focused lifecycle/race/retry suite: `126 passed` on Python 3.14.4.
-- Full suite: `924 passed, 10 skipped` on Python 3.14.4.
-- Coverage: `90.06%`, above the required `90.00%`.
+- Focused incident/lifecycle/race/retry suite: `149 passed` on Python 3.14.4.
+- Full suite: `927 passed, 10 skipped` on Python 3.14.4.
+- Coverage: `90.05%`, above the required `90.00%`.
 - Ruff lint: clean.
 - Ruff formatting: 338 files already formatted.
 - Mypy: clean for 335 source files with the isolated test environment.
@@ -41,6 +41,14 @@ Date: 2026-07-27
   zero and never closes or reroutes the ticket.
 - Changed customer turns and suppressed handoff confirmations are terminal,
   not retryable.
+- Ticket-triggered processing and lifecycle retries stop before instance
+  preparation and model execution when no current `INCOMING` turn exists.
+- A stale ticket placeholder retry terminalizes the placeholder without
+  changing a sibling thread that is waiting for the customer.
+- Ticket closure converges ticket placeholders and every associated thread to
+  `CLOSED`, including previously terminal local projections.
+- Conversation hydration normalizes and logs distinct `clientType` and
+  `integrationAppId` origins without customer content.
 
 ## Scope notes
 

@@ -22,6 +22,15 @@
     retried as a dedicated effect; the model and customer reply are not rerun.
 12. A changed customer turn or safe handoff suppression is terminal and does
     not consume the retry budget.
+13. Every path that can invoke the Supervisor requires a current customer turn
+    whose latest usable message is `INCOMING`; full-history fallback is not
+    allowed.
+14. A stale lifecycle retry is terminalized before instance preparation or
+    model execution and cannot reuse a sibling thread instance silently.
+15. A HubSpot ticket-close event converges every persisted ticket/thread
+    instance associated with that ticket to `CLOSED`.
+16. HubSpot message hydration records the PII-free `clientType` and
+    `integrationAppId` origins in structured logs.
 
 ## Verification
 

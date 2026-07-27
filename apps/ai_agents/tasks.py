@@ -196,6 +196,7 @@ def run_supervisor_pipeline_task(
     enforce_ai_pipeline: bool = False,
     queue_if_busy: bool = False,
     message_batch_token: str | None = None,
+    source_instance_id: str | None = None,
 ) -> None:
     """Run the Salomão supervisor pipeline for a HubSpot ticket.
 
@@ -280,6 +281,7 @@ def run_supervisor_pipeline_task(
                 ticket_id,
                 is_off_hours=current_is_off_hours,
                 enforce_ai_pipeline=enforce_ai_pipeline,
+                source_instance_id=source_instance_id,
             )
         )
         succeeded = True
@@ -680,7 +682,11 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
             run_salomao_v1_thread_pipeline_task.delay(instance.hubspot_thread_id)
             redispatched += 1
         elif instance.hubspot_ticket_id:
-            run_supervisor_pipeline_task.delay(instance.hubspot_ticket_id, False)
+            run_supervisor_pipeline_task.delay(
+                instance.hubspot_ticket_id,
+                False,
+                source_instance_id=str(instance.pk),
+            )
             redispatched += 1
         else:
             LifecycleEngine().transition(

@@ -20,6 +20,16 @@
   mudança de status ou novo turno suprimem a saída obsoleta sem retry.
 - Rota/fechamento também fazem uma última hidratação imediatamente antes do
   PATCH. Supressão segura e mudança de turno são terminais.
+- O Supervisor não possui mais fallback por histórico completo: todo caminho,
+  inclusive alteração de etapa e retry por ticket, exige que o último turno
+  útil seja uma mensagem `INCOMING` ainda sem resposta.
+- Retry stale terminaliza somente a instância de origem; um placeholder por
+  ticket não altera nem reutiliza silenciosamente uma instância de thread que
+  esteja aguardando o cliente.
+- Fechar um ticket converge todas as instâncias persistidas associadas,
+  incluindo placeholders e threads, para `CLOSED`.
+- A hidratação registra `clientType` e `integrationAppId` de forma agregada e
+  sem PII nos logs estruturados, distinguindo Judah de chatflows HubSpot.
 
 ## Arquivos modificados
 
@@ -73,3 +83,7 @@ comandos Django e mypy, carregue as mesmas variáveis seguras definidas em
   recebida após fechamento inicia outro turno.
 - Confirmar que uma task iniciada antes de um atendimento humano não publica
   resposta tardia nem altera o ticket depois da tomada humana.
+- Confirmar que mover um ticket para `IA / NOVO` sem mensagem nova não inicia
+  modelo, não envia resposta e não deixa retry pendente.
+- Confirmar que o fechamento do ticket fecha também a projeção lifecycle da
+  thread e que os logs identificam o app de origem das mensagens.

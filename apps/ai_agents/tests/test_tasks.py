@@ -139,6 +139,7 @@ def test_supervisor_task_success_duplicate_and_lock_failure() -> None:
         "ticket-1",
         is_off_hours=True,
         enforce_ai_pipeline=False,
+        source_instance_id=None,
     )
     run.assert_called_once_with("coroutine")
     assert client.delete.call_count == 2
@@ -180,6 +181,7 @@ def test_supervisor_task_accepts_staging_dispatch_contract_and_queues_followup()
         "ticket-1",
         is_off_hours=False,
         enforce_ai_pipeline=True,
+        source_instance_id=None,
     )
     followup.assert_called_once_with("ticket-1", False, True, True)
 
@@ -504,7 +506,11 @@ def test_retry_dispatcher_ticket_and_terminal_paths() -> None:
         "handed_off": 0,
         "terminal": 2,
     }
-    delay.assert_called_once_with(ticket.hubspot_ticket_id, False)
+    delay.assert_called_once_with(
+        ticket.hubspot_ticket_id,
+        False,
+        source_instance_id=str(ticket.pk),
+    )
     no_identifier.refresh_from_db()
     exhausted.refresh_from_db()
     assert no_identifier.state == ConversationInstance.State.FAILED_TERMINAL

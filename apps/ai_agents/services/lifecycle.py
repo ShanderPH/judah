@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import UUID
 
 import structlog
 from django.conf import settings
@@ -495,12 +496,43 @@ class LifecycleEngine:
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                     )
+                if decision.route == "CLOSE" and event.hubspot_ticket_id:
+                    self._close_all_ticket_instances(
+                        event.hubspot_ticket_id,
+                        primary_instance_id=instance.pk,
+                        source_event_id=event.source_event_id,
+                    )
         return LifecycleRecordResult(
             instance=instance,
             event=lifecycle_event,
             decision=decision,
             event_created=event_created,
         )
+
+    def _close_all_ticket_instances(
+        self,
+        ticket_id: str,
+        *,
+        primary_instance_id: UUID,
+        source_event_id: str,
+    ) -> None:
+        """Converge every persisted conversation for a closed HubSpot ticket."""
+        siblings = (
+            ConversationInstance.objects.select_for_update()
+            .filter(hubspot_ticket_id=str(ticket_id))
+            .exclude(pk=primary_instance_id)
+        )
+        for sibling in siblings:
+            if sibling.state == ConversationInstance.State.CLOSED:
+                continue
+            self.transition(
+                sibling,
+                ConversationInstance.State.CLOSED,
+                reason="HubSpot ticket closure converged across conversation instances.",
+                actor_type="ticket_lifecycle_convergence",
+                source_event_id=source_event_id,
+                allow_terminal_reopen=sibling.state in TERMINAL_STATES,
+            )
 
     def transition(
         self,

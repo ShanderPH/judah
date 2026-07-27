@@ -380,3 +380,47 @@ def test_new_customer_message_reopens_closed_conversation() -> None:
         from_state=ConversationInstance.State.CLOSED,
         to_state=ConversationInstance.State.CONTEXT_HYDRATING,
     ).exists()
+
+
+@pytest.mark.django_db
+def test_ticket_close_converges_placeholder_and_all_thread_instances() -> None:
+    ticket_id = "ticket-close-scope"
+    thread_waiting = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:close-waiting",
+        hubspot_thread_id="close-waiting",
+        hubspot_ticket_id=ticket_id,
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+    )
+    thread_ignored = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:close-ignored",
+        hubspot_thread_id="close-ignored",
+        hubspot_ticket_id=ticket_id,
+        state=ConversationInstance.State.IGNORED,
+    )
+    placeholder = ConversationInstance.objects.create(
+        idempotency_key=f"conversation:ticket:{ticket_id}",
+        hubspot_ticket_id=ticket_id,
+        state=ConversationInstance.State.CONTEXT_HYDRATING,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="ticket-close-event",
+        event_type="ticket_closed",
+        idempotency_key="hubspot:ticket-close-event",
+        payload={"objectId": ticket_id},
+        hubspot_ticket_id=ticket_id,
+    )
+
+    result = LifecycleEngine().record_normalized_event(event)
+
+    assert result.instance.pk == placeholder.pk
+    for instance in (placeholder, thread_waiting, thread_ignored):
+        instance.refresh_from_db()
+        assert instance.state == ConversationInstance.State.CLOSED
+        assert instance.closed_at is not None
+    assert ConversationStateTransition.objects.filter(
+        instance=thread_waiting,
+        to_state=ConversationInstance.State.CLOSED,
+        actor_type="ticket_lifecycle_convergence",
+        source_event_id="ticket-close-event",
+    ).exists()

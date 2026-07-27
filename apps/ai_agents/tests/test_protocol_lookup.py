@@ -548,7 +548,6 @@ async def test_protocol_reply_bypasses_supervisor_and_salomao(monkeypatch) -> No
         context,
         session_id="hubspot-thread-thread-1",
         ticket_id="current-ticket",
-        require_incoming=True,
     )
 
     lookup.assert_awaited_once_with(context)
@@ -601,7 +600,6 @@ async def test_ticket_property_pipeline_uses_protocol_lookup_for_incoming_histor
         context,
         session_id="hubspot-ticket-current-ticket",
         ticket_id="current-ticket",
-        require_incoming=False,
     )
 
     lookup.assert_awaited_once_with(context)
@@ -651,7 +649,6 @@ async def test_duplicate_ticket_property_turn_stops_before_lookup_or_model(monke
         },
         session_id="hubspot-thread-thread-duplicate",
         ticket_id="ticket-duplicate",
-        require_incoming=False,
     )
 
     lookup.assert_not_awaited()
@@ -705,7 +702,6 @@ async def test_hubspot_image_is_passed_privately_to_supervisor(monkeypatch) -> N
         context,
         session_id="hubspot-thread-thread-1",
         ticket_id="current-ticket",
-        require_incoming=True,
     )
 
     metadata = supervisor_factory.call_args.kwargs["user_metadata"]
