@@ -59,7 +59,7 @@ Decisões técnicas estão espalhadas por docstrings, comentários e código. Es
 ### ADR-007: Redis como cache, broker e session store de IA
 
 - **Contexto:** necessidade de cache, broker Celery e persistência de sessão dos agentes.
-- **Decisão:** Redis 7 unificado para todas as funções.
+- **Decisão:** Redis 8.6 unificado para todas as funções, alinhado ao runtime de produção.
 - **Justificativa:** simplifica infraestrutura; session store Agno usa prefixo `inchurch:agent:{session_id}`.
 - **Arquivos:** [`core/settings/base.py`](../../core/settings/base.py), [`apps/ai_agents/agents/base.py`](../../apps/ai_agents/agents/base.py).
 

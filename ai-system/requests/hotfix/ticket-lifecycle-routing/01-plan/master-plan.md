@@ -4,12 +4,11 @@
 
 1. An explicit human request sends the confirmation first, then patches the
    ticket to `HUBSPOT_SUPPORT_PIPELINE_ID / HUBSPOT_SUPPORT_NEW_STAGE_ID`.
-2. If the current owner equals `HUBSPOT_SALOMAO_TICKET_OWNER_ID`, handoff
-   clears it so the Matchmaker can assign N1. Any other owner is preserved.
+2. Neither handoff nor AI closure writes `hubspot_owner_id`; ownership remains
+   under HubSpot/Matchmaker authority.
 3. `candidate_resolved` closes only after the reply is delivered and HubSpot
    accepts `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_CLOSED_STAGE_ID`.
-4. AI closure assigns `HUBSPOT_SALOMAO_TICKET_OWNER_ID` when configured and
-   no owner is already present; a human owner is never overwritten.
+4. A concurrent human assignment is never cleared or overwritten by Salomão.
 5. `waiting_customer` does not close the ticket.
 6. A new incoming customer message reopens a closed conversation instance.
 7. Failed provider mutations are audited and become retryable.
@@ -19,6 +18,10 @@
    owner or active human participation.
 10. Eligibility is refreshed immediately before reply delivery. A stale reply
     is suppressed without closing, rerouting or retrying against the ticket.
+11. After a visible reply succeeds, a failed route/close PATCH is persisted and
+    retried as a dedicated effect; the model and customer reply are not rerun.
+12. A changed customer turn or safe handoff suppression is terminal and does
+    not consume the retry budget.
 
 ## Verification
 

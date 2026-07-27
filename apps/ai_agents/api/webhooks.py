@@ -35,8 +35,10 @@ from apps.ai_agents.services.execution import (
     apply_supervisor_result,
     ensure_conversation_instance,
     handle_resolution_confirmation,
+    has_pending_ticket_effect,
     mark_retryable_failure,
     request_human_handoff,
+    resume_pending_ticket_effect,
 )
 from apps.ai_agents.services.handoff import build_handoff_package
 from apps.ai_agents.services.hubspot import (
@@ -491,6 +493,25 @@ def _mark_pipeline_failure(
         mark_retryable_failure(instance, error)
 
 
+async def _resume_pending_effect_for_context(
+    context: dict[str, Any],
+    *,
+    ticket_id: str | None = None,
+    thread_id: str | None = None,
+) -> bool:
+    """Complete an audited provider effect before considering another model run."""
+    context_thread_id = str((context.get("thread_ids") or [""])[0]) or None
+    context_ticket_id = str(context.get("ticket_id") or "") or None
+    instance = await sync_to_async(find_conversation_instance)(
+        thread_id=thread_id or context_thread_id,
+        ticket_id=ticket_id or context_ticket_id,
+    )
+    if instance is None or not await sync_to_async(has_pending_ticket_effect)(instance):
+        return False
+    await sync_to_async(resume_pending_ticket_effect)(instance)
+    return True
+
+
 async def _run_supervisor_for_hubspot_context(
     context: dict[str, Any],
     *,
@@ -697,6 +718,10 @@ async def _run_supervisor_pipeline(
             logger.error("supervisor_pipeline_aborted", ticket_id=ticket_id, errors=context["errors"])
             raise RuntimeError(f"HubSpot ticket context hydration failed: {context['errors']}")
 
+        if await _resume_pending_effect_for_context(context, ticket_id=ticket_id):
+            logger.info("supervisor_pipeline_pending_effect_resumed", ticket_id=ticket_id)
+            return
+
         eligibility = evaluate_salomao_ticket_eligibility(context)
         if not eligibility["eligible"]:
             if eligibility["retryable"]:
@@ -750,6 +775,18 @@ async def _run_salomao_v1_thread_pipeline(
 
         ticket_id = context.get("ticket_id") or None
         session_id = f"hubspot-thread-{thread_id}"
+        if await _resume_pending_effect_for_context(
+            context,
+            ticket_id=ticket_id,
+            thread_id=thread_id,
+        ):
+            logger.info(
+                "supervisor_thread_pending_effect_resumed",
+                thread_id=thread_id,
+                ticket_id=ticket_id,
+            )
+            return
+
         eligibility = evaluate_salomao_ticket_eligibility(context)
         if not eligibility["eligible"]:
             if eligibility["retryable"]:

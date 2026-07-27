@@ -140,17 +140,17 @@ não é montado; ele concentra o worker reutilizado pelas tasks Celery.
     humano. Se um agente assumir a conversa durante o processamento, a resposta
     tardia é descartada e a instância registra `IGNORED`, sem fechar, rotear ou
     responder no ticket.
-10. Handoffs primeiro avisam o cliente, depois movem o ticket para
-    `Support N1 / Novo`, limpam somente o owner da IA e deixam a atribuição
-    humana para o Matchmaker. Falhas transitórias usam retry limitado,
-    watchdog e fallback seguro.
+11. Handoffs primeiro avisam o cliente, depois revalidam a exclusividade da IA
+    e movem o ticket para `Support N1 / Novo`. A atribuição humana fica para o
+    Matchmaker. Falhas transitórias retomam somente o efeito externo pendente,
+    sem repetir o modelo ou a mensagem visível.
 
 ### Decisões
 
 - Eventos duplicados não repetem dispatch nem efeitos externos.
-- `HUBSPOT_SALOMAO_TICKET_OWNER_ID` controla o proprietário usado nos tickets
-  concluídos pela IA quando ainda não há owner; vazio ou owner humano existente
-  preserva a atribuição atual.
+- O Salomão não altera `hubspot_owner_id` em handoff nem em fechamento. Assim,
+  uma atribuição concorrente nunca é apagada ou substituída por snapshot
+  obsoleto; o HubSpot/Matchmaker é a autoridade de proprietário.
 - Fora do horário comercial, `ConversationContext.is_off_hours` informa a
   política e o handoff continua disponível.
 - Sem `HUBSPOT_APP_SECRET` fora de DEBUG, o endpoint falha fechado.

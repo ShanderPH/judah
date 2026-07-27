@@ -431,12 +431,16 @@ def request_human_handoff(
         raise ValueError("Human handoff requires a customer turn identifier.")
 
     idempotency_key = f"handoff:v3:{instance.pk}:{ticket_id}:{turn_id}"
+    support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
+    support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
     prepared = _prepare_tool_call(
         instance=instance,
         tool_name="assign_ticket_to_human_queue",
         idempotency_key=idempotency_key,
         input_payload={
             "ticket_id": str(ticket_id),
+            "pipeline_id": support_pipeline_id,
+            "stage_id": support_stage_id,
             "priority": package.get("priority") or "",
             "reason": _text_fingerprint(reason),
             "summary": _text_fingerprint(ai_summary),
@@ -448,19 +452,28 @@ def request_human_handoff(
         try:
             from apps.ai_agents.services.hubspot import update_hubspot_ticket_route
 
-            support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
-            support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
-            configured_ai_owner_id = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
-            current_owner_id = str(
-                (conversation_context.owner_id if conversation_context is not None else "") or ""
-            ).strip()
-            route_owner_id = "" if configured_ai_owner_id and current_owner_id == configured_ai_owner_id else None
             route_result = async_to_sync(update_hubspot_ticket_route)(
                 str(ticket_id),
                 support_stage_id,
                 pipeline_id=support_pipeline_id,
-                owner_id=route_owner_id,
+                eligibility_thread_id=instance.hubspot_thread_id,
+                expected_customer_turn_id=str(turn_id),
             )
+            if route_result.get("suppressed"):
+                output = {
+                    "queued": False,
+                    "ticket_id": str(ticket_id),
+                    "pipeline_id": support_pipeline_id,
+                    "stage_id": support_stage_id,
+                    "owner_mutated": False,
+                    "route_updated": False,
+                    "suppressed": True,
+                    "reason": str(route_result.get("reason") or "ticket_not_eligible_for_ai"),
+                }
+                _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
+                engine.update_metadata(instance, human_handoff_dispatch=output)
+                suppress_ai_reply(instance, reason=output["reason"])
+                return {**package, "dispatch": output}
             if not route_result.get("updated"):
                 raise RuntimeError(
                     f"HubSpot rejected the human-support route: {route_result.get('reason') or 'unknown error'}"
@@ -472,7 +485,7 @@ def request_human_handoff(
                 "ticket_id": str(ticket_id),
                 "pipeline_id": support_pipeline_id,
                 "stage_id": support_stage_id,
-                "owner_cleared": route_owner_id == "",
+                "owner_mutated": False,
                 "route_updated": True,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
@@ -553,9 +566,6 @@ def complete_ai_resolution(
 
     pipeline_id = str(settings.HUBSPOT_AI_TRIAGE_PIPELINE_ID)
     stage_id = str(settings.HUBSPOT_CLOSED_STAGE_ID)
-    configured_owner_id = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
-    current_owner_id = str(conversation_context.owner_id or "").strip()
-    owner_id = configured_owner_id if configured_owner_id and not current_owner_id else None
     idempotency_key = f"ai-resolution-close:v1:{instance.pk}:{turn_id}"
     prepared = _prepare_tool_call(
         instance=instance,
@@ -565,7 +575,7 @@ def complete_ai_resolution(
             "ticket_id": str(ticket_id),
             "pipeline_id": pipeline_id,
             "stage_id": stage_id,
-            "assigns_ai_owner": owner_id is not None,
+            "owner_mutated": False,
         },
         agent_run=agent_run,
     )
@@ -579,8 +589,24 @@ def complete_ai_resolution(
                 str(ticket_id),
                 stage_id,
                 pipeline_id=pipeline_id,
-                owner_id=owner_id,
+                eligibility_thread_id=instance.hubspot_thread_id,
+                expected_customer_turn_id=str(turn_id),
             )
+            if route_result.get("suppressed"):
+                output = {
+                    "closed": False,
+                    "ticket_id": str(ticket_id),
+                    "pipeline_id": pipeline_id,
+                    "stage_id": stage_id,
+                    "owner_mutated": False,
+                    "suppressed": True,
+                    "reason": str(route_result.get("reason") or "ticket_not_eligible_for_ai"),
+                }
+                _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
+                engine = LifecycleEngine()
+                engine.update_metadata(instance, ai_resolution_dispatch=output)
+                suppress_ai_reply(instance, reason=output["reason"])
+                return output
             if not route_result.get("updated"):
                 raise RuntimeError(
                     f"HubSpot rejected the AI resolution route: {route_result.get('reason') or 'unknown error'}"
@@ -590,7 +616,7 @@ def complete_ai_resolution(
                 "ticket_id": str(ticket_id),
                 "pipeline_id": pipeline_id,
                 "stage_id": stage_id,
-                "owner_assigned": owner_id is not None,
+                "owner_mutated": False,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
         except Exception as exc:
@@ -628,6 +654,92 @@ def complete_ai_resolution(
         ai_resolution_dispatch=output,
     )
     return output
+
+
+_REPLAYABLE_TICKET_EFFECTS = {
+    "assign_ticket_to_human_queue",
+    "update_ticket_stage",
+}
+
+
+def pending_ticket_effect(instance: ConversationInstance) -> ToolCallAuditLog | None:
+    """Return the durable provider effect that still needs completion."""
+    if instance.state != ConversationInstance.State.FAILED_RETRYABLE:
+        return None
+    return (
+        ToolCallAuditLog.objects.filter(
+            instance=instance,
+            tool_name__in=_REPLAYABLE_TICKET_EFFECTS,
+            status__in={
+                ToolCallAuditLog.Status.STARTED,
+                ToolCallAuditLog.Status.FAILED,
+            },
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def has_pending_ticket_effect(instance: ConversationInstance) -> bool:
+    """Return whether retry must replay a provider effect instead of the model."""
+    return pending_ticket_effect(instance) is not None
+
+
+def resume_pending_ticket_effect(instance: ConversationInstance) -> dict[str, Any] | None:
+    """Replay only a failed route/close effect, never the model or customer reply."""
+    audit = pending_ticket_effect(instance)
+    if audit is None:
+        return None
+
+    context = ConversationContext(
+        channel="hubspot",
+        session_id=instance.ai_session_id or f"hubspot-ticket-{instance.hubspot_ticket_id or 'unknown'}",
+        ticket_id=instance.hubspot_ticket_id,
+        thread_id=instance.hubspot_thread_id,
+        contact_id=instance.hubspot_contact_id,
+        pipeline_id=instance.pipeline_id,
+        pipeline_stage=instance.pipeline_stage_id,
+        can_send_reply=False,
+    )
+    if audit.tool_name == "assign_ticket_to_human_queue":
+        package = dict((instance.metadata or {}).get("handoff_package") or {})
+        triage_payload = package.get("triage")
+        triage = TriageDecision.model_validate(triage_payload) if triage_payload else None
+        result = request_human_handoff(
+            instance=instance,
+            reason=str(package.get("reason") or "Retrying a durable human handoff effect."),
+            conversation_context=context,
+            triage_decision=triage,
+            ai_summary=str(
+                package.get("ai_summary") or package.get("conversation_summary") or "Atendimento humano solicitado."
+            ),
+            agent_run=audit.agent_run,
+        )
+    else:
+        decision_payload = dict(audit.agent_run.output_structured or {}) if audit.agent_run_id else {}
+        try:
+            decision = SupervisorDecision.model_validate(decision_payload)
+        except ValueError:
+            decision = SupervisorDecision(
+                outcome="candidate_resolved",
+                final_response="",
+                confidence=1.0,
+                trace_summary=["durable_effect_replay"],
+            )
+        result = complete_ai_resolution(
+            instance=instance,
+            conversation_context=context,
+            decision=decision,
+            agent_run=audit.agent_run,
+        )
+
+    logger.info(
+        "pending_ticket_effect_resumed",
+        conversation_instance_id=str(instance.pk),
+        tool_name=audit.tool_name,
+        suppressed=bool(result.get("suppressed") or (result.get("dispatch") or {}).get("suppressed")),
+    )
+    return result
 
 
 def mark_retryable_failure(instance: ConversationInstance, error: Exception | str) -> None:
@@ -713,16 +825,32 @@ async def apply_supervisor_result(
                 ),
             )
             if not reply_result.get("sent"):
+                if reply_result.get("suppressed"):
+                    await sync_to_async(suppress_ai_reply)(
+                        instance,
+                        reason=str(reply_result.get("reason") or "ticket_not_eligible_for_ai"),
+                    )
+                    logger.info(
+                        "supervisor_handoff_reply_safely_suppressed",
+                        conversation_instance_id=str(instance.pk),
+                        ticket_id=conversation_context.ticket_id,
+                        reason=reply_result.get("reason"),
+                    )
+                    return
                 raise RuntimeError(reply_result.get("reason") or "HubSpot handoff confirmation failed.")
 
-        await sync_to_async(request_human_handoff)(
-            instance=instance,
-            reason=result.handoff_reason or "Supervisor requested human handoff.",
-            conversation_context=conversation_context,
-            triage_decision=result.triage_decision,
-            ai_summary=decision.final_response,
-            agent_run=agent_run,
-        )
+        try:
+            await sync_to_async(request_human_handoff)(
+                instance=instance,
+                reason=result.handoff_reason or "Supervisor requested human handoff.",
+                conversation_context=conversation_context,
+                triage_decision=result.triage_decision,
+                ai_summary=decision.final_response,
+                agent_run=agent_run,
+            )
+        except Exception as exc:
+            await sync_to_async(mark_retryable_failure)(instance, exc)
+            raise
         return
 
     if can_reply and decision.final_response and not reply_tool_allowed:
@@ -847,10 +975,12 @@ __all__ = [
     "complete_ai_resolution",
     "ensure_conversation_instance",
     "handle_resolution_confirmation",
+    "has_pending_ticket_effect",
     "mark_retryable_failure",
     "publish_handoff_observation",
     "record_supervisor_runs",
     "request_human_handoff",
+    "resume_pending_ticket_effect",
     "send_reply_with_audit",
     "suppress_ai_reply",
 ]

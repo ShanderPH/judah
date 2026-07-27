@@ -37,6 +37,7 @@ from apps.ai_agents.services.conversation_turn import (
     current_incoming_turn,
     current_incoming_turn_text,
     incoming_message_id,
+    latest_incoming_message_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -447,10 +448,12 @@ async def update_hubspot_ticket_route(
     *,
     pipeline_id: str | None = None,
     owner_id: str | None = None,
+    eligibility_thread_id: str | None = None,
+    expected_customer_turn_id: str | None = None,
     timeout_seconds: float = 20.0,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
-    """Update a ticket route and optionally set or clear its owner."""
+    """Update a ticket route after an optional fresh Salomao eligibility check."""
     result_route = {
         **({"pipeline_id": str(pipeline_id)} if pipeline_id else {}),
         "stage_id": str(stage_id),
@@ -463,6 +466,42 @@ async def update_hubspot_ticket_route(
             **result_route,
             "attempts": 1,
         }
+
+    if eligibility_thread_id:
+        fresh_context = await hydrate_thread_context(
+            eligibility_thread_id,
+            timeout_seconds=timeout_seconds,
+        )
+        if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
+            return {
+                "updated": False,
+                "suppressed": False,
+                "retryable": True,
+                "ticket_id": str(ticket_id),
+                **result_route,
+                "reason": "eligibility_refresh_failed",
+            }
+        eligibility = evaluate_salomao_ticket_eligibility(fresh_context)
+        if not eligibility["eligible"]:
+            return {
+                "updated": False,
+                "suppressed": not bool(eligibility["retryable"]),
+                "retryable": bool(eligibility["retryable"]),
+                "ticket_id": str(ticket_id),
+                **result_route,
+                "reason": str(eligibility["reason"]),
+            }
+        if expected_customer_turn_id:
+            fresh_turn_id = latest_incoming_message_id(fresh_context)
+            if fresh_turn_id != expected_customer_turn_id:
+                return {
+                    "updated": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "ticket_id": str(ticket_id),
+                    **result_route,
+                    "reason": "customer_turn_changed",
+                }
 
     properties = {"hs_pipeline_stage": str(stage_id)}
     if pipeline_id:
@@ -819,9 +858,8 @@ def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, An
             "retryable": False,
         }
 
-    configured_ai_owner = str(getattr(settings, "HUBSPOT_SALOMAO_TICKET_OWNER_ID", "") or "").strip()
     current_owner = str(context.get("owner_id") or "").strip()
-    if current_owner and current_owner != configured_ai_owner:
+    if current_owner:
         return {
             "eligible": False,
             "reason": "ticket_owned_by_human",
@@ -829,23 +867,21 @@ def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, An
         }
 
     # An unassigned ticket can still be answered manually from the inbox.
-    # Once an agent has participated, only an explicit reassignment to the
-    # configured AI owner may return the ticket to Salomao.
-    if not current_owner:
-        latest_outgoing = next(
-            (
-                message
-                for message in reversed(context.get("conversation_history") or [])
-                if str(message.get("direction") or "").upper() == "OUTGOING"
-            ),
-            None,
-        )
-        if latest_outgoing is not None and _message_is_from_human_agent(latest_outgoing):
-            return {
-                "eligible": False,
-                "reason": "human_agent_participating",
-                "retryable": False,
-            }
+    # Any human participation takes precedence over an already-running AI task.
+    latest_outgoing = next(
+        (
+            message
+            for message in reversed(context.get("conversation_history") or [])
+            if str(message.get("direction") or "").upper() == "OUTGOING"
+        ),
+        None,
+    )
+    if latest_outgoing is not None and _message_is_from_human_agent(latest_outgoing):
+        return {
+            "eligible": False,
+            "reason": "human_agent_participating",
+            "retryable": False,
+        }
 
     return {
         "eligible": True,
@@ -898,7 +934,7 @@ async def refresh_salomao_reply_context(context: dict[str, Any]) -> dict[str, An
         return {
             "eligible": False,
             "reason": "customer_turn_changed",
-            "retryable": True,
+            "retryable": False,
             "context": fresh_context,
         }
     return {

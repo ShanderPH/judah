@@ -17,7 +17,7 @@ O schema do banco reflete a migração de sistemas legados: várias tabelas mape
 | Driver | `psycopg[binary]` 3.x |
 | Pool | `dj_database_url` com `conn_max_age` |
 | Migrations | Django migrations |
-| Cache/Broker | Redis 7 |
+| Cache/Broker | Redis 8.6 |
 
 ## Configuração de conexão
 

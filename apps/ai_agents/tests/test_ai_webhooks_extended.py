@@ -8,7 +8,7 @@ from django.test import override_settings
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.api import webhooks
-from apps.ai_agents.models import ConversationInstance, TokenTrackingLog
+from apps.ai_agents.models import ConversationInstance, TokenTrackingLog, ToolCallAuditLog
 
 
 def _response() -> SalomaoResponse:
@@ -324,7 +324,6 @@ async def test_thread_pipeline_skips_ticket_owned_by_human() -> None:
         override_settings(
             HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
             HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
-            HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
         ),
         patch(
             "apps.ai_agents.api.webhooks.hydrate_thread_context",
@@ -337,6 +336,62 @@ async def test_thread_pipeline_skips_ticket_owned_by_human() -> None:
     ):
         await webhooks._run_salomao_v1_thread_pipeline("thread-1")
 
+    run.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_thread_retry_resumes_pending_effect_without_model() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:thread-effect",
+        hubspot_thread_id="thread-effect",
+        hubspot_ticket_id="ticket-effect",
+        state=ConversationInstance.State.FAILED_RETRYABLE,
+    )
+    await ToolCallAuditLog.objects.acreate(
+        instance=instance,
+        tool_name="update_ticket_stage",
+        input={"ticket_id": "ticket-effect", "stage_id": "closed"},
+        status=ToolCallAuditLog.Status.FAILED,
+        idempotency_key="ai-resolution-close:v1:thread-effect",
+    )
+    context = {
+        "ticket_id": "ticket-effect",
+        "thread_ids": ["thread-effect"],
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "",
+        "conversation_history": [
+            {
+                "direction": "OUTGOING",
+                "text": "Resposta já entregue",
+                "senders": [{"actorId": "A-salomao"}],
+            }
+        ],
+    }
+
+    with (
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+            HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_thread_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.resume_pending_ticket_effect",
+            return_value={"closed": True},
+        ) as resume,
+        patch(
+            "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
+            new=AsyncMock(),
+        ) as run,
+    ):
+        await webhooks._run_salomao_v1_thread_pipeline("thread-effect")
+
+    resume.assert_called_once()
     run.assert_not_awaited()
 
 

@@ -194,6 +194,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.HUMAN_HANDOFF_REQUESTED: {
         ConversationInstance.State.QUEUE_PENDING,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.QUEUE_PENDING: {
@@ -216,6 +217,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.TRIAGE_PENDING,
         ConversationInstance.State.AI_SERVICE_PENDING,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.RESOLVED_BY_AI,
+        ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_TERMINAL,
     },
 }

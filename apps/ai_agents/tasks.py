@@ -594,6 +594,29 @@ def run_lifecycle_watchdog_task() -> dict[str, int]:
     }
 
 
+@shared_task(name="ai_agents.retry_pending_ticket_effect_task")
+def retry_pending_ticket_effect_task(instance_id: str) -> dict[str, object]:
+    """Replay one audited provider effect without invoking the Supervisor."""
+    from apps.ai_agents.models import ConversationInstance
+    from apps.ai_agents.services.execution import (
+        mark_retryable_failure,
+        resume_pending_ticket_effect,
+    )
+
+    instance = ConversationInstance.objects.get(pk=instance_id)
+    try:
+        output = resume_pending_ticket_effect(instance)
+    except Exception as exc:
+        instance.refresh_from_db()
+        mark_retryable_failure(instance, exc)
+        raise
+    return {
+        "conversation_instance_id": str(instance.pk),
+        "resumed": output is not None,
+        "output": output or {},
+    }
+
+
 @shared_task(name="ai_agents.retry_failed_lifecycle_instances_task")
 def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
     """Re-dispatch due retryable instances or hand off exhausted failures."""
@@ -601,7 +624,10 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
 
     from apps.ai_agents.contracts import ConversationContext
     from apps.ai_agents.models import ConversationInstance
-    from apps.ai_agents.services.execution import request_human_handoff
+    from apps.ai_agents.services.execution import (
+        has_pending_ticket_effect,
+        request_human_handoff,
+    )
     from apps.ai_agents.services.lifecycle import LifecycleEngine
 
     due = list(
@@ -611,6 +637,7 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
         ).order_by("next_retry_at")[:limit]
     )
     redispatched = 0
+    effect_replays = 0
     handed_off = 0
     terminal = 0
 
@@ -646,7 +673,10 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
 
         instance.next_retry_at = None
         instance.save(update_fields=["next_retry_at", "updated_at"])
-        if instance.hubspot_thread_id:
+        if has_pending_ticket_effect(instance):
+            retry_pending_ticket_effect_task.delay(str(instance.pk))
+            effect_replays += 1
+        elif instance.hubspot_thread_id:
             run_salomao_v1_thread_pipeline_task.delay(instance.hubspot_thread_id)
             redispatched += 1
         elif instance.hubspot_ticket_id:
@@ -663,6 +693,7 @@ def retry_failed_lifecycle_instances_task(limit: int = 100) -> dict[str, int]:
     return {
         "scanned": len(due),
         "redispatched": redispatched,
+        "effect_replays": effect_replays,
         "handed_off": handed_off,
         "terminal": terminal,
     }
@@ -672,6 +703,7 @@ __all__ = [
     "publish_handoff_observation_task",
     "request_human_handoff_task",
     "retry_failed_lifecycle_instances_task",
+    "retry_pending_ticket_effect_task",
     "run_lifecycle_watchdog_task",
     "run_salomao_v1_thread_pipeline_task",
     "run_supervisor_pipeline_task",

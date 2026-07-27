@@ -42,7 +42,6 @@ def _async_client_context(client: MagicMock) -> MagicMock:
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
     HUBSPOT_N1_NEW_STAGE_ID="ai-active",
-    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
     HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
 )
 @pytest.mark.parametrize(
@@ -144,6 +143,48 @@ async def test_update_ticket_route_sets_pipeline_stage_and_owner(monkeypatch, ow
             "hubspot_owner_id": owner_id,
         }
     }
+
+
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+)
+async def test_guarded_route_never_patches_after_concurrent_human_ownership() -> None:
+    fresh_context = {
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "human-owner",
+        "errors": [],
+        "conversation_history": [
+            {
+                "id": "turn-1",
+                "direction": "INCOMING",
+                "text": "Aguardando",
+            }
+        ],
+    }
+
+    with (
+        patch.object(
+            hubspot,
+            "hydrate_thread_context",
+            new=AsyncMock(return_value=fresh_context),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient") as client_factory,
+    ):
+        result = await update_hubspot_ticket_route(
+            "ticket-1",
+            "closed",
+            pipeline_id="ai-pipeline",
+            eligibility_thread_id="thread-1",
+            expected_customer_turn_id="turn-1",
+        )
+
+    assert result["updated"] is False
+    assert result["suppressed"] is True
+    assert result["reason"] == "ticket_owned_by_human"
+    client_factory.assert_not_called()
 
 
 def test_build_salomao_prompt_uses_latest_incoming_message() -> None:
@@ -845,7 +886,6 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
     HUBSPOT_N1_NEW_STAGE_ID="ai-active",
-    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
     HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
 )
 async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatch) -> None:
@@ -888,6 +928,61 @@ async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatc
         "suppressed": True,
         "retryable": False,
         "reason": "ticket_left_ai_pipeline",
+    }
+    client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-active",
+    HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
+)
+async def test_customer_turn_change_suppresses_stale_reply_without_retry(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    first_message = {
+        "id": "customer-turn-1",
+        "thread_id": "thread-1",
+        "channel_id": "channel",
+        "channel_account_id": "account",
+        "direction": "INCOMING",
+        "text": "Primeira mensagem",
+        "senders": [{"actorId": "visitor"}],
+    }
+    context = {
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-active",
+        "owner_id": "",
+        "conversation_history": [first_message],
+    }
+    fresh_context = {
+        **context,
+        "errors": [],
+        "conversation_history": [
+            first_message,
+            {
+                **first_message,
+                "id": "customer-turn-2",
+                "text": "Complemento mais recente",
+            },
+        ],
+    }
+
+    with (
+        patch.object(
+            hubspot,
+            "hydrate_thread_context",
+            new=AsyncMock(return_value=fresh_context),
+        ),
+        patch.object(hubspot.httpx, "AsyncClient") as client_factory,
+    ):
+        result = await send_salomao_reply_to_hubspot_thread(context, "Resposta antiga")
+
+    assert result == {
+        "sent": False,
+        "suppressed": True,
+        "retryable": False,
+        "reason": "customer_turn_changed",
     }
     client_factory.assert_not_called()
 

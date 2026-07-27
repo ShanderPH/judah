@@ -66,7 +66,7 @@ Background work (pipeline dispatch, auto-assignment, metrics aggregation) is sch
 | Framework          | Django 5.2 LTS + Django Ninja 1.6               |
 | Auth               | django-ninja-jwt (HS256)                        |
 | Database           | PostgreSQL 16 (Supabase in dev/prod)            |
-| Cache / Broker     | Redis 7                                         |
+| Cache / Broker     | Redis 8.6                                       |
 | Async workers      | Celery 5 + django-celery-beat                   |
 | AI runtime         | Agno 2.5 (agents, teams, knowledge)             |
 | Model providers    | OpenAI (GPT-4o, GPT-4o-mini), Anthropic fallback|
@@ -118,7 +118,7 @@ core/
 
 - **Python 3.14** (exact — see [Known Risks](#known-risks--pre-production-checklist))
 - PostgreSQL 16 (or Supabase project)
-- Redis 7
+- Redis 8.6
 
 ### 1. Clone and create venv
 

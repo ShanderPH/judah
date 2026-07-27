@@ -22,8 +22,8 @@
 
 1. The application distinguished `candidate_resolved`, but always persisted
    `WAITING_FOR_CUSTOMER`; no provider-side close effect existed.
-2. Ticket route updates could set pipeline and stage, but not set or clear
-   `hubspot_owner_id`.
+2. The original routing path made ownership decisions from a previously
+   hydrated snapshot, which could overwrite a concurrent human assignment.
 3. A terminal conversation could only reopen through the N1 entry property,
    so immediate automatic closure would otherwise risk dropping a later
    customer message on the same thread.
@@ -35,8 +35,8 @@
 
 - The visitor-visible reply must be delivered before routing or closure.
 - Human handoff must land in `Support N1 / Novo`.
-- Only the configured AI owner may be cleared by the AI handoff path.
-- A human owner must never be overwritten by this flow.
+- Salomão must never mutate ticket ownership; HubSpot/Matchmaker is the owner
+  authority.
 - Clarifying questions must remain open.
 - External writes require tool permission, idempotency and audit records.
 - Salomão may act only in the exact configured AI pipeline and active stage.

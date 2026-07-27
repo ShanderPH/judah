@@ -18,6 +18,7 @@ from apps.ai_agents.services.execution import (
     apply_supervisor_result,
     handle_resolution_confirmation,
     publish_handoff_observation,
+    resume_pending_ticket_effect,
 )
 from apps.support.models import NewConversation
 
@@ -74,7 +75,6 @@ def _triage() -> TriageDecision:
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-triage",
     HUBSPOT_CLOSED_STAGE_ID="ai-closed",
-    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
 )
 async def test_candidate_resolution_closes_ticket_after_reply() -> None:
     instance = await sync_to_async(_instance)()
@@ -123,13 +123,14 @@ async def test_candidate_resolution_closes_ticket_after_reply() -> None:
         "ticket_id": "ticket-1",
         "pipeline_id": "ai-triage",
         "stage_id": "ai-closed",
-        "owner_assigned": True,
+        "owner_mutated": False,
     }
     close_route.assert_awaited_once_with(
         "ticket-1",
         "ai-closed",
         pipeline_id="ai-triage",
-        owner_id="ai-owner",
+        eligibility_thread_id="thread-1",
+        expected_customer_turn_id="message-1",
     )
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="Heimdall").exists)()
     assert await sync_to_async(AgentRun.objects.filter(instance=instance, agent_name="SalomaoSupervisor").exists)()
@@ -205,9 +206,8 @@ async def test_stale_reply_is_safely_suppressed_without_closing_or_retrying() ->
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-triage",
     HUBSPOT_CLOSED_STAGE_ID="ai-closed",
-    HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner",
 )
-async def test_candidate_resolution_preserves_existing_human_owner() -> None:
+async def test_candidate_resolution_never_writes_owner() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -248,12 +248,13 @@ async def test_candidate_resolution_preserves_existing_human_owner() -> None:
 
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.CLOSED
-    assert instance.metadata["ai_resolution_dispatch"]["owner_assigned"] is False
+    assert instance.metadata["ai_resolution_dispatch"]["owner_mutated"] is False
     close_route.assert_awaited_once_with(
         "ticket-1",
         "ai-closed",
         pipeline_id="ai-triage",
-        owner_id=None,
+        eligibility_thread_id="thread-1",
+        expected_customer_turn_id="message-1",
     )
 
 
@@ -419,7 +420,8 @@ async def test_handoff_routes_to_novo_and_waits_for_authoritative_webhook(
     assert route_call.args == ("ticket-1", "939275049")
     assert route_call.kwargs == {
         "pipeline_id": "636459134",
-        "owner_id": None,
+        "eligibility_thread_id": "thread-1",
+        "expected_customer_turn_id": "message-1",
     }
     assert effects == ["reply", "route", "observation"]
 
@@ -757,14 +759,16 @@ async def test_ai_resolution_route_failure_is_retryable() -> None:
         ),
     )
 
+    send_reply = AsyncMock(return_value={"sent": True, "message_id": "out-resolution"})
+    failed_route = AsyncMock(return_value={"updated": False, "reason": "http:503"})
     with (
         patch(
             "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
-            new=AsyncMock(return_value={"sent": True, "message_id": "out-resolution"}),
+            new=send_reply,
         ),
         patch(
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
-            new=AsyncMock(return_value={"updated": False, "reason": "http:503"}),
+            new=failed_route,
         ),
         pytest.raises(RuntimeError, match="http:503"),
     ):
@@ -784,22 +788,92 @@ async def test_ai_resolution_route_failure_is_retryable() -> None:
     )
     assert audit.status == ToolCallAuditLog.Status.FAILED
 
+    successful_replay = AsyncMock(return_value={"updated": True})
+    with patch(
+        "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+        new=successful_replay,
+    ):
+        replayed = await sync_to_async(resume_pending_ticket_effect)(instance)
+
+    assert replayed is not None
+    send_reply.assert_awaited_once()
+    successful_replay.assert_awaited_once()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.CLOSED
+    await sync_to_async(audit.refresh_from_db)()
+    assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-@override_settings(HUBSPOT_SALOMAO_TICKET_OWNER_ID="ai-owner")
-@pytest.mark.parametrize(
-    ("current_owner_id", "expected_owner_id", "owner_cleared"),
-    [
-        ("ai-owner", "", True),
-        ("human-owner", None, False),
-    ],
-)
-async def test_handoff_only_clears_ai_owner_before_n1_assignment(
-    current_owner_id: str,
-    expected_owner_id: str | None,
-    owner_cleared: bool,
-) -> None:
+async def test_human_takeover_after_resolution_reply_suppresses_close_without_retry() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Orientação concluída.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=[],
+        tokens_used=1,
+        model_name="test-model",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response="Orientação concluída.",
+            confidence=0.9,
+        ),
+    )
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-resolution"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(
+                return_value={
+                    "updated": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "reason": "ticket_owned_by_human",
+                }
+            ),
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Como faço?",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.IGNORED
+    assert instance.failure_count == 0
+    assert instance.next_retry_at is None
+    assert instance.metadata["ai_resolution_dispatch"] == {
+        "closed": False,
+        "ticket_id": "ticket-1",
+        "pipeline_id": "636594474",
+        "stage_id": "939271307",
+        "owner_mutated": False,
+        "suppressed": True,
+        "reason": "ticket_owned_by_human",
+    }
+    audit = await sync_to_async(ToolCallAuditLog.objects.get)(
+        instance=instance,
+        tool_name="update_ticket_stage",
+    )
+    assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_owner_id", ["ai-owner", "human-owner", ""])
+async def test_handoff_never_writes_owner(current_owner_id: str) -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -841,10 +915,11 @@ async def test_handoff_only_clears_ai_owner_before_n1_assignment(
         "ticket-1",
         "939275049",
         pipeline_id="636459134",
-        owner_id=expected_owner_id,
+        eligibility_thread_id="thread-1",
+        expected_customer_turn_id="message-1",
     )
     await sync_to_async(instance.refresh_from_db)()
-    assert instance.metadata["human_handoff_dispatch"]["owner_cleared"] is owner_cleared
+    assert instance.metadata["human_handoff_dispatch"]["owner_mutated"] is False
 
 
 @pytest.mark.django_db(transaction=True)
@@ -894,26 +969,15 @@ async def test_handoff_notifies_before_hubspot_route_and_leaves_retryable_failur
     assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
 
     await sync_to_async(instance.refresh_from_db)()
-    assert instance.state == ConversationInstance.State.HUMAN_HANDOFF_REQUESTED
+    assert instance.state == ConversationInstance.State.FAILED_RETRYABLE
     successful_retry = AsyncMock(return_value={"updated": True})
-    with (
-        patch(
-            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
-            new=send_reply,
-        ),
-        patch(
-            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
-            new=successful_retry,
-        ),
+    with patch(
+        "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+        new=successful_retry,
     ):
-        await apply_supervisor_result(
-            instance=instance,
-            context={"thread_ids": ["thread-1"]},
-            conversation_context=_context(),
-            message="Não entendi",
-            result=result,
-        )
+        replayed = await sync_to_async(resume_pending_ticket_effect)(instance)
 
+    assert replayed is not None
     send_reply.assert_awaited_once()
     successful_retry.assert_awaited_once()
     await sync_to_async(instance.refresh_from_db)()
@@ -964,6 +1028,112 @@ async def test_handoff_does_not_route_before_customer_notification_succeeds() ->
 
     route_handoff.assert_not_awaited()
     assert not await NewConversation.objects.filter(hubspot_ticket_id="ticket-1").aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_handoff_safe_suppression_is_terminal_without_route_or_retry() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=[],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir.",
+            confidence=1.0,
+        ),
+    )
+    route_handoff = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(
+                return_value={
+                    "sent": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "reason": "human_agent_participating",
+                }
+            ),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=route_handoff,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Quero falar com um humano",
+            result=result,
+        )
+
+    route_handoff.assert_not_awaited()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.IGNORED
+    assert instance.failure_count == 0
+    assert instance.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_human_takeover_after_handoff_confirmation_never_reroutes_ticket() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Vou transferir.",
+        sources=[],
+        requires_human_handoff=True,
+        handoff_reason="Customer explicitly requested human assistance.",
+        agent_trace=[],
+        tokens_used=0,
+        model_name="handoff_policy",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="escalate_human",
+            final_response="Vou transferir.",
+            confidence=1.0,
+        ),
+    )
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-handoff"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(
+                return_value={
+                    "updated": False,
+                    "suppressed": True,
+                    "retryable": False,
+                    "reason": "ticket_owned_by_human",
+                }
+            ),
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Quero falar com um humano",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.IGNORED
+    assert instance.failure_count == 0
+    assert instance.metadata["human_handoff_dispatch"]["suppressed"] is True
 
 
 @pytest.mark.django_db

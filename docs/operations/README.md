@@ -19,7 +19,7 @@ Documentação operacional do JUDAH: deploy, monitoramento, logging e procedimen
 
 - Railway hospeda API, Celery Worker e Celery Beat.
 - PostgreSQL 16 via Supabase.
-- Redis 7 usado como broker e cache.
+- Redis 8.6 usado como broker e cache.
 - Sentry para rastreamento de erros.
 
 ## Checklist pré-deploy

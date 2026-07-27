@@ -134,12 +134,13 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `build_conversation_context_from_hubspot_context(context)`: normaliza contexto HubSpot para `ConversationContext`.
 - `send_salomao_reply_to_hubspot_thread(context, text)`: envia a resposta para a thread do HubSpot.
 - `request_human_handoff(...)`: depois da confirmação visível ao cliente,
-  move o ticket para o pipeline humano no estágio `Novo`, remove somente o
-  proprietário configurado da IA e aguarda a admissão canônica do Matchmaker.
+  revalida o turno e a exclusividade da IA, move o ticket para o pipeline
+  humano no estágio `Novo` e aguarda a admissão canônica do Matchmaker.
 - `complete_ai_resolution(...)`: depois de entregar uma resposta conclusiva,
-  move o ticket para `Triagem N1 / Fechado`, atribui opcionalmente o owner
-  configurado em `HUBSPOT_SALOMAO_TICKET_OWNER_ID` somente quando o ticket
-  ainda não possui proprietário e fecha o lifecycle local.
+  revalida o turno, move o ticket para `Triagem N1 / Fechado` e fecha o
+  lifecycle local.
+- O Salomão nunca escreve `hubspot_owner_id`; a propriedade e a atribuição
+  humana permanecem sob responsabilidade do HubSpot/Matchmaker.
 - `_run_supervisor_pipeline(ticket_id, is_off_hours)`: executa o pipeline desconectado do HTTP.
 - `_record_usage(...)`: calcula custo e persiste `TokenTrackingLog`.
 
@@ -148,6 +149,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `run_supervisor_pipeline_task(ticket_id, is_off_hours)`: executa pipeline com lock Redis.
 - `run_salomao_v1_thread_pipeline_task(thread_id)`: executa o Supervisor para HubSpot Conversations com lock Redis; o nome foi mantido por compatibilidade.
 - `request_human_handoff_task(...)`: hidrata o contexto mínimo e cria handoff.
+- `retry_pending_ticket_effect_task(instance_id)`: retoma somente um PATCH
+  durável de rota/fechamento, sem executar novamente o modelo ou a resposta ao
+  cliente.
 - `run_lifecycle_watchdog_task()`: detecta execuções presas.
 - `retry_failed_lifecycle_instances_task()`: reexecuta falhas elegíveis e faz
   handoff quando o orçamento termina.
