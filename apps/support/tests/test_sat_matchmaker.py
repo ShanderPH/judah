@@ -15,6 +15,7 @@ from apps.support.models import (
     AgentDailyTimeLog,
     AgentStatusHistory,
     AssignedConversation,
+    AssignmentAttempt,
     AssignmentLog,
     NewConversation,
 )
@@ -343,6 +344,39 @@ class TestMatchmakerDrainQueue:
         assert stale.failure_code == "hubspot_ticket_not_found"
         assert stale.assignment_attempts == 1
         assert not NewConversation.objects.filter(hubspot_ticket_id="VALID").exists()
+
+    @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
+    @patch("apps.support.durable_assignment_service.get_hubspot_client")
+    def test_quarantines_legacy_ambiguous_head_and_assigns_next_ticket(self, mock_client_fn, mock_reconcile):
+        from apps.support.matchmaker_service import matchmaker_drain_queue
+
+        agent = _make_agent("Agent1", 100, chats=0, max_chats=5)
+        legacy = _make_pending_ticket("LEGACY", minutes_ago=10)
+        _make_pending_ticket("VALID", minutes_ago=5)
+        AssignmentAttempt.objects.create(
+            idempotency_key="7d0f28a6-6daf-4384-a917-e0cf1f877c25",
+            ticket_id="LEGACY",
+            selected_agent=agent,
+            eligibility_revision=0,
+            desired_hubspot_owner_id=agent.hubspot_owner_id,
+            decision_reason="historical",
+            reserved_at=timezone.now() - timedelta(days=1),
+            state=AssignmentAttempt.State.COMPLETED,
+        )
+        mock_reconcile.return_value = 0
+        mock_client_fn.return_value.assign_ticket_owner.return_value = {"id": "VALID", "owner_id": 100}
+
+        result = matchmaker_drain_queue()
+
+        legacy.refresh_from_db()
+        assert result["assigned"] == 1
+        assert result["quarantined"] == 1
+        assert result["processed"] == 2
+        assert legacy.queue_status == NewConversation.QueueStatus.FAILED
+        assert legacy.failure_code == "legacy_cycle_ambiguous"
+        assert AssignmentAttempt.objects.filter(ticket_id="LEGACY").count() == 1
+        assert not NewConversation.objects.filter(hubspot_ticket_id="VALID").exists()
+        mock_client_fn.return_value.assign_ticket_owner.assert_called_once()
 
     @patch("apps.support.matchmaker_service.sat_reconcile_agent_load", create=True)
     @patch("apps.support.durable_assignment_service.get_hubspot_client")

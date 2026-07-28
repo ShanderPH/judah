@@ -11,6 +11,16 @@ O JUDAH usa o sistema de migrations do Django. Cada app mantém seus arquivos de
 - Em produção, nunca rodar `DROP`/`TRUNCATE` sem aprovação explícita.
 - Adicionar índices com `AddIndex` em migrations separadas para grandes tabelas.
 
+## Autoridade do schema
+
+- O histórico de migrations Supabase descreve o bootstrap e o estado legado da
+  plataforma; o grafo Django é a autoridade evolutiva do schema usado pelo JUDAH.
+- Constraints criadas originalmente via Supabase devem ganhar uma migration
+  Django explícita, idempotente e reversível antes de o código depender do novo
+  contrato. Marcar uma `AlterField` como aplicada não substitui DDL externo.
+- `support.0024_repair_queue_status_constraint` passa a administrar
+  `new_conversations_queue_status_check` e valida sua definição no catálogo.
+
 ## Comandos úteis
 
 ```bash
