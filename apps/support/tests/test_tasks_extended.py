@@ -73,9 +73,16 @@ def test_matchmaker_assign_task_paths() -> None:
         patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
         patch("apps.support.matchmaker_service.enqueue_new_ticket", side_effect=RuntimeError("db")),
         patch.object(task_matchmaker_assign_single, "retry", side_effect=RuntimeError("retried")),
+        patch("apps.support.tasks.logger") as log,
         pytest.raises(RuntimeError, match="retried"),
     ):
         task_matchmaker_assign_single.run("ticket-1")
+    retry_log = log.warning.call_args
+    assert retry_log.args == ("task_matchmaker_assign_single_retry",)
+    assert retry_log.kwargs["error_catalog_code"] == "SUP-TASK-001"
+    assert retry_log.kwargs["message_error"].startswith("Erro catalogado [SUP-TASK-001]:")
+    assert retry_log.kwargs["exception_type"] == "RuntimeError"
+    assert retry_log.kwargs["ticket_id"] == "ticket-1"
 
 
 def test_matchmaker_off_hours_is_an_explanatory_info_not_an_error() -> None:
@@ -102,6 +109,27 @@ def test_matchmaker_off_hours_is_an_explanatory_info_not_an_error() -> None:
     log.warning.assert_not_called()
 
 
+def test_availability_reconciliation_error_is_cataloged() -> None:
+    lock = Mock()
+    lock.acquire.return_value = True
+    with (
+        patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+        patch("apps.support.availability_runtime.may_assign", return_value=True),
+        patch("apps.support.owned_cache_lock.OwnedCacheLock", return_value=lock),
+        patch("apps.support.matchmaker_service.enqueue_new_ticket", return_value=SimpleNamespace()),
+        patch("apps.support.sat_service.sat_heartbeat", return_value={"error": "provider forbidden"}),
+        patch("apps.support.tasks.logger") as log,
+    ):
+        assert task_matchmaker_assign_single.run("ticket-provider-error") is False
+
+    failure_log = log.warning.call_args
+    assert failure_log.args == ("task_matchmaker_assignment_blocked_by_availability_reconciliation",)
+    assert failure_log.kwargs["error_catalog_code"] == "SUP-AVAIL-002"
+    assert failure_log.kwargs["message_error"].startswith("Erro catalogado [SUP-AVAIL-002]:")
+    assert failure_log.kwargs["retryable"] is True
+    assert failure_log.kwargs["ticket_id"] == "ticket-provider-error"
+
+
 def test_matchmaker_drain_task_paths() -> None:
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=False):
         assert task_matchmaker_drain_queue.run() == {"skipped_off_hours": True}
@@ -111,6 +139,20 @@ def test_matchmaker_drain_task_paths() -> None:
         patch("apps.support.matchmaker_service.matchmaker_drain_queue", return_value={"assigned": 2}),
     ):
         assert task_matchmaker_drain_queue.run() == {"assigned": 2}
+
+    with (
+        patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
+        patch("apps.support.matchmaker_service.matchmaker_drain_queue", side_effect=RuntimeError("constraint")),
+        patch("apps.support.tasks.logger") as log,
+        pytest.raises(RuntimeError, match="constraint"),
+    ):
+        task_matchmaker_drain_queue.run()
+    failure_log = log.exception.call_args
+    assert failure_log.args == ("task_matchmaker_drain_queue_failed",)
+    assert failure_log.kwargs["error_catalog_code"] == "SUP-QUEUE-004"
+    assert failure_log.kwargs["message_error"].startswith("Erro catalogado [SUP-QUEUE-004]:")
+    assert failure_log.kwargs["exception_type"] == "RuntimeError"
+    assert failure_log.kwargs["queue_preserved"] is True
 
 
 def test_ticket_closed_and_owner_change_task_retries() -> None:

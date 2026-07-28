@@ -12,6 +12,7 @@ from django.conf import settings
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.support.conversation_cycle_service import CycleClassification, open_or_get_cycle
+from apps.support.error_catalog import cataloged_error_context
 from apps.support.models import Agent, NewConversation
 from common.exceptions import ExternalServiceError
 
@@ -70,7 +71,10 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
         logger.warning(
             "matchmaker_lifecycle_transition_failed",
             ticket_id=hubspot_ticket_id,
+            exception_type=type(exc).__name__,
             error=str(exc),
+            processing_stage="transition_assigned_lifecycle",
+            **cataloged_error_context("lifecycle_transition_failed"),
         )
 
 
@@ -259,7 +263,16 @@ def matchmaker_drain_queue() -> dict:
         if not result.made_progress:
             no_progress += 1
             if result.queue_row_id is None:
-                logger.warning("queue_drain_no_progress", outcome=result.outcome.value)
+                logger.warning(
+                    "queue_drain_no_progress",
+                    outcome=result.outcome.value,
+                    queue_row_id=None,
+                    cycle_id=result.cycle_id,
+                    total_pending=total_pending,
+                    processed=len(seen_queue_row_ids),
+                    processing_stage="matchmaker_drain_queue",
+                    **cataloged_error_context("queue_drain_no_progress"),
+                )
                 break
 
     remaining = _active_queue().count()
@@ -301,8 +314,16 @@ def enqueue_new_ticket(
         return None
     try:
         ticket_data = get_hubspot_client().get_ticket_details(hubspot_ticket_id)
-    except ExternalServiceError:
-        logger.error("matchmaker_hubspot_fetch_failed", ticket_id=hubspot_ticket_id)
+    except ExternalServiceError as exc:
+        logger.error(
+            "matchmaker_hubspot_fetch_failed",
+            ticket_id=hubspot_ticket_id,
+            provider=getattr(exc, "service", "HubSpot"),
+            exception_type=type(exc).__name__,
+            error=str(exc),
+            processing_stage="enqueue_new_ticket",
+            **cataloged_error_context("hubspot_ticket_fetch_failed"),
+        )
         return None
     if not _is_ticket_eligible(ticket_data):
         return None

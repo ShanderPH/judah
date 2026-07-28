@@ -359,6 +359,58 @@ def test_ticket_entered_n1_reopens_terminal_lifecycle(terminal_state: str) -> No
 
 
 @pytest.mark.django_db
+def test_ticket_entered_n1_converges_inflight_context_to_queue_pending() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:inflight-novo",
+        hubspot_ticket_id="inflight-novo",
+        state=ConversationInstance.State.CONTEXT_HYDRATING,
+    )
+    event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": "evt-inflight-novo",
+            "objectId": instance.hubspot_ticket_id,
+            "propertyName": "hs_v2_date_entered_939275049",
+            "propertyValue": "1785257915418",
+        },
+        object_id=instance.hubspot_ticket_id,
+        id="db-inflight-novo",
+    )
+
+    result = record_lifecycle_for_webhook_event(event)
+
+    result.instance.refresh_from_db()
+    assert result.instance.state == ConversationInstance.State.QUEUE_PENDING
+    assert result.event.instance_id == instance.pk
+    assert ConversationStateTransition.objects.filter(
+        instance=instance,
+        from_state=ConversationInstance.State.CONTEXT_HYDRATING,
+        to_state=ConversationInstance.State.QUEUE_PENDING,
+        source_event_id="evt-inflight-novo",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_context_hydrating_cannot_enter_queue_without_authoritative_event() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:non-authoritative-queue",
+        hubspot_ticket_id="non-authoritative-queue",
+        state=ConversationInstance.State.CONTEXT_HYDRATING,
+    )
+
+    with pytest.raises(InvalidStateTransitionError):
+        LifecycleEngine().transition(
+            instance,
+            ConversationInstance.State.QUEUE_PENDING,
+            reason="Ordinary application transition.",
+        )
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert instance.state_transitions.count() == 0
+
+
+@pytest.mark.django_db
 def test_new_customer_message_reopens_closed_conversation() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:thread:thread-123",
