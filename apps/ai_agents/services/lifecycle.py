@@ -480,12 +480,18 @@ class LifecycleEngine:
                         or decision.route in {"AI_TRIAGE", "AI_SERVICE"}
                         or (event.event_type == "conversation_message_received" and event.direction == "INCOMING")
                     )
+                    allow_authoritative_queue_entry = (
+                        event.event_type == "ticket_entered_n1"
+                        and decision.route == "AUTO_ASSIGNMENT"
+                        and decision.target_state == ConversationInstance.State.QUEUE_PENDING
+                    )
                     self.transition(
                         instance,
                         decision.target_state,
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                         allow_terminal_reopen=can_reopen_terminal,
+                        allow_authoritative_queue_entry=allow_authoritative_queue_entry,
                     )
                 elif instance_created and not event.hubspot_ticket_id:
                     # A ticket can emit metadata/property events before the
@@ -547,10 +553,16 @@ class LifecycleEngine:
         actor_id: str = "",
         source_event_id: str = "",
         allow_terminal_reopen: bool = False,
+        allow_authoritative_queue_entry: bool = False,
     ) -> ConversationInstance:
         if instance.state == to_state:
             return instance
-        self._validate_transition(instance.state, to_state, allow_terminal_reopen=allow_terminal_reopen)
+        self._validate_transition(
+            instance.state,
+            to_state,
+            allow_terminal_reopen=allow_terminal_reopen,
+            allow_authoritative_queue_entry=allow_authoritative_queue_entry,
+        )
         now = timezone.now()
         from_state = instance.state
         instance.state = to_state
@@ -754,11 +766,23 @@ class LifecycleEngine:
         instance.metadata = metadata
         instance.save(update_fields=list(dict.fromkeys(update_fields)))
 
-    def _validate_transition(self, from_state: str, to_state: str, *, allow_terminal_reopen: bool = False) -> None:
+    def _validate_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        *,
+        allow_terminal_reopen: bool = False,
+        allow_authoritative_queue_entry: bool = False,
+    ) -> None:
         if from_state in TERMINAL_STATES:
             if allow_terminal_reopen:
                 return
             raise InvalidStateTransitionError(f"Cannot transition terminal state {from_state} to {to_state}.")
+        if allow_authoritative_queue_entry and to_state == ConversationInstance.State.QUEUE_PENDING:
+            # The calculated HubSpot NOVO-stage timestamp is authoritative.
+            # It may race with an in-flight AI projection, but callers cannot
+            # use this exception for ordinary application transitions.
+            return
         if to_state in {ConversationInstance.State.CLOSED, ConversationInstance.State.RESOLVED_BY_HUMAN}:
             return
         if to_state == ConversationInstance.State.HUMAN_HANDOFF_REQUESTED and from_state in ACTIVE_STATES:
