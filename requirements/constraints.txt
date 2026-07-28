@@ -1,0 +1,5 @@
+# Runtime compatibility contract shared by local installs, CI, and Docker.
+# Agno 2.8.5 was validated with MCP 1.28.1; MCP 2.0 is a breaking release and
+# must not enter implicitly through the broad application requirements.
+agno==2.8.5
+mcp==1.28.1

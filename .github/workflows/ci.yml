@@ -45,7 +45,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements/dev.txt
+          cache-dependency-path: |
+            requirements/dev.txt
+            requirements/base.txt
+            requirements/constraints.txt
 
       - name: Install dependencies
         run: pip install -r requirements/dev.txt
@@ -105,10 +108,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements/test.txt
+          cache-dependency-path: |
+            requirements/test.txt
+            requirements/base.txt
+            requirements/constraints.txt
 
       - name: Install dependencies
         run: pip install -r requirements/test.txt
+
+      - name: Verify Agno/MCP compatibility contract
+        run: |
+          python -c "from importlib.metadata import version; assert version('agno') == '2.8.5'; assert version('mcp') == '1.28.1'"
 
       - name: Assert disposable database target
         run: python -m common.database_safety
@@ -151,6 +161,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements/base.txt
+            requirements/constraints.txt
 
       - name: Install dependencies
         run: pip install -r requirements/base.txt bandit safety
@@ -200,7 +213,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements/base.txt
+          cache-dependency-path: |
+            requirements/base.txt
+            requirements/constraints.txt
 
       - name: Install dependencies
         run: pip install -r requirements/base.txt
