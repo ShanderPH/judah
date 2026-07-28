@@ -165,12 +165,9 @@ async def test_guarded_route_never_patches_after_concurrent_human_ownership() ->
         ],
     }
 
+    hydrate = AsyncMock(return_value=fresh_context)
     with (
-        patch.object(
-            hubspot,
-            "hydrate_thread_context",
-            new=AsyncMock(return_value=fresh_context),
-        ),
+        patch.object(hubspot, "hydrate_thread_context", new=hydrate),
         patch.object(hubspot.httpx, "AsyncClient") as client_factory,
     ):
         result = await update_hubspot_ticket_route(
@@ -184,6 +181,11 @@ async def test_guarded_route_never_patches_after_concurrent_human_ownership() ->
     assert result["updated"] is False
     assert result["suppressed"] is True
     assert result["reason"] == "ticket_owned_by_human"
+    hydrate.assert_awaited_once_with(
+        "thread-1",
+        ticket_id="ticket-1",
+        timeout_seconds=20.0,
+    )
     client_factory.assert_not_called()
 
 
@@ -805,6 +807,48 @@ async def test_hydrate_thread_context_success_and_mock(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_hydrate_thread_context_uses_caller_ticket_when_thread_association_is_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    thread = {
+        "threadAssociations": {},
+        "associatedContactId": "contact-1",
+        "originalChannelId": "WHATSAPP",
+    }
+    ticket = {
+        "properties": {
+            "subject": "Ticket conhecido",
+            "hs_pipeline": "ai-pipeline",
+            "hs_pipeline_stage": "ai-active",
+        },
+        "associations": {},
+    }
+    client = MagicMock()
+    with (
+        patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
+        patch.object(hubspot, "_fetch_thread", new=AsyncMock(return_value=thread)),
+        patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)) as fetch_ticket,
+        patch.object(
+            hubspot,
+            "_fetch_conversation_history",
+            new=AsyncMock(return_value=[{"id": "m1", "direction": "INCOMING", "text": "Oi"}]),
+        ),
+        patch.object(hubspot, "_hydrate_latest_incoming_image", new=AsyncMock()),
+    ):
+        context = await hydrate_thread_context(
+            "thread-without-ticket-association",
+            ticket_id="ticket-from-worker",
+        )
+
+    fetch_ticket.assert_awaited_once_with(client, "ticket-from-worker")
+    assert context["ticket_id"] == "ticket-from-worker"
+    assert context["ticket_id_source"] == "caller"
+    assert context["pipeline"] == "ai-pipeline"
+    assert context["pipeline_stage"] == "ai-active"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error_kind", ["status", "network"])
 async def test_hydrate_thread_context_errors(monkeypatch, error_kind: str) -> None:
     monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
@@ -894,6 +938,7 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
 async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatch) -> None:
     monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
     context = {
+        "ticket_id": "ticket-1",
         "pipeline": "ai-pipeline",
         "pipeline_stage": "ai-active",
         "owner_id": "",
@@ -916,12 +961,9 @@ async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatc
         "owner_id": "human-owner",
     }
 
+    hydrate = AsyncMock(return_value=fresh_context)
     with (
-        patch.object(
-            hubspot,
-            "hydrate_thread_context",
-            new=AsyncMock(return_value=fresh_context),
-        ),
+        patch.object(hubspot, "hydrate_thread_context", new=hydrate),
         patch.object(hubspot.httpx, "AsyncClient") as client_factory,
     ):
         result = await send_salomao_reply_to_hubspot_thread(context, "Resposta tardia")
@@ -932,6 +974,7 @@ async def test_send_reply_rechecks_route_and_suppresses_late_response(monkeypatc
         "retryable": False,
         "reason": "ticket_left_ai_pipeline",
     }
+    hydrate.assert_awaited_once_with("thread-1", ticket_id="ticket-1")
     client_factory.assert_not_called()
 
 

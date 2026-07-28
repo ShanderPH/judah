@@ -169,10 +169,19 @@ def task_matchmaker_assign_single(
             "",
         )
         if blocked_reason:
-            logger.warning(
+            expected_defer = blocked_reason in {
+                "skipped_non_authoritative_runtime",
+                "skipped_off_hours",
+                "skipped_locked",
+            }
+            log_method = logger.info if expected_defer else logger.warning
+            log_method(
                 "task_matchmaker_assignment_blocked_by_availability_reconciliation",
                 ticket_id=hubspot_ticket_id,
                 reason=blocked_reason,
+                expected=expected_defer,
+                action="queue_preserved_for_later_assignment",
+                retryable=not expected_defer,
             )
             return False
 

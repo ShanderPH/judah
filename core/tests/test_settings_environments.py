@@ -30,6 +30,10 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.NOVO_STAGE_SYNC_ENABLED); "
         "print(settings.CELERY_RESULT_BACKEND); "
         "print(settings.CELERY_TASK_IGNORE_RESULT); "
+        "print(settings.CELERY_WORKER_HIJACK_ROOT_LOGGER); "
+        "print(settings.CELERY_WORKER_REDIRECT_STDOUTS); "
+        "print(settings.CELERY_WORKER_REDIRECT_STDOUTS_LEVEL); "
+        "print(settings.CELERY_WORKER_LOG_COLOR); "
         "print(settings.CACHES['default']['OPTIONS']['pool_class'])"
     )
     return subprocess.run(
@@ -55,6 +59,10 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
         "False",
         "None",
         "True",
+        "False",
+        "True",
+        "INFO",
+        "False",
         "redis.BlockingConnectionPool",
     ]
 
@@ -72,6 +80,10 @@ def test_production_keeps_stricter_root_logging() -> None:
         "True",
         "None",
         "True",
+        "False",
+        "True",
+        "INFO",
+        "False",
         "redis.BlockingConnectionPool",
     ]
 

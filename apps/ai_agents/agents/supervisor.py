@@ -269,7 +269,8 @@ class SalomaoSupervisorAgent:
         self.session_id = session_id
         self.user_metadata = user_metadata
         self._db = db
-        self._logger = structlog.get_logger(self.__class__.__name__).bind(
+        self._logger = structlog.get_logger(__name__).bind(
+            agent_name=self.__class__.__name__,
             session_id=session_id,
             user_id=user_metadata.get("user_id"),
         )

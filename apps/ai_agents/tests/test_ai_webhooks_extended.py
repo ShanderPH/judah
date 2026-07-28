@@ -105,6 +105,19 @@ async def test_prepare_retryable_instance_and_mark_pipeline_failure() -> None:
         await webhooks._mark_pipeline_failure(thread_id="missing", error=RuntimeError("offline"))
     mark.assert_not_called()
 
+    terminal = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:terminal-failure",
+        hubspot_thread_id="terminal-failure",
+        state=ConversationInstance.State.CLOSED,
+    )
+    await webhooks._mark_pipeline_failure(
+        thread_id="terminal-failure",
+        error=RuntimeError("original pipeline error"),
+    )
+    await terminal.arefresh_from_db()
+    assert terminal.state == ConversationInstance.State.CLOSED
+    assert terminal.failure_count == 0
+
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
@@ -176,6 +189,122 @@ async def test_waiting_conversation_processes_and_sends_next_customer_turn() -> 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_verified_ai_route_reopens_closed_thread_and_replies() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:closed-reopen",
+        hubspot_thread_id="closed-reopen",
+        hubspot_ticket_id="ticket-closed-reopen",
+        state=ConversationInstance.State.CLOSED,
+        last_message_id="previous-message",
+    )
+    context = {
+        "ticket_id": "ticket-closed-reopen",
+        "subject": "Novo atendimento",
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "",
+        "originating_channel": "chat",
+        "thread_ids": ["closed-reopen"],
+        "conversation_history": [
+            {
+                "id": "new-customer-message",
+                "thread_id": "closed-reopen",
+                "direction": "INCOMING",
+                "text": "Preciso de ajuda novamente",
+            },
+        ],
+    }
+    supervisor = Mock()
+    supervisor.run_pipeline_async = AsyncMock(return_value=_response())
+
+    with (
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_ticket_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.handle_protocol_lookup_from_hubspot_context",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("apps.ai_agents.api.webhooks.SalomaoSupervisorAgent", return_value=supervisor),
+        patch("apps.ai_agents.api.webhooks._record_usage", new=AsyncMock()),
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "reply-reopened"}),
+        ) as send_reply,
+    ):
+        await webhooks._run_supervisor_pipeline("ticket-closed-reopen")
+
+    send_reply.assert_awaited_once()
+    await instance.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.closed_at is None
+    assert instance.failure_count == 0
+    assert await instance.state_transitions.filter(
+        from_state=ConversationInstance.State.CLOSED,
+        to_state=ConversationInstance.State.CONTEXT_HYDRATING,
+    ).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_closed_thread_does_not_reprocess_an_answered_customer_turn() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:closed-answered",
+        hubspot_thread_id="closed-answered",
+        hubspot_ticket_id="ticket-closed-answered",
+        state=ConversationInstance.State.CLOSED,
+        last_message_id="answered-message",
+    )
+    await ToolCallAuditLog.objects.acreate(
+        instance=instance,
+        tool_name="send_thread_reply",
+        idempotency_key=f"reply:{instance.pk}:answered-message",
+        status=ToolCallAuditLog.Status.SUCCEEDED,
+    )
+    context = {
+        "ticket_id": "ticket-closed-answered",
+        "subject": "Atendimento concluído",
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "",
+        "originating_channel": "chat",
+        "thread_ids": ["closed-answered"],
+        "conversation_history": [
+            {
+                "id": "answered-message",
+                "thread_id": "closed-answered",
+                "direction": "INCOMING",
+                "text": "Mensagem já respondida",
+            },
+        ],
+    }
+
+    with (
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_ticket_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch("apps.ai_agents.api.webhooks.SalomaoSupervisorAgent") as supervisor,
+    ):
+        await webhooks._run_supervisor_pipeline("ticket-closed-answered")
+
+    supervisor.assert_not_called()
+    await instance.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.CLOSED
+    assert await instance.state_transitions.acount() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_pipeline_failure_is_recorded_only_on_the_target_thread() -> None:
     first = await ConversationInstance.objects.acreate(
         idempotency_key="conversation:thread:failure-first",
@@ -202,6 +331,50 @@ async def test_pipeline_failure_is_recorded_only_on_the_target_thread() -> None:
     assert first.failure_count == 0
     assert second.state == ConversationInstance.State.FAILED_RETRYABLE
     assert second.failure_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_terminal_instance_does_not_mask_original_pipeline_error() -> None:
+    await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:terminal-original-error",
+        hubspot_thread_id="terminal-original-error",
+        hubspot_ticket_id="ticket-terminal-original-error",
+        state=ConversationInstance.State.CLOSED,
+    )
+    context = {
+        "ticket_id": "ticket-terminal-original-error",
+        "subject": "Erro original",
+        "pipeline": "ai-pipeline",
+        "pipeline_stage": "ai-stage",
+        "owner_id": "",
+        "thread_ids": ["terminal-original-error"],
+        "conversation_history": [
+            {
+                "id": "new-message",
+                "thread_id": "terminal-original-error",
+                "direction": "INCOMING",
+                "text": "Nova mensagem",
+            },
+        ],
+    }
+
+    with (
+        override_settings(
+            HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+            HUBSPOT_N1_NEW_STAGE_ID="ai-stage",
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks.hydrate_ticket_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch(
+            "apps.ai_agents.api.webhooks._run_supervisor_for_hubspot_context",
+            new=AsyncMock(side_effect=RuntimeError("original pipeline error")),
+        ),
+        pytest.raises(RuntimeError, match="original pipeline error"),
+    ):
+        await webhooks._run_supervisor_pipeline("ticket-terminal-original-error")
 
 
 @pytest.mark.asyncio

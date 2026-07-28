@@ -89,6 +89,9 @@ def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str
                 logger.info(
                     "hubspot_ticket_customer_message_flag_cleared",
                     ticket_id=object_id,
+                    property_value=str(property_value),
+                    reason="property_value_is_not_true",
+                    action="no_supervisor_dispatch",
                 )
 
         else:

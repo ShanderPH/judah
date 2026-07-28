@@ -489,6 +489,7 @@ async def update_hubspot_ticket_route(
     if eligibility_thread_id:
         fresh_context = await hydrate_thread_context(
             eligibility_thread_id,
+            ticket_id=ticket_id,
             timeout_seconds=timeout_seconds,
         )
         if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
@@ -741,12 +742,20 @@ async def hydrate_ticket_context(
 async def hydrate_thread_context(
     thread_id: str,
     *,
+    ticket_id: str | None = None,
     timeout_seconds: float = 20.0,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Hydrate a single HubSpot conversation thread for Salomao v1 routing."""
+    """Hydrate one thread while preserving a caller-verified ticket fallback.
+
+    HubSpot occasionally omits ``threadAssociations.associatedTicketId`` from
+    an otherwise valid thread response. Ticket-triggered workers already know
+    the associated ticket, so discarding that identity would make the final
+    route check fail closed after the model has run.
+    """
+    caller_ticket_id = str(ticket_id or "").strip()
     if USE_MOCK_HUBSPOT:
-        context = _mock_ticket_context(f"mock-ticket-for-thread-{thread_id}")
+        context = _mock_ticket_context(caller_ticket_id or f"mock-ticket-for-thread-{thread_id}")
         context["thread_ids"] = [thread_id]
         for message in context["conversation_history"]:
             message["thread_id"] = thread_id
@@ -756,7 +765,8 @@ async def hydrate_thread_context(
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     errors: list[str] = []
     context: dict[str, Any] = {
-        "ticket_id": "",
+        "ticket_id": caller_ticket_id,
+        "ticket_id_source": "caller" if caller_ticket_id else "unavailable",
         "subject": "",
         "content": "",
         "owner_id": "",
@@ -777,7 +787,27 @@ async def hydrate_thread_context(
         try:
             thread = await _fetch_thread(client, thread_id)
             context["threads"].append(thread)
-            context["ticket_id"] = str((thread.get("threadAssociations") or {}).get("associatedTicketId") or "")
+            associated_ticket_id = str((thread.get("threadAssociations") or {}).get("associatedTicketId") or "").strip()
+            if associated_ticket_id:
+                if caller_ticket_id and caller_ticket_id != associated_ticket_id:
+                    logger.warning(
+                        "hubspot_thread_ticket_association_mismatch",
+                        thread_id=thread_id,
+                        caller_ticket_id=caller_ticket_id,
+                        associated_ticket_id=associated_ticket_id,
+                        selected_ticket_id=associated_ticket_id,
+                        action="trusted_current_hubspot_association",
+                    )
+                context["ticket_id"] = associated_ticket_id
+                context["ticket_id_source"] = "thread_association"
+            elif caller_ticket_id:
+                logger.info(
+                    "hubspot_thread_ticket_fallback_used",
+                    thread_id=thread_id,
+                    ticket_id=caller_ticket_id,
+                    reason="thread_association_missing",
+                    action="fetch_ticket_using_caller_context",
+                )
             contact_id = thread.get("associatedContactId")
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
@@ -818,6 +848,7 @@ async def hydrate_thread_context(
         "hubspot_thread_context_hydrated",
         thread_id=thread_id,
         ticket_id=context["ticket_id"] or None,
+        ticket_id_source=context["ticket_id_source"],
         history_count=len(context["conversation_history"]),
         message_sources=_conversation_message_sources(context["conversation_history"]),
         errors=errors or None,
@@ -930,7 +961,10 @@ async def refresh_salomao_reply_context(context: dict[str, Any]) -> dict[str, An
             "context": context,
         }
 
-    fresh_context = await hydrate_thread_context(thread_id)
+    fresh_context = await hydrate_thread_context(
+        thread_id,
+        ticket_id=str(context.get("ticket_id") or "").strip() or None,
+    )
     if fresh_context.get("errors") and not fresh_context.get("conversation_history"):
         return {
             "eligible": False,
@@ -1221,11 +1255,21 @@ async def send_salomao_reply_to_hubspot_thread(
     if not freshness["eligible"]:
         reason = str(freshness["reason"])
         retryable = bool(freshness["retryable"])
-        logger.warning(
-            "hubspot_salomao_reply_suppressed",
+        fresh_context = freshness.get("context") or {}
+        event_name = "hubspot_salomao_reply_deferred" if retryable else "hubspot_salomao_reply_suppressed"
+        log_method = logger.warning if retryable else logger.info
+        log_method(
+            event_name,
             thread_id=thread_id,
+            ticket_id=context.get("ticket_id") or fresh_context.get("ticket_id") or None,
             reason=reason,
             retryable=retryable,
+            action="retry_without_sending" if retryable else "safe_noop",
+            expected_pipeline=str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "") or "") or None,
+            expected_stage=str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "") or "") or None,
+            observed_pipeline=fresh_context.get("pipeline") or None,
+            observed_stage=fresh_context.get("pipeline_stage") or None,
+            observed_owner_id=fresh_context.get("owner_id") or None,
         )
         return {
             "sent": False,

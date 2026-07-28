@@ -229,10 +229,18 @@ def test_supervisor_task_retries_and_tolerates_lock_release_failure() -> None:
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=Mock(return_value="coroutine")),
         patch("apps.ai_agents.tasks.asyncio.run", side_effect=RuntimeError("pipeline failed")),
         patch.object(run_supervisor_pipeline_task, "retry", side_effect=RuntimeError("retried")) as retry,
+        patch("apps.ai_agents.tasks.logger") as log,
         pytest.raises(RuntimeError, match="retried"),
     ):
         run_supervisor_pipeline_task.run("ticket-1", False, True, True)
     retry.assert_called_once()
+    retry_log = next(
+        call for call in log.warning.call_args_list if call.args == ("supervisor_pipeline_retry_scheduled",)
+    )
+    assert retry_log.kwargs["ticket_id"] == "ticket-1"
+    assert retry_log.kwargs["attempt_number"] == 1
+    assert retry_log.kwargs["max_attempts"] == 4
+    assert retry_log.kwargs["action"] == "celery_retry_scheduled"
     client.delete.assert_called_once()
 
 

@@ -159,8 +159,15 @@ def process_webhook_event(event_id) -> bool:
                         "webhook_event_lifecycle_record_failed",
                         event_id=event.pk,
                         event_type=event.event_type,
+                        object_id=event.object_id or None,
+                        ticket_id=event.object_id if et.startswith("ticket.") else None,
+                        property_name=event.property_name,
+                        property_value=event.property_value,
                         error=str(exc),
                         error_type=type(exc).__name__,
+                        lifecycle_recorded=False,
+                        deterministic_handler_continues=True,
+                        action="continue_without_lifecycle_projection",
                     )
                     # Lifecycle observability must never suppress the
                     # deterministic support/AI webhook handler.
@@ -217,7 +224,14 @@ def process_webhook_event(event_id) -> bool:
             from apps.ai_agents.services.lifecycle import LifecycleEngine
 
             LifecycleEngine().mark_event_processed(lifecycle.event)
-        logger.info("webhook_event_processed", event_id=event.pk)
+        logger.info(
+            "webhook_event_processed",
+            event_id=event.pk,
+            event_type=event.event_type,
+            object_id=event.object_id or None,
+            lifecycle_recorded=lifecycle is not None,
+            outcome="processed",
+        )
         return True
 
     except Exception as exc:

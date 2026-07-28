@@ -383,6 +383,64 @@ def test_new_customer_message_reopens_closed_conversation() -> None:
 
 
 @pytest.mark.django_db
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_N1_NEW_STAGE_ID="ai-new",
+)
+@pytest.mark.parametrize(
+    "initial_state",
+    [ConversationInstance.State.QUEUE_PENDING, ConversationInstance.State.CLOSED],
+)
+def test_verified_ai_stage_reopens_ticket_lifecycle(initial_state: str) -> None:
+    ticket_id = f"ticket-ai-reopen-{initial_state}"
+    instance = ConversationInstance.objects.create(
+        idempotency_key=f"conversation:ticket:{ticket_id}",
+        hubspot_ticket_id=ticket_id,
+        state=initial_state,
+        closed_at=timezone.now() if initial_state == ConversationInstance.State.CLOSED else None,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id=f"event-ai-reopen-{initial_state}",
+        event_type="ticket_stage_changed",
+        idempotency_key=f"hubspot:ticket-stage:{initial_state}",
+        payload={"objectId": ticket_id},
+        hubspot_ticket_id=ticket_id,
+        pipeline_id="ai-pipeline",
+        pipeline_stage_id="ai-new",
+    )
+
+    result = LifecycleEngine().record_normalized_event(event)
+
+    result.instance.refresh_from_db()
+    assert result.instance.pk == instance.pk
+    assert result.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert result.instance.closed_at is None
+
+
+@pytest.mark.django_db
+def test_instance_idempotency_collision_recovers_inside_outer_transaction() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:collision",
+        state=ConversationInstance.State.NORMALIZED,
+    )
+    event = NormalizedEvent(
+        source="hubspot",
+        source_event_id="event-collision",
+        event_type="ticket_stage_changed",
+        idempotency_key="hubspot:event-collision",
+        payload={"objectId": "collision"},
+        hubspot_ticket_id="collision",
+    )
+
+    result = LifecycleEngine().record_normalized_event(event)
+
+    result.instance.refresh_from_db()
+    assert result.instance.pk == instance.pk
+    assert result.event.instance_id == instance.pk
+
+
+@pytest.mark.django_db
 def test_ticket_close_converges_placeholder_and_all_thread_instances() -> None:
     ticket_id = "ticket-close-scope"
     thread_waiting = ConversationInstance.objects.create(
