@@ -137,7 +137,7 @@ Extende `AbstractUser`.
 | `pipeline_id` | TextField | default `636459134` |
 | `contact_name`, `contact_email`, `priority`, `subject` | TextField | |
 | `entered_queue_at` | DateTimeField | indexado |
-| `queue_status` | CharField | pending / queued |
+| `queue_status` | CharField | `pending` / `queued` / `failed`; `failed` preserva linhas em quarentena sem novo efeito externo |
 | `assignment_attempts` | IntegerField | default 0 |
 
 ### `AssignedConversation` → `assigned_conversations`
