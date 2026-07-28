@@ -376,6 +376,7 @@ def test_build_conversation_context_from_hubspot_context() -> None:
         "pipeline": "support",
         "pipeline_stage": "open",
         "owner_id": "owner-1",
+        "church_id": "35120",
         "thread_ids": ["thread-1"],
         "contact_ids": ["contact-1"],
         "conversation_history": [
@@ -395,6 +396,7 @@ def test_build_conversation_context_from_hubspot_context() -> None:
     assert conversation_context.ticket_id == "123"
     assert conversation_context.thread_id == "thread-1"
     assert conversation_context.contact_id == "contact-1"
+    assert conversation_context.church_id == "35120"
     assert conversation_context.is_off_hours is True
     assert conversation_context.recent_messages[-1].direction == "INCOMING"
     assert "send_thread_reply" in conversation_context.allowed_actions
@@ -1029,6 +1031,8 @@ async def test_customer_turn_change_suppresses_stale_reply_without_retry(monkeyp
         "suppressed": True,
         "retryable": False,
         "reason": "customer_turn_changed",
+        "current_customer_turn_id": "customer-turn-2",
+        "current_thread_id": "thread-1",
     }
     client_factory.assert_not_called()
 

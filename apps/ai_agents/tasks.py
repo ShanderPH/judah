@@ -339,6 +339,7 @@ def run_salomao_v1_thread_pipeline_task(
     self,
     thread_id: str,
     message_batch_token: str | None = None,
+    stale_turn_followup_depth: int = 0,
 ) -> None:
     """Run the Supervisor for a HubSpot conversation thread.
 
@@ -400,6 +401,7 @@ def run_salomao_v1_thread_pipeline_task(
     ticket_lock_acquired = False
     try:
         context = asyncio.run(hydrate_thread_context(thread_id))
+        context["_stale_turn_followup_depth"] = max(0, int(stale_turn_followup_depth))
         ticket_id = str(context.get("ticket_id") or "")
         if client is not None and ticket_id:
             ticket_lock_key = f"{_LOCK_KEY_PREFIX}:{ticket_id}"

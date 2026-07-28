@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage, TriageDecision
 from apps.ai_agents.models import ConversationInstance
+from apps.ai_agents.services.execution import schedule_stale_turn_followup
 from apps.ai_agents.services.handoff import (
     assess_customer_tone,
     build_handoff_package,
@@ -39,6 +41,7 @@ def test_build_handoff_package_includes_operational_context() -> None:
     context = ConversationContext(
         channel="hubspot",
         session_id="hubspot-thread-thread-1",
+        church_id="653",
         recent_messages=[
             ConversationMessage(direction="INCOMING", text="Preciso falar com humano", message_id="m1"),
         ],
@@ -56,6 +59,34 @@ def test_build_handoff_package_includes_operational_context() -> None:
         conversation_context=context,
         triage_decision=triage,
         ai_summary="Cliente pediu atendimento humano.",
+        feature_subscription_lookup={
+            "church_id": "653",
+            "module_lookup_status": "success",
+            "module_lookup_message": "",
+            "obtained_modules": [
+                {
+                    "alias": "kids",
+                    "name": "1001 - 2500 pessoas na igreja",
+                    "price": "329.90",
+                    "plan_limit": "2500",
+                },
+                {
+                    "alias": "smart_store",
+                    "name": "Loja",
+                    "price": "199.90",
+                    "plan_limit": None,
+                },
+            ],
+        },
+        church_plan_lookup={
+            "church_plan_lookup_status": "success",
+            "church_plan_lookup_message": "",
+            "church_plan": {
+                "plan": "pro",
+                "is_active": True,
+                "is_blocked": False,
+            },
+        },
     )
 
     assert package["hubspot_thread_id"] == "thread-1"
@@ -64,6 +95,15 @@ def test_build_handoff_package_includes_operational_context() -> None:
     assert package["priority"] == "ALTA"
     assert package["tags"] == ["humano"]
     assert package["recent_messages"][0]["text"] == "Preciso falar com humano"
+    assert package["church_id"] == "653"
+    assert package["obtained_modules"][0]["alias"] == "kids"
+    assert package["obtained_modules"][0]["name"] == "1001 - 2500 pessoas na igreja"
+    assert package["obtained_modules"][0]["price"] == "329.90"
+    assert package["church_plan"] == {
+        "plan": "pro",
+        "is_active": True,
+        "is_blocked": False,
+    }
     assert package["customer_tone"] == "Frustrado"
     assert "pediu continuidade com um atendente humano" in package["conversation_summary"]
     assert "histórico" in package["recommended_next_step"]
@@ -72,6 +112,10 @@ def test_build_handoff_package_includes_operational_context() -> None:
     assert "## Resumo automático do Salomão para o N1" in observation
     assert "**Tom do cliente:** Frustrado" in observation
     assert "**Resumo da conversa:**" in observation
+    assert "**Plano da igreja:** `pro` — **is_active:** Sim; **is_blocked:** Não" in observation
+    assert "**Módulos obtidos:**" in observation
+    assert "`kids` — name: 1001 - 2500 pessoas na igreja, price: 329.90, limite 2500" in observation
+    assert "`smart_store` — name: Loja, price: 199.90" in observation
     assert "**Próximo passo recomendado:**" in observation
     assert "**Prioridade da triagem:** Alta" in observation
 
@@ -199,6 +243,21 @@ def test_handoff_observation_synthesizes_long_event_conversation_for_n1() -> Non
     assert "### Como configurar" not in observation
 
 
+def test_handoff_observation_explains_unavailable_module_lookup() -> None:
+    observation = format_handoff_observation(
+        {
+            "customer_tone": "Calmo/neutro",
+            "conversation_summary": "O cliente pediu atendimento humano.",
+            "recommended_next_step": "Assumir o atendimento.",
+            "module_lookup_status": "provider_error",
+            "module_lookup_message": "InRadar retornou HTTP 400.",
+            "obtained_modules": [],
+        }
+    )
+
+    assert "**Módulos obtidos:** InRadar retornou HTTP 400." in observation
+
+
 @pytest.mark.django_db
 def test_watchdog_marks_stuck_instances_retryable() -> None:
     instance = ConversationInstance.objects.create(
@@ -218,7 +277,7 @@ def test_watchdog_marks_stuck_instances_retryable() -> None:
 
 
 @pytest.mark.django_db
-def test_watchdog_schedules_exhausted_failure_for_safe_handoff() -> None:
+def test_watchdog_terminalizes_exhausted_failure_without_handoff() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:thread:stuck-2",
         hubspot_thread_id="stuck-2",
@@ -231,7 +290,70 @@ def test_watchdog_schedules_exhausted_failure_for_safe_handoff() -> None:
 
     instance.refresh_from_db()
     assert result.scanned == 1
-    assert result.marked_retryable == 1
-    assert result.marked_terminal == 0
-    assert instance.state == ConversationInstance.State.FAILED_RETRYABLE
+    assert result.marked_retryable == 0
+    assert result.marked_terminal == 1
+    assert instance.state == ConversationInstance.State.FAILED_TERMINAL
     assert instance.failure_count == 3
+    assert instance.next_retry_at is None
+
+
+@pytest.mark.django_db
+def test_watchdog_supersedes_placeholder_when_canonical_thread_exists() -> None:
+    canonical = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:watchdog-thread",
+        hubspot_thread_id="watchdog-thread",
+        hubspot_ticket_id="watchdog-ticket",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_activity_at=timezone.now(),
+    )
+    placeholder = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:watchdog-ticket",
+        hubspot_ticket_id="watchdog-ticket",
+        state=ConversationInstance.State.CONTEXT_HYDRATING,
+        last_activity_at=timezone.now() - timedelta(minutes=30),
+    )
+
+    result = run_lifecycle_watchdog(limit=10, max_failures=3)
+
+    placeholder.refresh_from_db()
+    assert result.marked_terminal == 1
+    assert placeholder.state == ConversationInstance.State.IGNORED
+    assert placeholder.failure_count == 0
+    assert placeholder.metadata["identity_supersession"]["canonical_instance_id"] == str(canonical.pk)
+
+
+@pytest.mark.django_db
+def test_stale_turn_followup_is_exactly_once_per_customer_message() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:stale-followup",
+        hubspot_thread_id="stale-followup",
+        hubspot_ticket_id="stale-ticket",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+    reply_result = {
+        "reason": "customer_turn_changed",
+        "current_thread_id": "stale-followup",
+        "current_customer_turn_id": "message-2",
+    }
+
+    with patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.apply_async") as enqueue:
+        first = schedule_stale_turn_followup(
+            instance=instance,
+            context={"_stale_turn_followup_depth": 0},
+            reply_result=reply_result,
+            agent_run=None,
+        )
+        duplicate = schedule_stale_turn_followup(
+            instance=instance,
+            context={"_stale_turn_followup_depth": 0},
+            reply_result=reply_result,
+            agent_run=None,
+        )
+
+    assert first is True
+    assert duplicate is False
+    enqueue.assert_called_once_with(
+        args=("stale-followup",),
+        kwargs={"stale_turn_followup_depth": 1},
+        countdown=1,
+    )

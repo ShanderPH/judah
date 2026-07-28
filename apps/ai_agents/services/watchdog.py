@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
+from apps.ai_agents.services.instance_identity import supersede_placeholder_if_canonical_exists
 from apps.ai_agents.services.lifecycle import TERMINAL_STATES, LifecycleEngine
 
 DEFAULT_STATE_TIMEOUT_MINUTES: dict[str, int] = {
@@ -58,23 +59,39 @@ def run_lifecycle_watchdog(*, limit: int = 100, max_failures: int = 3) -> Watchd
 
     for instance in stuck_instances(limit=limit):
         scanned += 1
+        canonical = supersede_placeholder_if_canonical_exists(instance)
+        if canonical is not None:
+            marked_terminal += 1
+            continue
+
         timeout = _timeout_for_state(instance.state)
         instance.failure_count += 1
         instance.current_error = f"Lifecycle watchdog timeout in state {instance.state} after {timeout}."
-        instance.next_retry_at = timezone.now() + timedelta(minutes=5)
+        exhausted = instance.failure_count >= max(1, max_failures)
+        instance.next_retry_at = None if exhausted else timezone.now() + timedelta(minutes=5)
         instance.save(update_fields=["failure_count", "current_error", "next_retry_at", "updated_at"])
 
         if instance.state != ConversationInstance.State.FAILED_RETRYABLE:
             engine.transition(
                 instance,
                 ConversationInstance.State.FAILED_RETRYABLE,
-                reason=(
-                    "Lifecycle watchdog exhausted retries and scheduled safe handoff."
-                    if instance.failure_count >= max_failures
-                    else "Lifecycle watchdog marked retryable failure."
-                ),
+                reason="Lifecycle watchdog marked retryable failure.",
             )
-        marked_retryable += 1
+        if exhausted:
+            missing_identity = not instance.hubspot_thread_id
+            engine.transition(
+                instance,
+                ConversationInstance.State.FAILED_TERMINAL,
+                reason=(
+                    "Lifecycle watchdog exhausted retries without a canonical thread; automatic handoff is unsafe."
+                    if missing_identity
+                    else "Lifecycle watchdog exhausted the bounded retry budget."
+                ),
+                actor_type="lifecycle_watchdog",
+            )
+            marked_terminal += 1
+        else:
+            marked_retryable += 1
 
     return WatchdogResult(
         scanned=scanned,

@@ -590,10 +590,19 @@ class HubSpotClient:
         # SAT heartbeat cycle (e.g. heartbeat + drain + reconcile overlap).
         cache_key = "hubspot_users_availability_2026_03"
         if not force_refresh:
-            cached = cache.get(cache_key)
-            if cached is not None:
-                logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
-                return cached
+            try:
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    logger.debug("hubspot_owners_availability_cache_hit", count=len(cached))
+                    return cached
+            except Exception as exc:
+                logger.warning(
+                    "hubspot_owners_availability_cache_read_failed",
+                    cache_operation="get",
+                    error_type=type(exc).__name__,
+                    message_error=str(exc),
+                    action="continue_with_authoritative_provider_read",
+                )
 
         try:
             headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -653,13 +662,26 @@ class HubSpotClient:
 
             # Cache for 15 seconds — shorter than the 20-second heartbeat interval
             # to ensure fresh data on the next cycle.
-            cache.set(cache_key, result, timeout=15)
-
-            logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
-            return result
         except Exception as exc:
             logger.error("hubspot_get_owners_availability_failed", error=str(exc))
             raise ExternalServiceError("HubSpot", str(exc)) from exc
+
+        # Cache degradation must not invalidate fresh authoritative data.
+        try:
+            cache.set(cache_key, result, timeout=15)
+        except Exception as exc:
+            logger.warning(
+                "hubspot_owners_availability_cache_write_failed",
+                cache_operation="set",
+                count=len(result),
+                pages=page,
+                error_type=type(exc).__name__,
+                message_error=str(exc),
+                action="return_fresh_provider_data_without_cache",
+            )
+
+        logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
+        return result
 
     def count_active_tickets_by_owner(self, owner_id: int) -> int:
         """Count active (non-closed) tickets assigned to a specific owner.
