@@ -30,6 +30,7 @@ import structlog
 from django.db.models import Avg, Count, Max, Min
 from django.utils import timezone
 
+from apps.support.error_catalog import cataloged_error_context
 from celery import shared_task
 
 logger = structlog.get_logger(__name__)
@@ -175,13 +176,18 @@ def task_matchmaker_assign_single(
                 "skipped_locked",
             }
             log_method = logger.info if expected_defer else logger.warning
+            error_context = (
+                {"retryable": False}
+                if expected_defer
+                else cataloged_error_context("availability_reconciliation_failed")
+            )
             log_method(
                 "task_matchmaker_assignment_blocked_by_availability_reconciliation",
                 ticket_id=hubspot_ticket_id,
                 reason=blocked_reason,
                 expected=expected_defer,
                 action="queue_preserved_for_later_assignment",
-                retryable=not expected_defer,
+                **error_context,
             )
             return False
 
@@ -199,7 +205,11 @@ def task_matchmaker_assign_single(
             "task_matchmaker_assign_single_retry",
             ticket_id=hubspot_ticket_id,
             error=str(exc),
-            retry=self.request.retries,
+            exception_type=type(exc).__name__,
+            retry_count=self.request.retries,
+            max_retries=self.max_retries,
+            processing_stage="task_matchmaker_assign_single",
+            **cataloged_error_context("assignment_task_retry"),
         )
         raise self.retry(exc=exc) from exc
     finally:
@@ -223,8 +233,23 @@ def task_matchmaker_drain_queue() -> dict:
         return {"skipped_off_hours": True}
 
     # Redis lock — prevent overlapping drains
-    result = matchmaker_drain_queue()
-    logger.info("task_matchmaker_drain_queue_done", **result)
+    try:
+        result = matchmaker_drain_queue()
+    except Exception as exc:
+        logger.exception(
+            "task_matchmaker_drain_queue_failed",
+            exception_type=type(exc).__name__,
+            error=str(exc),
+            processing_stage="task_matchmaker_drain_queue",
+            queue_preserved=True,
+            **cataloged_error_context("queue_drain_unexpected"),
+        )
+        raise
+    log_method = logger.error if result.get("systemic_failures", 0) else logger.info
+    error_context = (
+        cataloged_error_context("assignment_repair_unexpected") if result.get("systemic_failures", 0) else {}
+    )
+    log_method("task_matchmaker_drain_queue_done", **result, **error_context)
     return result
 
 

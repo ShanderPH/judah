@@ -145,7 +145,10 @@ def test_not_found_quarantines_and_releases_capacity() -> None:
     queue_row = _queue()
     attempt = _reserve(agent)
 
-    with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+    with (
+        patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory,
+        patch("apps.support.durable_assignment_service.logger") as log,
+    ):
         client_factory.return_value.assign_ticket_owner.side_effect = HubSpotResourceNotFoundError("ticket", "9001")
         assert execute_assignment_attempt(attempt.pk) == "stale_ticket"
 
@@ -153,6 +156,13 @@ def test_not_found_quarantines_and_releases_capacity() -> None:
     queue_row.refresh_from_db()
     assert agent.current_simultaneous_chats == 0
     assert queue_row.queue_status == NewConversation.QueueStatus.FAILED
+    compensation_log = log.warning.call_args
+    assert compensation_log.args == ("assignment_attempt_compensated",)
+    assert compensation_log.kwargs["error_catalog_code"] == "SUP-HUBSPOT-001"
+    assert compensation_log.kwargs["message_error"].startswith("Erro catalogado [SUP-HUBSPOT-001]:")
+    assert compensation_log.kwargs["ticket_id"] == "9001"
+    assert compensation_log.kwargs["queue_row_id"] == str(queue_row.pk)
+    assert compensation_log.kwargs["quarantine"] is True
 
 
 def test_revision_only_change_preserves_materially_eligible_candidate() -> None:
@@ -225,7 +235,10 @@ def test_legacy_completed_attempt_quarantines_ambiguous_row() -> None:
         state=AssignmentAttempt.State.COMPLETED,
     )
 
-    with patch("apps.support.durable_assignment_service._verify_candidates", return_value=[(agent, "eligible")]):
+    with (
+        patch("apps.support.durable_assignment_service._verify_candidates", return_value=[(agent, "eligible")]),
+        patch("apps.support.durable_assignment_service.logger") as log,
+    ):
         reservation = reserve_next_assignment("9001")
 
     queue_row.refresh_from_db()
@@ -233,6 +246,12 @@ def test_legacy_completed_attempt_quarantines_ambiguous_row() -> None:
     assert queue_row.queue_status == NewConversation.QueueStatus.FAILED
     assert queue_row.failure_code == "legacy_cycle_ambiguous"
     assert agent.current_simultaneous_chats == 0
+    quarantine_log = log.warning.call_args
+    assert quarantine_log.args == ("assignment_queue_row_quarantined",)
+    assert quarantine_log.kwargs["error_catalog_code"] == "SUP-QUEUE-001"
+    assert quarantine_log.kwargs["message_error"].startswith("Erro catalogado [SUP-QUEUE-001]:")
+    assert quarantine_log.kwargs["ticket_id"] == "9001"
+    assert quarantine_log.kwargs["queue_row_id"] == str(queue_row.pk)
 
 
 def test_manual_provider_rejection_has_no_false_local_success() -> None:

@@ -20,6 +20,7 @@ from apps.integrations.hubspot.exceptions import (
     HubSpotAPIError,
     HubSpotResourceNotFoundError,
 )
+from apps.support.error_catalog import cataloged_error_context
 from apps.support.models import (
     Agent,
     AssignedConversation,
@@ -196,6 +197,15 @@ def reserve_next_assignment(
                 queue_row.failure_code = "stale_cycle"
                 queue_row.failure_message = "Queue row belongs to a non-queued cycle."
                 queue_row.save(update_fields=["queue_status", "failure_code", "failure_message", "updated_at"])
+                logger.warning(
+                    "assignment_queue_row_quarantined",
+                    ticket_id=queue_row.hubspot_ticket_id,
+                    queue_row_id=str(queue_row.pk),
+                    cycle_id=str(queue_row.cycle_id),
+                    processing_stage="reserve_next_assignment",
+                    queue_status=queue_row.queue_status,
+                    **cataloged_error_context(queue_row.failure_code),
+                )
                 return Reservation(
                     None,
                     ReservationReason.STALE_CYCLE,
@@ -213,6 +223,15 @@ def reserve_next_assignment(
                     queue_row.failure_code = "legacy_cycle_ambiguous"
                     queue_row.failure_message = "Legacy row cannot be linked to a completed assignment safely."
                     queue_row.save(update_fields=["queue_status", "failure_code", "failure_message", "updated_at"])
+                    logger.warning(
+                        "assignment_queue_row_quarantined",
+                        ticket_id=queue_row.hubspot_ticket_id,
+                        queue_row_id=str(queue_row.pk),
+                        cycle_id=None,
+                        processing_stage="reserve_next_assignment",
+                        queue_status=queue_row.queue_status,
+                        **cataloged_error_context(queue_row.failure_code),
+                    )
                     return Reservation(
                         None,
                         ReservationReason.LEGACY_CYCLE_AMBIGUOUS,
@@ -694,6 +713,22 @@ def compensate_assignment_attempt(
                 "updated_at",
             ]
         )
+        log_method = logger.error if repair_required else logger.warning
+        log_method(
+            "assignment_attempt_compensated",
+            ticket_id=attempt.ticket_id,
+            attempt_id=str(attempt.pk),
+            cycle_id=str(attempt.cycle_id) if attempt.cycle_id else None,
+            queue_row_id=str(queue_row.pk) if queue_row is not None else None,
+            queue_status=queue_row.queue_status if queue_row is not None else None,
+            attempt_state=attempt.state,
+            retry_count=attempt.retry_count,
+            next_retry_at=attempt.next_retry_at.isoformat() if attempt.next_retry_at else None,
+            quarantine=quarantine,
+            repair_required=repair_required,
+            processing_stage="compensate_assignment_attempt",
+            **cataloged_error_context(error_code, retryable=retryable),
+        )
         return attempt
 
 
@@ -718,12 +753,24 @@ def reconcile_ambiguous_attempt(
         error_code = f"hubspot_http_{provider_error.external_status}"
     try:
         ticket = get_hubspot_client().get_ticket_details(attempt.ticket_id)
-    except Exception:
+    except Exception as exc:
+        reconciliation_error_code = f"{error_code}_owner_unreadable"
+        logger.exception(
+            "assignment_provider_owner_read_failed",
+            ticket_id=attempt.ticket_id,
+            attempt_id=str(attempt.pk),
+            cycle_id=str(attempt.cycle_id) if attempt.cycle_id else None,
+            exception_type=type(exc).__name__,
+            provider_error_code=error_code,
+            provider_http_status=provider_error.external_status if provider_error else None,
+            processing_stage="reconcile_ambiguous_attempt",
+            **cataloged_error_context(reconciliation_error_code),
+        )
         compensate_assignment_attempt(
             attempt.pk,
             retryable=False,
             repair_required=True,
-            error_code=f"{error_code}_owner_unreadable",
+            error_code=reconciliation_error_code,
         )
         return "repair_required"
 
@@ -883,6 +930,10 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
                 "assignment_attempt_repair_item_failed",
                 attempt_id=str(attempt.pk),
                 cycle_id=str(attempt.cycle_id) if attempt.cycle_id else None,
+                ticket_id=attempt.ticket_id,
+                exception_type=type(exc).__name__,
+                processing_stage="repair_assignment_attempts",
+                **cataloged_error_context("assignment_repair_unexpected"),
             )
     return counts
 

@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 import structlog
 
+from celery import signals
 from common.logging import (
     HealthCheckFilter,
     SlowQueryFilter,
@@ -13,6 +14,7 @@ from common.logging import (
     bind_request_context,
     bind_task_context,
     clear_context,
+    connect_celery_signals,
     get_logger,
     log_external_call,
     maybe_log,
@@ -88,3 +90,33 @@ def test_maybe_log_honors_sampling() -> None:
 
     logger.info.assert_called_once_with("always", sample_rate=1.0, value=1)
     logger.debug.assert_called_once_with("sampled", sample_rate=0.1)
+
+
+def test_celery_failure_and_retry_logs_are_cataloged() -> None:
+    passthrough = lambda receiver: receiver  # noqa: E731
+    with (
+        patch.object(signals.task_prerun, "connect", side_effect=passthrough),
+        patch.object(signals.task_postrun, "connect", side_effect=passthrough),
+        patch.object(signals.task_failure, "connect", side_effect=passthrough) as failure_connect,
+        patch.object(signals.task_retry, "connect", side_effect=passthrough) as retry_connect,
+    ):
+        connect_celery_signals()
+
+    failure_receiver = failure_connect.call_args.args[0]
+    retry_receiver = retry_connect.call_args.args[0]
+    logger = Mock()
+    with patch("common.logging.get_logger", return_value=logger):
+        failure_receiver(task_id="task-failed", exception=RuntimeError("database unavailable"))
+        retry_receiver(task_id="task-retry", reason=TimeoutError("provider timeout"))
+
+    failure = logger.error.call_args
+    assert failure.args == ("celery_task_failure",)
+    assert failure.kwargs["error_catalog_code"] == "CELERY-TASK-001"
+    assert failure.kwargs["message_error"].startswith("Erro catalogado [CELERY-TASK-001]:")
+    assert failure.kwargs["error_type"] == "RuntimeError"
+
+    retry = logger.warning.call_args
+    assert retry.args == ("celery_task_retry",)
+    assert retry.kwargs["error_catalog_code"] == "CELERY-TASK-002"
+    assert retry.kwargs["message_error"].startswith("Erro catalogado [CELERY-TASK-002]:")
+    assert retry.kwargs["retryable"] is True

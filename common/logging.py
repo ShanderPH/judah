@@ -354,6 +354,14 @@ def connect_celery_signals() -> None:
             task_id=task_id,
             error_type=type(exception).__name__,
             error=str(exception),
+            error_catalog_code="CELERY-TASK-001",
+            message_error=(
+                "Erro catalogado [CELERY-TASK-001]: a tarefa assíncrona terminou com uma exceção não tratada."
+            ),
+            error_category="task_execution",
+            retryable=False,
+            action_taken="A falha foi registrada com traceback e contexto da tarefa.",
+            operator_hint="Use task_id, task_name, error_type e o traceback para localizar a causa original.",
         )
         structlog.contextvars.clear_contextvars()
 
@@ -364,6 +372,13 @@ def connect_celery_signals() -> None:
             "celery_task_retry",
             task_id=task_id,
             reason=str(reason),
+            error_type=type(reason).__name__,
+            error_catalog_code="CELERY-TASK-002",
+            message_error="Erro catalogado [CELERY-TASK-002]: a tarefa solicitou uma nova tentativa.",
+            error_category="task_execution",
+            retryable=True,
+            action_taken="O Celery preservou a mensagem para nova execução conforme a política da tarefa.",
+            operator_hint="Use task_id, task_name e reason para identificar o motivo da repetição.",
         )
 
 
