@@ -34,10 +34,12 @@ from apps.ai_agents.contracts import ConversationContext, ConversationMessage
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
 from apps.ai_agents.services.conversation_turn import (
     CURRENT_CUSTOMER_TURN_MARKER,
+    conversation_message_sort_key,
     current_incoming_turn,
     current_incoming_turn_text,
     incoming_message_id,
     latest_incoming_message_id,
+    normalize_conversation_history,
 )
 
 logger = structlog.get_logger(__name__)
@@ -221,7 +223,7 @@ async def _fetch_conversation_history(
                 "raw": raw,
             }
         )
-    return messages
+    return normalize_conversation_history(messages)
 
 
 def _conversation_message_sources(messages: list[dict[str, Any]]) -> list[dict[str, str | None]]:
@@ -715,17 +717,21 @@ async def hydrate_ticket_context(
             # than concatenate histories and accidentally share state.
             selected_thread_id, selected_thread, selected_history = max(
                 hydrated_threads,
-                key=lambda item: max(
-                    (str(message.get("created_at") or "") for message in item[2]),
-                    default=str(item[1].get("createdAt") or ""),
+                key=lambda item: (
+                    conversation_message_sort_key(item[2][-1])
+                    if item[2]
+                    else conversation_message_sort_key(
+                        {
+                            "id": item[0],
+                            "thread_id": item[0],
+                            "created_at": item[1].get("createdAt"),
+                        }
+                    )
                 ),
             )
             context["thread_ids"] = [selected_thread_id]
             context["threads"] = [selected_thread]
-            context["conversation_history"] = sorted(
-                selected_history,
-                key=lambda message: message.get("created_at") or "",
-            )
+            context["conversation_history"] = normalize_conversation_history(selected_history)
         await _hydrate_latest_incoming_image(client, context)
 
     logger.info(
@@ -831,7 +837,9 @@ async def hydrate_thread_context(
                         error=str(exc),
                     )
                     errors.append(f"ticket_fetch:{exc.__class__.__name__}")
-            context["conversation_history"] = await _fetch_conversation_history(client, thread_id, limit=limit)
+            context["conversation_history"] = normalize_conversation_history(
+                await _fetch_conversation_history(client, thread_id, limit=limit)
+            )
             await _hydrate_latest_incoming_image(client, context)
         except httpx.HTTPStatusError as exc:
             logger.error(
@@ -991,6 +999,8 @@ async def refresh_salomao_reply_context(context: dict[str, Any]) -> dict[str, An
             "reason": "customer_turn_changed",
             "retryable": False,
             "context": fresh_context,
+            "current_customer_turn_id": incoming_message_id(fresh_latest),
+            "current_thread_id": str(fresh_latest.get("thread_id") or thread_id),
         }
     return {
         "eligible": True,
@@ -1078,6 +1088,7 @@ def build_conversation_context_from_hubspot_context(
         ticket_id=context.get("ticket_id") or None,
         thread_id=str(thread_ids[0]) if thread_ids else None,
         contact_id=str(contact_ids[0]) if contact_ids else None,
+        church_id=context.get("church_id") or None,
         pipeline_id=context.get("pipeline") or None,
         pipeline_stage=context.get("pipeline_stage") or None,
         owner_id=context.get("owner_id") or None,
@@ -1276,6 +1287,14 @@ async def send_salomao_reply_to_hubspot_thread(
             "suppressed": not retryable,
             "retryable": retryable,
             "reason": reason,
+            **(
+                {
+                    "current_customer_turn_id": freshness["current_customer_turn_id"],
+                    "current_thread_id": freshness["current_thread_id"],
+                }
+                if freshness.get("current_customer_turn_id") and freshness.get("current_thread_id")
+                else {}
+            ),
         }
 
     context = freshness["context"]

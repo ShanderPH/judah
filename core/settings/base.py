@@ -433,6 +433,23 @@ HUBSPOT_TICKET_CHURCH_PROPERTY = config(
     "HUBSPOT_TICKET_CHURCH_PROPERTY",
     default="codigo_de_igreja_local___ticket",
 )
+INRADAR_FEATURE_SUBSCRIPTIONS_URL = config(
+    "INRADAR_FEATURE_SUBSCRIPTIONS_URL",
+    default="https://www.inradar.com.br/api/v1/webhook/operations/read_feature_subscriptions_list/",
+)
+INRADAR_TERTIARYGROUP_URL = config(
+    "INRADAR_TERTIARYGROUP_URL",
+    default="https://www.inradar.com.br/api/v1/webhook/operations/read_tertiarygroup/",
+)
+INRADAR_FEATURE_SUBSCRIPTIONS_BASIC_TOKEN = config(
+    "INRADAR_FEATURE_SUBSCRIPTIONS_BASIC_TOKEN",
+    default="",
+)
+INRADAR_FEATURE_SUBSCRIPTIONS_TIMEOUT_SECONDS = config(
+    "INRADAR_FEATURE_SUBSCRIPTIONS_TIMEOUT_SECONDS",
+    default=8.0,
+    cast=float,
+)
 
 JIRA_SERVER_URL = config("JIRA_SERVER_URL", default="")
 JIRA_API_TOKEN = config("JIRA_API_TOKEN", default="")

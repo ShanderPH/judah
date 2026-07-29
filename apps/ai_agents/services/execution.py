@@ -12,6 +12,7 @@ from typing import Any
 import structlog
 from asgiref.sync import async_to_sync, sync_to_async
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from apps.ai_agents.agents.base import DEFAULT_MINI_MODEL_ID
@@ -22,8 +23,13 @@ from apps.ai_agents.services.conversation_turn import (
     current_incoming_turn_audit,
     latest_incoming_message_id,
 )
+from apps.ai_agents.services.feature_subscriptions import fetch_active_feature_subscriptions, fetch_church_plan
 from apps.ai_agents.services.handoff import build_handoff_package, format_handoff_observation
-from apps.ai_agents.services.instance_identity import conversation_idempotency_key, find_conversation_instance
+from apps.ai_agents.services.instance_identity import (
+    conversation_idempotency_key,
+    find_conversation_instance,
+    promote_or_get_thread_instance,
+)
 from apps.ai_agents.services.lifecycle import LifecycleEngine
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
 
@@ -40,6 +46,7 @@ HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION = (
     "Vou deixar sua conversa encaminhada para a fila da equipe, que dará continuidade "
     "por aqui no próximo período de atendimento."
 )
+MAX_STALE_TURN_FOLLOWUPS = 3
 
 
 def _text_fingerprint(text: str) -> dict[str, Any]:
@@ -69,7 +76,11 @@ def ensure_conversation_instance(
     thread_ids = context.get("thread_ids") or []
     thread_id = str(thread_ids[0]) if thread_ids else None
     effective_ticket_id = str(ticket_id or context.get("ticket_id") or "") or None
-    instance = find_conversation_instance(thread_id=thread_id, ticket_id=effective_ticket_id)
+    instance = (
+        promote_or_get_thread_instance(ticket_id=effective_ticket_id, thread_id=thread_id)
+        if thread_id
+        else find_conversation_instance(ticket_id=effective_ticket_id)
+    )
     if instance is not None:
         _refresh_conversation_identity(
             instance,
@@ -318,6 +329,107 @@ def suppress_ai_reply(instance: ConversationInstance, *, reason: str) -> None:
         )
 
 
+def schedule_stale_turn_followup(
+    *,
+    instance: ConversationInstance,
+    context: dict[str, Any],
+    reply_result: dict[str, Any],
+    agent_run: AgentRun | None,
+) -> bool:
+    """Schedule exactly one bounded re-run for the newly observed customer turn."""
+    if reply_result.get("reason") != "customer_turn_changed":
+        return False
+    thread_id = str(reply_result.get("current_thread_id") or instance.hubspot_thread_id or "").strip()
+    message_id = str(reply_result.get("current_customer_turn_id") or "").strip()
+    depth = int(context.get("_stale_turn_followup_depth") or 0)
+    if not thread_id or not message_id or depth >= MAX_STALE_TURN_FOLLOWUPS:
+        logger.warning(
+            "stale_customer_turn_followup_not_scheduled",
+            conversation_instance_id=str(instance.pk),
+            thread_id=thread_id or None,
+            customer_turn_id=message_id or None,
+            depth=depth,
+            max_depth=MAX_STALE_TURN_FOLLOWUPS,
+            reason="missing_identity" if not thread_id or not message_id else "bounded_loop_exhausted",
+        )
+        return False
+
+    idempotency_key = f"stale-turn-followup:v1:{instance.hubspot_ticket_id or 'no-ticket'}:{thread_id}:{message_id}"
+    with transaction.atomic():
+        audit, created = ToolCallAuditLog.objects.get_or_create(
+            idempotency_key=idempotency_key,
+            defaults={
+                "instance": instance,
+                "agent_run": agent_run,
+                "tool_name": "schedule_stale_turn_followup",
+                "input": {
+                    "thread_id": thread_id,
+                    "customer_turn_id": message_id,
+                    "depth": depth + 1,
+                },
+                "status": ToolCallAuditLog.Status.STARTED,
+            },
+        )
+        if not created and audit.status in {
+            ToolCallAuditLog.Status.STARTED,
+            ToolCallAuditLog.Status.SUCCEEDED,
+        }:
+            logger.info(
+                "stale_customer_turn_followup_deduplicated",
+                conversation_instance_id=str(instance.pk),
+                thread_id=thread_id,
+                customer_turn_id=message_id,
+            )
+            return False
+        if not created:
+            audit.status = ToolCallAuditLog.Status.STARTED
+            audit.error_message = ""
+            audit.agent_run = agent_run
+            audit.save(update_fields=["status", "error_message", "agent_run"])
+        metadata = dict(instance.metadata or {})
+        metadata["stale_turn_followup"] = {
+            "status": "scheduled",
+            "thread_id": thread_id,
+            "customer_turn_id": message_id,
+            "depth": depth + 1,
+            "scheduled_at": timezone.now().isoformat(),
+        }
+        instance.metadata = metadata
+        instance.save(update_fields=["metadata", "updated_at"])
+
+    try:
+        from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task
+
+        run_salomao_v1_thread_pipeline_task.apply_async(
+            args=(thread_id,),
+            kwargs={"stale_turn_followup_depth": depth + 1},
+            countdown=1,
+        )
+    except Exception as exc:
+        audit.status = ToolCallAuditLog.Status.FAILED
+        audit.error_message = str(exc)
+        audit.output = {"scheduled": False, "error_type": type(exc).__name__}
+        audit.save(update_fields=["status", "error_message", "output"])
+        raise
+
+    audit.status = ToolCallAuditLog.Status.SUCCEEDED
+    audit.output = {
+        "scheduled": True,
+        "thread_id": thread_id,
+        "customer_turn_id": message_id,
+        "depth": depth + 1,
+    }
+    audit.save(update_fields=["status", "output"])
+    logger.info(
+        "stale_customer_turn_followup_scheduled",
+        conversation_instance_id=str(instance.pk),
+        thread_id=thread_id,
+        customer_turn_id=message_id,
+        depth=depth + 1,
+    )
+    return True
+
+
 def publish_handoff_observation(
     *,
     instance: ConversationInstance,
@@ -395,12 +507,18 @@ def request_human_handoff(
             actor_type="supervisor",
         )
 
+    feature_subscription_lookup = fetch_active_feature_subscriptions(
+        conversation_context.church_id if conversation_context is not None else None
+    )
+    church_plan_lookup = fetch_church_plan(conversation_context.church_id if conversation_context is not None else None)
     package = build_handoff_package(
         instance=instance,
         reason=reason,
         conversation_context=conversation_context,
         triage_decision=triage_decision,
         ai_summary=ai_summary,
+        feature_subscription_lookup=feature_subscription_lookup.as_handoff_payload(),
+        church_plan_lookup=church_plan_lookup.as_handoff_payload(),
     )
     engine.update_metadata(
         instance,
@@ -826,6 +944,12 @@ async def apply_supervisor_result(
             )
             if not reply_result.get("sent"):
                 if reply_result.get("suppressed"):
+                    await sync_to_async(schedule_stale_turn_followup)(
+                        instance=instance,
+                        context=context,
+                        reply_result=reply_result,
+                        agent_run=agent_run,
+                    )
                     await sync_to_async(suppress_ai_reply)(
                         instance,
                         reason=str(reply_result.get("reason") or "ticket_not_eligible_for_ai"),
@@ -882,6 +1006,12 @@ async def apply_supervisor_result(
         )
         if not reply_result.get("sent"):
             if reply_result.get("suppressed"):
+                await sync_to_async(schedule_stale_turn_followup)(
+                    instance=instance,
+                    context=context,
+                    reply_result=reply_result,
+                    agent_run=agent_run,
+                )
                 await sync_to_async(suppress_ai_reply)(
                     instance,
                     reason=str(reply_result.get("reason") or "ticket_not_eligible_for_ai"),

@@ -284,7 +284,7 @@ class TestAuthoritativeReconciliation:
 
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     @patch("apps.integrations.hubspot.client.get_hubspot_client")
-    def test_heartbeat_skips_outside_local_schedule(
+    def test_heartbeat_materializes_outside_local_schedule(
         self,
         mock_client_fn: MagicMock,
         _mock_business_hours: MagicMock,
@@ -297,7 +297,13 @@ class TestAuthoritativeReconciliation:
         agent.refresh_from_db()
 
         assert result["skipped_off_hours"] is True
-        assert agent.status_enum == "online"
+        assert result["off_hours_materialized"] is True
+        assert result["agents_checked"] == 1
+        assert agent.status_enum == "away"
+        assert agent.eligibility_state == "ineligible"
+        assert agent.eligibility_reason == "outside_working_hours"
+        assert agent.availability_online_since is None
+        assert agent.availability_sample_count == 0
         mock_client_fn.assert_not_called()
 
 

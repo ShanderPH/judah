@@ -273,6 +273,33 @@ def test_owner_availability_wraps_errors() -> None:
         _client().get_all_owners_availability()
 
 
+def test_owner_availability_returns_provider_data_when_cache_write_fails() -> None:
+    cache = Mock()
+    cache.get.return_value = None
+    cache.set.side_effect = RuntimeError("redis unavailable")
+    response = Mock()
+    response.json.return_value = {
+        "results": [
+            {
+                "id": "u1",
+                "properties": {
+                    "hs_email": "a@example.com",
+                    "hs_availability_status": "available",
+                },
+            }
+        ]
+    }
+
+    with (
+        patch("django.core.cache.cache", cache),
+        patch("apps.integrations.hubspot.client._circuit_breaker.call", return_value=response),
+    ):
+        result = _client().get_all_owners_availability()
+
+    assert result[0]["user_id"] == "u1"
+    assert result[0]["status_enum"] == "online"
+
+
 def test_count_active_tickets_success_and_error() -> None:
     response = Mock()
     response.json.return_value = {"total": 7}
