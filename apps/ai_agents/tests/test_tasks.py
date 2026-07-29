@@ -471,15 +471,59 @@ def test_handoff_observation_task_uses_persisted_package() -> None:
 
 
 def test_watchdog_task_maps_result() -> None:
-    with patch(
-        "apps.ai_agents.services.watchdog.run_lifecycle_watchdog",
-        return_value=SimpleNamespace(scanned=3, marked_retryable=2, marked_terminal=1),
+    with (
+        patch(
+            "apps.ai_agents.services.watchdog.run_lifecycle_watchdog",
+            return_value=SimpleNamespace(scanned=3, marked_retryable=2, marked_terminal=1),
+        ),
+        patch(
+            "apps.ai_agents.services.watchdog.reconcile_waiting_customer_messages",
+            return_value=SimpleNamespace(scanned=5, recovered=1, unchanged=2, ineligible=1, failed=1),
+        ),
+        patch(
+            "apps.ai_agents.services.watchdog.waiting_customer_backlog_size",
+            return_value=23,
+        ),
+        patch(
+            "apps.ai_agents.tasks._redis_client",
+            side_effect=redis.RedisError("redis unavailable"),
+        ),
     ):
         assert run_lifecycle_watchdog_task.run() == {
             "scanned": 3,
             "marked_retryable": 2,
             "marked_terminal": 1,
+            "waiting_scanned": 5,
+            "customer_turns_recovered": 1,
+            "waiting_unchanged": 2,
+            "waiting_ineligible": 1,
+            "waiting_reconciliation_failed": 1,
+            "waiting_reconciliation_skipped": False,
+            "waiting_reconciliation_backlog": 23,
         }
+
+
+def test_watchdog_task_skips_overlapping_waiting_reconciliation() -> None:
+    lock_client = Mock()
+    lock_client.set.return_value = False
+    with (
+        patch(
+            "apps.ai_agents.services.watchdog.run_lifecycle_watchdog",
+            return_value=SimpleNamespace(scanned=0, marked_retryable=0, marked_terminal=0),
+        ),
+        patch("apps.ai_agents.services.watchdog.reconcile_waiting_customer_messages") as reconcile,
+        patch(
+            "apps.ai_agents.services.watchdog.waiting_customer_backlog_size",
+            return_value=0,
+        ),
+        patch("apps.ai_agents.tasks._redis_client", return_value=lock_client),
+    ):
+        result = run_lifecycle_watchdog_task.run()
+
+    assert result["waiting_reconciliation_skipped"] is True
+    assert result["waiting_scanned"] == 0
+    assert result["waiting_reconciliation_backlog"] == 0
+    reconcile.assert_not_called()
 
 
 @pytest.mark.django_db

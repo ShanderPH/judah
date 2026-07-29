@@ -65,7 +65,7 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
         handle_hubspot_event(event)
         return
 
-    if route in {"AI_TRIAGE", "HUMAN_HANDOFF"}:
+    if route in {"AI_TRIAGE", "HUMAN_HANDOFF", "MESSAGE_VERIFY"}:
         from apps.ai_agents.tasks import (
             request_human_handoff_task,
             run_salomao_v1_thread_pipeline_task,
@@ -77,7 +77,7 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
         thread_id = lifecycle.instance.hubspot_thread_id
         ticket_id = lifecycle.instance.hubspot_ticket_id
         ai_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
-        if route == "HUMAN_HANDOFF" or not ai_enabled:
+        if route == "HUMAN_HANDOFF" or (route != "MESSAGE_VERIFY" and not ai_enabled):
             request_human_handoff_task.delay(
                 thread_id=thread_id,
                 ticket_id=ticket_id,
@@ -87,6 +87,18 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
                     else "AI routing is disabled; deterministic human fallback applied."
                 ),
             )
+        elif route == "MESSAGE_VERIFY":
+            if not thread_id:
+                raise ValueError("MESSAGE_VERIFY route has no thread identifier.")
+            if ai_enabled:
+                schedule_salomao_thread_customer_turn(thread_id)
+            else:
+                logger.info(
+                    "hubspot_conversation_message_verification_skipped",
+                    thread_id=thread_id,
+                    reason="ai_routing_disabled",
+                    action="safe_noop",
+                )
         else:
             event_type = str(event.event_type or "").lower()
             is_customer_message = event_type == "conversation.newmessage" or (
@@ -180,8 +192,17 @@ def process_webhook_event(event_id) -> bool:
                         conversation_state=lifecycle.instance.state,
                         route=lifecycle.decision.route,
                         event_created=lifecycle.event_created,
+                        stale_event=lifecycle.stale_event,
                     )
-                    if lifecycle.event_created or lifecycle.event.processing_status in {
+                    if lifecycle.stale_event:
+                        logger.warning(
+                            "webhook_event_stale_effects_skipped",
+                            event_id=event.pk,
+                            conversation_event_id=str(lifecycle.event.pk),
+                            occurred_at=lifecycle.event.occurred_at,
+                            action="preserve_newer_provider_state",
+                        )
+                    elif lifecycle.event_created or lifecycle.event.processing_status in {
                         lifecycle.event.ProcessingStatus.PENDING,
                         lifecycle.event.ProcessingStatus.FAILED,
                     }:

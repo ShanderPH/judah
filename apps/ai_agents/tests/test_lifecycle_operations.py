@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.utils import timezone
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage, TriageDecision
-from apps.ai_agents.models import ConversationInstance
+from apps.ai_agents.models import ConversationEvent, ConversationInstance
 from apps.ai_agents.services.execution import schedule_stale_turn_followup
 from apps.ai_agents.services.handoff import (
     assess_customer_tone,
@@ -17,7 +17,11 @@ from apps.ai_agents.services.handoff import (
     format_handoff_observation,
 )
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
-from apps.ai_agents.services.watchdog import run_lifecycle_watchdog
+from apps.ai_agents.services.watchdog import (
+    reconcile_waiting_customer_messages,
+    run_lifecycle_watchdog,
+    waiting_customer_instances,
+)
 
 
 def test_tool_permissions_are_state_scoped() -> None:
@@ -320,6 +324,147 @@ def test_watchdog_supersedes_placeholder_when_canonical_thread_exists() -> None:
     assert placeholder.state == ConversationInstance.State.IGNORED
     assert placeholder.failure_count == 0
     assert placeholder.metadata["identity_supersession"]["canonical_instance_id"] == str(canonical.pk)
+
+
+@pytest.mark.django_db
+def test_waiting_reconciliation_batch_balances_recent_and_starvation_safe_work() -> None:
+    now = timezone.now()
+    oldest = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:waiting-oldest",
+        hubspot_thread_id="waiting-oldest",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_activity_at=now - timedelta(hours=8),
+    )
+    middle = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:waiting-middle",
+        hubspot_thread_id="waiting-middle",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_activity_at=now - timedelta(hours=1),
+    )
+    newest = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:waiting-newest",
+        hubspot_thread_id="waiting-newest",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_activity_at=now,
+    )
+    ConversationInstance.objects.filter(pk=oldest.pk).update(updated_at=now - timedelta(hours=10))
+    ConversationInstance.objects.filter(pk=middle.pk).update(updated_at=now - timedelta(minutes=10))
+
+    selected = waiting_customer_instances(limit=2)
+
+    assert [instance.pk for instance in selected] == [newest.pk, oldest.pk]
+
+
+@pytest.mark.django_db
+def test_waiting_message_reconciliation_recovers_missed_customer_turn_once() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:missed-customer-turn",
+        hubspot_thread_id="missed-customer-turn",
+        hubspot_ticket_id="ticket-missed",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_message_id="incoming-1",
+        last_activity_at=timezone.now(),
+    )
+    context = {
+        "ticket_id": "ticket-missed",
+        "pipeline": "636594474",
+        "pipeline_stage": "939271304",
+        "owner_id": "",
+        "originating_channel": "1000",
+        "contact_ids": ["contact-1"],
+        "errors": [],
+        "conversation_history": [
+            {
+                "id": "incoming-1",
+                "thread_id": "missed-customer-turn",
+                "direction": "INCOMING",
+                "text": "Pergunta inicial",
+                "created_at": "2026-07-29T12:00:00Z",
+            },
+            {
+                "id": "outgoing-1",
+                "thread_id": "missed-customer-turn",
+                "direction": "OUTGOING",
+                "text": "Resposta do Salomão",
+                "created_at": "2026-07-29T12:01:00Z",
+                "senders": [{"actorId": "A-81908844"}],
+            },
+            {
+                "id": "incoming-2",
+                "thread_id": "missed-customer-turn",
+                "direction": "INCOMING",
+                "text": "Resposta rápida que perdeu o webhook",
+                "created_at": "2026-07-29T12:01:03Z",
+            },
+        ],
+    }
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.hydrate_thread_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn") as schedule,
+    ):
+        result = reconcile_waiting_customer_messages(limit=10)
+        duplicate = reconcile_waiting_customer_messages(limit=10)
+
+    instance.refresh_from_db()
+    assert result.scanned == 1
+    assert result.recovered == 1
+    assert result.failed == 0
+    assert duplicate.scanned == 0
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert instance.last_message_id == "incoming-2"
+    assert instance.metadata["waiting_message_reconciliation"]["outcome"] == "customer_turn_recovered"
+    event = ConversationEvent.objects.get(source="hubspot_reconciliation")
+    assert event.idempotency_key == "reconciled-message:v1:missed-customer-turn:incoming-2"
+    assert event.payload["detectedBy"] == "waiting_customer_reconciliation"
+    schedule.assert_called_once_with("missed-customer-turn")
+
+
+@pytest.mark.django_db
+def test_waiting_message_reconciliation_does_not_repeat_processed_turn() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:unchanged-customer-turn",
+        hubspot_thread_id="unchanged-customer-turn",
+        hubspot_ticket_id="ticket-unchanged",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_message_id="incoming-1",
+        last_activity_at=timezone.now(),
+    )
+    context = {
+        "ticket_id": "ticket-unchanged",
+        "pipeline": "636594474",
+        "pipeline_stage": "939271304",
+        "owner_id": "",
+        "originating_channel": "1000",
+        "errors": [],
+        "conversation_history": [
+            {
+                "id": "incoming-1",
+                "direction": "INCOMING",
+                "text": "Já processada",
+                "created_at": "2026-07-29T12:00:00Z",
+            }
+        ],
+    }
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.hydrate_thread_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn") as schedule,
+    ):
+        result = reconcile_waiting_customer_messages(limit=10)
+
+    instance.refresh_from_db()
+    assert result.unchanged == 1
+    assert result.recovered == 0
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert ConversationEvent.objects.count() == 0
+    schedule.assert_not_called()
 
 
 @pytest.mark.django_db

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -500,6 +498,32 @@ def request_human_handoff(
     creation and queue admission. Outside business hours, HubSpot's configured
     off-hours stage workflow owns the later admission into NOVO.
     """
+    if (
+        conversation_context is not None
+        and conversation_context.allowed_actions
+        and "assign_ticket_to_human_queue" not in conversation_context.allowed_actions
+    ):
+        logger.warning(
+            "human_handoff_tool_not_allowed",
+            conversation_instance_id=str(instance.pk),
+            allowed_actions=conversation_context.allowed_actions,
+        )
+        raise PermissionError("Human handoff is not allowed for this conversation context.")
+
+    ticket_id = instance.hubspot_ticket_id or (
+        conversation_context.ticket_id if conversation_context is not None else None
+    )
+    if not ticket_id:
+        raise ValueError("Human handoff requires a HubSpot ticket ID.")
+    eligibility_thread_id = instance.hubspot_thread_id or (
+        conversation_context.thread_id if conversation_context is not None else None
+    )
+    if not eligibility_thread_id:
+        raise ValueError("Human handoff requires a HubSpot thread ID for fresh eligibility validation.")
+    turn_id = instance.last_message_id
+    if not turn_id:
+        raise ValueError("Human handoff requires a verified incoming customer turn identifier.")
+
     engine = LifecycleEngine()
     if instance.state != ConversationInstance.State.HUMAN_HANDOFF_REQUESTED:
         engine.transition(
@@ -528,27 +552,6 @@ def request_human_handoff(
         awaiting_resolution_confirmation=False,
         waiting_for_fields=[],
     )
-
-    if (
-        conversation_context is not None
-        and conversation_context.allowed_actions
-        and "assign_ticket_to_human_queue" not in conversation_context.allowed_actions
-    ):
-        logger.warning(
-            "human_handoff_tool_not_allowed",
-            conversation_instance_id=str(instance.pk),
-            allowed_actions=conversation_context.allowed_actions,
-        )
-        raise PermissionError("Human handoff is not allowed for this conversation context.")
-
-    ticket_id = instance.hubspot_ticket_id or (
-        conversation_context.ticket_id if conversation_context is not None else None
-    )
-    if not ticket_id:
-        raise ValueError("Human handoff requires a HubSpot ticket ID.")
-    turn_id = instance.last_message_id or instance.last_event_id
-    if not turn_id:
-        raise ValueError("Human handoff requires a customer turn identifier.")
 
     is_off_hours = bool(conversation_context and conversation_context.is_off_hours)
     support_pipeline_id = str(
@@ -584,7 +587,7 @@ def request_human_handoff(
                 str(ticket_id),
                 support_stage_id,
                 pipeline_id=support_pipeline_id,
-                eligibility_thread_id=instance.hubspot_thread_id,
+                eligibility_thread_id=str(eligibility_thread_id),
                 expected_customer_turn_id=str(turn_id),
             )
             if route_result.get("suppressed"):
@@ -691,6 +694,18 @@ def complete_ai_resolution(
     """Close a conclusively answered ticket in the AI triage pipeline."""
     normalized_decision = enforce_resolution_semantics(decision)
     if normalized_decision != decision:
+        suppression_reason = next(
+            (
+                flag
+                for flag in normalized_decision.risk_flags
+                if flag
+                in {
+                    "candidate_resolution_requires_customer_input",
+                    "candidate_resolution_lacks_positive_evidence",
+                }
+            ),
+            "candidate_resolution_not_conclusive",
+        )
         engine = LifecycleEngine()
         if instance.state == ConversationInstance.State.FAILED_RETRYABLE:
             engine.transition(
@@ -717,7 +732,7 @@ def complete_ai_resolution(
         output = {
             "closed": False,
             "suppressed": True,
-            "reason": "candidate_resolution_requires_customer_input",
+            "reason": suppression_reason,
         }
         logger.warning(
             "ai_resolution_close_rejected",
@@ -734,9 +749,12 @@ def complete_ai_resolution(
     if conversation_context.allowed_actions and "update_ticket_stage" not in conversation_context.allowed_actions:
         raise PermissionError("Ticket closure is not allowed for this conversation context.")
 
-    turn_id = instance.last_message_id or instance.last_event_id
+    eligibility_thread_id = instance.hubspot_thread_id or conversation_context.thread_id
+    if not eligibility_thread_id:
+        raise ValueError("AI resolution requires a HubSpot thread ID for fresh eligibility validation.")
+    turn_id = instance.last_message_id
     if not turn_id:
-        raise ValueError("AI resolution requires a customer turn identifier.")
+        raise ValueError("AI resolution requires a verified incoming customer turn identifier.")
 
     pipeline_id = str(settings.HUBSPOT_AI_TRIAGE_PIPELINE_ID)
     stage_id = str(settings.HUBSPOT_CLOSED_STAGE_ID)
@@ -763,7 +781,7 @@ def complete_ai_resolution(
                 str(ticket_id),
                 stage_id,
                 pipeline_id=pipeline_id,
-                eligibility_thread_id=instance.hubspot_thread_id,
+                eligibility_thread_id=str(eligibility_thread_id),
                 expected_customer_turn_id=str(turn_id),
             )
             if route_result.get("suppressed"):
@@ -906,7 +924,7 @@ def resume_pending_ticket_effect(instance: ConversationInstance) -> dict[str, An
             decision=decision,
             agent_run=audit.agent_run,
         )
-        if result.get("suppressed") and result.get("reason") == "candidate_resolution_requires_customer_input":
+        if result.get("suppressed") and str(result.get("reason") or "").startswith("candidate_resolution_"):
             _finish_tool_call(str(audit.pk), output=result, succeeded=True)
 
     logger.info(
@@ -1126,50 +1144,19 @@ async def apply_supervisor_result(
     await sync_to_async(_set_waiting_state)(instance, decision=decision)
 
 
-def _normalized_confirmation(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", text.strip().lower())
-    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
-    return " ".join(re.sub(r"[^a-z0-9\s]", " ", without_accents).split())
-
-
 def handle_resolution_confirmation(instance: ConversationInstance, message: str) -> bool:
-    """Close only when a prior candidate resolution receives clear confirmation."""
+    """Retire the legacy local-only confirmation shortcut.
+
+    Historical rows may still carry ``awaiting_resolution_confirmation``.
+    Closing them here would update only Judah's lifecycle and leave HubSpot in
+    a different state. Clear the obsolete marker and let the normal audited
+    Supervisor path process the customer message and any provider effect.
+    """
     metadata = dict(instance.metadata or {})
     if not metadata.get("awaiting_resolution_confirmation"):
         return False
 
-    normalized = _normalized_confirmation(message)
-    positive = {
-        "sim",
-        "sim resolveu",
-        "resolveu",
-        "resolvido",
-        "funcionou",
-        "deu certo",
-        "obrigado resolveu",
-        "obrigada resolveu",
-    }
-    if normalized in positive:
-        engine = LifecycleEngine()
-        engine.transition(
-            instance,
-            ConversationInstance.State.RESOLVED_BY_AI,
-            reason="Customer confirmed the candidate resolution.",
-            actor_type="customer",
-        )
-        engine.transition(
-            instance,
-            ConversationInstance.State.CLOSED,
-            reason="AI resolution confirmed by customer.",
-            actor_type="system",
-        )
-        engine.update_metadata(
-            instance,
-            awaiting_resolution_confirmation=False,
-            waiting_for_fields=[],
-        )
-        return True
-
+    del message
     metadata["awaiting_resolution_confirmation"] = False
     instance.metadata = metadata
     instance.save(update_fields=["metadata", "updated_at"])

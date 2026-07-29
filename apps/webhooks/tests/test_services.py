@@ -287,6 +287,59 @@ class TestProcessWebhookEvent:
 
         mock_pipeline.assert_called_once_with("thread-authoritative")
 
+    @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
+    def test_directionless_message_dispatches_provider_verification(self, mock_pipeline) -> None:
+        event = WebhookEvent.objects.create(
+            event_type="conversation.newMessage",
+            object_id="thread-directionless",
+            payload={
+                "eventId": "evt-directionless",
+                "objectId": "thread-directionless",
+                "messageId": "message-directionless",
+                "messageType": "MESSAGE",
+            },
+        )
+
+        with patch("django.conf.settings.AI_ROUTING_ENABLED", True):
+            assert process_webhook_event(event.pk) is True
+
+        mock_pipeline.assert_called_once_with("thread-directionless")
+        instance = ConversationInstance.objects.get(hubspot_thread_id="thread-directionless")
+        assert instance.state == ConversationInstance.State.NORMALIZED
+        assert instance.last_message_id == ""
+
+    @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
+    def test_late_directionless_message_is_recorded_without_dispatching_stale_effects(self, mock_pipeline) -> None:
+        newer = WebhookEvent.objects.create(
+            event_type="conversation.newMessage",
+            object_id="thread-stale-message",
+            payload={
+                "eventId": "evt-newer",
+                "objectId": "thread-stale-message",
+                "messageId": "message-newer",
+                "messageType": "MESSAGE",
+                "occurredAt": "1783022765000",
+            },
+        )
+        older = WebhookEvent.objects.create(
+            event_type="conversation.newMessage",
+            object_id="thread-stale-message",
+            payload={
+                "eventId": "evt-older",
+                "objectId": "thread-stale-message",
+                "messageId": "message-older",
+                "messageType": "MESSAGE",
+                "occurredAt": "1783022705000",
+            },
+        )
+
+        with patch("django.conf.settings.AI_ROUTING_ENABLED", True):
+            assert process_webhook_event(newer.pk) is True
+            assert process_webhook_event(older.pk) is True
+
+        mock_pipeline.assert_called_once_with("thread-stale-message")
+        assert ConversationEvent.objects.filter(instance__hubspot_thread_id="thread-stale-message").count() == 2
+
     def test_failed_lifecycle_dispatch_is_retried_without_losing_ledger_status(self) -> None:
         event = WebhookEvent.objects.create(
             event_type="conversation.newMessage",
@@ -356,6 +409,32 @@ class TestLifecycleDispatch:
             )
 
         assert "AI routing is disabled" in handoff.call_args.kwargs["reason"]
+
+    @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
+    def test_message_verify_schedules_thread_hydration_without_handoff(self, schedule) -> None:
+        event = WebhookEvent(event_type="conversation.newMessage", payload={})
+
+        with patch("django.conf.settings.AI_ROUTING_ENABLED", True):
+            _dispatch_hubspot_lifecycle(
+                event,
+                self._lifecycle("MESSAGE_VERIFY", thread_id="thread-verify"),
+            )
+
+        schedule.assert_called_once_with("thread-verify")
+
+    @patch("apps.ai_agents.tasks.request_human_handoff_task.delay")
+    @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
+    def test_message_verify_is_safe_noop_when_ai_is_disabled(self, schedule, handoff) -> None:
+        event = WebhookEvent(event_type="conversation.newMessage", payload={})
+
+        with patch("django.conf.settings.AI_ROUTING_ENABLED", False):
+            _dispatch_hubspot_lifecycle(
+                event,
+                self._lifecycle("MESSAGE_VERIFY", thread_id="thread-disabled"),
+            )
+
+        schedule.assert_not_called()
+        handoff.assert_not_called()
 
     @patch("apps.ai_agents.tasks.schedule_supervisor_customer_turn")
     def test_ticket_customer_message_uses_debounced_supervisor(self, schedule) -> None:

@@ -67,7 +67,6 @@ class TestHubSpotWebhookAPI:
             content_type="application/json",
             headers={"X-HubSpot-Signature": self._v1_signature(self.sandbox_secret, body)},
         )
-
         assert production_response.status_code == 202
         assert production_response.json()["status"] == "accepted"
         assert sandbox_response.status_code == 202
@@ -123,10 +122,8 @@ class TestHubSpotWebhookAPI:
             headers={"X-HubSpot-Signature": self._v1_signature(self.production_secret, body)},
         )
 
-        assert response.status_code == 202
-        assert response.json()["status"] == "signature_mismatch"
-        assert response.json()["events_queued"] == 0
-        assert WebhookEvent.objects.filter(event_type="conversation.newMessage").exists()
+        assert response.status_code == 401
+        assert not WebhookEvent.objects.filter(event_type="conversation.newMessage").exists()
         process_webhook_event.assert_not_called()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret, DEBUG=False)
@@ -169,8 +166,8 @@ class TestHubSpotWebhookAPI:
             },
         )
 
-        assert response.status_code == 202
-        assert response.json()["status"] == "signature_mismatch"
+        assert response.status_code == 401
+        assert not WebhookEvent.objects.filter(event_type="conversation.newMessage").exists()
         process_webhook_event.assert_not_called()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET="", DEBUG=False)

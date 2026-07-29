@@ -41,6 +41,8 @@ _STAGE_TRIGGER_KEY_PREFIX = "salomao:supervisor:stage-trigger"
 _MESSAGE_BATCH_TOKEN_KEY_PREFIX = "salomao:message-batch:token"
 _MESSAGE_BATCH_STARTED_KEY_PREFIX = "salomao:message-batch:started"
 _MESSAGE_BATCH_TTL_SECONDS = 300
+_WAITING_RECONCILIATION_LOCK_KEY = "salomao:waiting-message-reconciliation"
+_WAITING_RECONCILIATION_LOCK_TTL_SECONDS = 300
 _CLAIM_MESSAGE_BATCH_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     redis.call('del', KEYS[1], KEYS[2])
@@ -603,15 +605,100 @@ def publish_handoff_observation_task(self, instance_id: str) -> dict[str, Any]:
 
 
 @shared_task(name="ai_agents.run_lifecycle_watchdog_task")
-def run_lifecycle_watchdog_task() -> dict[str, int]:
+def run_lifecycle_watchdog_task() -> dict[str, int | bool]:
     """Detect stuck lifecycle instances on a periodic schedule."""
-    from apps.ai_agents.services.watchdog import run_lifecycle_watchdog
+    from apps.ai_agents.services.watchdog import (
+        WaitingMessageReconciliationResult,
+        reconcile_waiting_customer_messages,
+        run_lifecycle_watchdog,
+        waiting_customer_backlog_size,
+    )
 
     result = run_lifecycle_watchdog()
+    reconciliation_limit = max(
+        1,
+        min(
+            int(getattr(settings, "SALOMAO_WAITING_RECONCILIATION_LIMIT", 50)),
+            200,
+        ),
+    )
+    waiting_backlog = waiting_customer_backlog_size()
+    if waiting_backlog > reconciliation_limit:
+        logger.warning(
+            "waiting_customer_reconciliation_backlog",
+            waiting_backlog=waiting_backlog,
+            reconciliation_limit=reconciliation_limit,
+            estimated_rotation_cycles=(waiting_backlog + reconciliation_limit - 1) // reconciliation_limit,
+            action="process_bounded_batch_and_continue_next_cycle",
+        )
+    lock_client: redis.Redis | None = None
+    lock_token = uuid.uuid4().hex
+    reconciliation_skipped = False
+    try:
+        lock_client = _redis_client()
+        lock_acquired = bool(
+            lock_client.set(
+                _WAITING_RECONCILIATION_LOCK_KEY,
+                lock_token,
+                nx=True,
+                ex=_WAITING_RECONCILIATION_LOCK_TTL_SECONDS,
+            )
+        )
+    except redis.RedisError as exc:
+        # The provider remains authoritative. Running without the overlap lock
+        # is safer than disabling the only polling fallback during Redis
+        # degradation; message-ID idempotency still protects external effects.
+        lock_client = None
+        lock_acquired = True
+        logger.warning(
+            "waiting_customer_reconciliation_lock_degraded",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            action="run_with_durable_message_id_idempotency",
+        )
+
+    if lock_acquired:
+        try:
+            reconciliation = reconcile_waiting_customer_messages(limit=reconciliation_limit)
+        finally:
+            if lock_client is not None:
+                try:
+                    current_token = _decode_redis_value(lock_client.get(_WAITING_RECONCILIATION_LOCK_KEY))
+                    if current_token == lock_token:
+                        lock_client.delete(_WAITING_RECONCILIATION_LOCK_KEY)
+                except redis.RedisError as exc:
+                    logger.warning(
+                        "waiting_customer_reconciliation_lock_release_failed",
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        action="allow_lock_ttl_recovery",
+                    )
+    else:
+        reconciliation_skipped = True
+        reconciliation = WaitingMessageReconciliationResult(
+            scanned=0,
+            recovered=0,
+            unchanged=0,
+            ineligible=0,
+            failed=0,
+        )
+        logger.info(
+            "waiting_customer_reconciliation_overlap_skipped",
+            lock_ttl_seconds=_WAITING_RECONCILIATION_LOCK_TTL_SECONDS,
+            action="next_periodic_cycle_will_retry",
+        )
+
     return {
         "scanned": result.scanned,
         "marked_retryable": result.marked_retryable,
         "marked_terminal": result.marked_terminal,
+        "waiting_scanned": reconciliation.scanned,
+        "customer_turns_recovered": reconciliation.recovered,
+        "waiting_unchanged": reconciliation.unchanged,
+        "waiting_ineligible": reconciliation.ineligible,
+        "waiting_reconciliation_failed": reconciliation.failed,
+        "waiting_reconciliation_skipped": reconciliation_skipped,
+        "waiting_reconciliation_backlog": waiting_backlog,
     }
 
 

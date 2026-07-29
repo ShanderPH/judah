@@ -456,6 +456,32 @@ def _prepare_instance_for_supervisor(
                 "updated_at",
             ]
         )
+        return
+    if allow_verified_route_reopen and instance.state in {
+        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
+        ConversationInstance.State.QUEUE_PENDING,
+        ConversationInstance.State.HUMAN_ASSIGNED,
+        ConversationInstance.State.HUMAN_IN_PROGRESS,
+        ConversationInstance.State.RESOLVED_BY_HUMAN,
+    }:
+        LifecycleEngine().transition(
+            instance,
+            ConversationInstance.State.CONTEXT_HYDRATING,
+            reason="Current HubSpot AI route superseded stale human lifecycle state.",
+            actor_type="supervisor_worker",
+            allow_authoritative_ai_entry=True,
+        )
+        instance.failure_count = 0
+        instance.current_error = ""
+        instance.next_retry_at = None
+        instance.save(
+            update_fields=[
+                "failure_count",
+                "current_error",
+                "next_retry_at",
+                "updated_at",
+            ]
+        )
 
 
 @sync_to_async
@@ -541,16 +567,21 @@ def _suppress_stale_processing_instance(
     ticket_id: str | None = None,
     source_instance_id: str | None = None,
 ) -> None:
-    """Terminalize an active/retryable run that has no current customer turn."""
-    if source_instance_id:
-        instance = ConversationInstance.objects.filter(pk=source_instance_id).first()
-    else:
-        thread_ids = context.get("thread_ids") or []
-        thread_id = str(thread_ids[0]) if thread_ids else None
-        instance = find_conversation_instance(
-            thread_id=thread_id,
-            ticket_id=ticket_id or str(context.get("ticket_id") or "") or None,
+    """Terminalize one explicitly identified stale retry run."""
+    if not source_instance_id:
+        # A directionless ``conversation.newMessage`` notification can be the
+        # outgoing reply Judah has just sent. It is only a verification hint,
+        # never authority to terminalize whichever lifecycle run happens to be
+        # active for the thread (especially if Redis locking is degraded).
+        logger.info(
+            "stale_processing_suppression_skipped_without_exact_instance",
+            ticket_id=ticket_id,
+            thread_ids=context.get("thread_ids") or [],
+            reason="directionless_message_verification_is_state_neutral",
         )
+        return
+
+    instance = ConversationInstance.objects.filter(pk=source_instance_id).first()
     if instance is None:
         return
     suppressible_states = {

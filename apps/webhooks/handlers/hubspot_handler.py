@@ -290,6 +290,18 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
     if event_type != "conversation.newMessage" or not object_id:
         return
 
+    message_type = str(payload.get("messageType") or "").upper()
+    if message_type and message_type != "MESSAGE":
+        logger.info(
+            "hubspot_conversation_non_customer_message_skipped",
+            object_id=object_id,
+            message_id=payload.get("messageId"),
+            message_type=message_type,
+            reason="only_message_events_can_start_customer_turns",
+            action="safe_noop",
+        )
+        return
+
     direction = str(payload.get("direction") or payload.get("messageDirection") or "").upper()
     if direction and direction != "INCOMING":
         logger.debug("hubspot_conversation_outgoing_skipped", object_id=object_id, direction=direction)
@@ -298,11 +310,7 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
     from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
 
     channel = normalize_channel(
-        payload.get("channel")
-        or payload.get("channelType")
-        or payload.get("messageType")
-        or payload.get("source")
-        or payload.get("sourceType")
+        payload.get("channel") or payload.get("channelType") or payload.get("source") or payload.get("sourceType")
     )
     if not can_send_automated_reply(channel):
         logger.info("hubspot_conversation_auto_reply_unsupported", object_id=object_id, channel=channel)

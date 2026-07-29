@@ -626,8 +626,10 @@ def test_integrated_chain_uses_salomao_v1_for_low_confidence_triage() -> None:
     response = supervisor._run_integrated_chain("Não sei explicar o que aconteceu")
 
     assert response is not None
-    assert response.outcome == "candidate_resolved"
+    assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
+    assert response.decision is not None
+    assert "candidate_resolution_lacks_positive_evidence" in response.decision.risk_flags
     assert len(salomao.calls) == 1
     assert salomao.calls[0]["triage_decision"].confidence == 0.4
 
@@ -668,9 +670,10 @@ def test_salomao_v1_low_confidence_does_not_force_handoff_without_v1_request() -
     response = supervisor._response_from_salomao_draft(draft, ["salomao_chat: OK"])
 
     assert response.requires_human_handoff is False
-    assert response.outcome == "candidate_resolved"
+    assert response.outcome == "waiting_customer"
     assert response.decision is not None
-    assert response.decision.outcome == "candidate_resolved"
+    assert response.decision.outcome == "waiting_customer"
+    assert "candidate_resolution_lacks_positive_evidence" in response.decision.risk_flags
 
 
 def test_salomao_v1_cannot_resolve_while_asking_for_more_customer_data() -> None:

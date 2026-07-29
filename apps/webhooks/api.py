@@ -62,9 +62,8 @@ def _verify_jira_signature(request: HttpRequest, secret: str) -> bool:
 def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, dict]:
     """Receive and queue HubSpot CRM webhook events.
 
-    Events are always recorded to the database for auditing.
-    Processing is skipped (with a warning) only when a secret is configured
-    and neither the v1 nor v3 signature matches.
+    Only events authenticated with the Judah app secret are recorded. Invalid
+    signatures fail with a retryable provider status before persistence.
     """
     from django.conf import settings
 
@@ -117,7 +116,14 @@ def _receive_hubspot_webhook(
             environment=environment,
             has_v1_header=bool(request.headers.get("X-HubSpot-Signature")),
             has_v3_header=bool(request.headers.get("X-HubSpot-Signature-v3")),
+            events_received=len(payload),
+            action="reject_without_persistence_for_provider_retry",
         )
+        # HubSpot retries 4xx/5xx deliveries. Reject before any database write
+        # so an unauthenticated caller cannot fill the raw-event ledger and a
+        # legitimate app configured with the wrong secret is not acknowledged
+        # as successfully delivered.
+        raise HttpError(401, f"Invalid HubSpot {environment} webhook signature")
 
     events_queued = 0
     from apps.webhooks.tasks import process_webhook_event_task
@@ -125,23 +131,13 @@ def _receive_hubspot_webhook(
     for item in payload:
         event_type = item.get("subscriptionType", "unknown")
 
-        # Always persist the raw event for auditability
+        # Only authenticated provider events enter the durable audit ledger.
         event = record_webhook_event(source="hubspot", event_type=event_type, payload=item)
-
-        if not signature_ok:
-            logger.warning(
-                "hubspot_webhook_event_skipped_bad_signature",
-                event_type=event_type,
-                object_id=item.get("objectId"),
-                event_db_id=str(event.pk),
-            )
-            continue
 
         process_webhook_event_task.delay(str(event.pk))
         events_queued += 1
 
-    status = "accepted" if signature_ok else "signature_mismatch"
-    return 202, {"status": status, "events_queued": events_queued, "events_received": len(payload)}
+    return 202, {"status": "accepted", "events_queued": events_queued, "events_received": len(payload)}
 
 
 @router.post("/jira/", response={202: dict}, auth=None, summary="Jira webhook receiver")

@@ -121,6 +121,26 @@ async def test_prepare_retryable_instance_and_mark_pipeline_failure() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_verified_provider_route_reopens_stale_human_lifecycle() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:verified-human-reentry",
+        hubspot_thread_id="verified-human-reentry",
+        state=ConversationInstance.State.HUMAN_IN_PROGRESS,
+        assigned_agent_id="former-owner",
+    )
+
+    await webhooks._prepare_instance_for_supervisor(
+        instance,
+        allow_verified_route_reopen=True,
+    )
+
+    await instance.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert instance.assigned_agent_id is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_customer_message_resumes_waiting_instance() -> None:
     instance = await ConversationInstance.objects.acreate(
         idempotency_key="conversation:ticket:waiting",
@@ -631,6 +651,35 @@ async def test_thread_pipeline_skips_when_latest_message_is_outgoing() -> None:
         ticket_id="ticket-1",
         source_instance_id=None,
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_directionless_outgoing_verification_never_terminalizes_active_run() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:outgoing-neutral",
+        hubspot_thread_id="outgoing-neutral",
+        hubspot_ticket_id="ticket-outgoing-neutral",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+    )
+    context = {
+        "ticket_id": "ticket-outgoing-neutral",
+        "thread_ids": ["outgoing-neutral"],
+        "conversation_history": [
+            {"id": "incoming-1", "direction": "INCOMING", "text": "Preciso de ajuda"},
+            {"id": "outgoing-1", "direction": "OUTGOING", "text": "Resposta já entregue"},
+        ],
+    }
+
+    await webhooks._run_supervisor_for_hubspot_context(
+        context,
+        session_id="hubspot-thread-outgoing-neutral",
+        ticket_id="ticket-outgoing-neutral",
+    )
+
+    await instance.arefresh_from_db()
+    assert instance.state == ConversationInstance.State.AI_SERVICE_RUNNING
+    assert "ai_reply_suppressed" not in instance.metadata
 
 
 @pytest.mark.django_db(transaction=True)
