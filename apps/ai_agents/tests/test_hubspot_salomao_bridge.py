@@ -9,6 +9,7 @@ import httpx
 import pytest
 from django.test import override_settings
 
+from apps.ai_agents.models import ConversationInstance
 from apps.ai_agents.services import hubspot
 from apps.ai_agents.services.hubspot import (
     _auth_headers,
@@ -94,10 +95,41 @@ def _async_client_context(client: MagicMock) -> MagicMock:
                 "owner_id": "",
                 "conversation_history": [
                     {
+                        "id": "human-before-customer",
                         "direction": "OUTGOING",
+                        "created_at": "2026-07-28T23:55:41Z",
                         "senders": [{"actorId": "A-human", "actorType": "AGENT"}],
                     },
-                    {"direction": "INCOMING", "senders": [{"actorId": "visitor"}]},
+                    {
+                        "id": "customer-after-human",
+                        "direction": "INCOMING",
+                        "text": "Quero falar com um atendente",
+                        "created_at": "2026-07-28T23:56:25Z",
+                        "senders": [{"actorId": "visitor"}],
+                    },
+                ],
+            },
+            True,
+            "eligible",
+        ),
+        (
+            {
+                "pipeline": "ai-pipeline",
+                "pipeline_stage": "ai-active",
+                "owner_id": "",
+                "conversation_history": [
+                    {
+                        "id": "customer-before-human",
+                        "direction": "INCOMING",
+                        "created_at": "2026-07-28T23:55:25Z",
+                        "senders": [{"actorId": "visitor"}],
+                    },
+                    {
+                        "id": "human-after-customer",
+                        "direction": "OUTGOING",
+                        "created_at": "2026-07-28T23:55:41Z",
+                        "senders": [{"actorId": "A-human", "actorType": "AGENT"}],
+                    },
                 ],
             },
             False,
@@ -809,6 +841,24 @@ async def test_hydrate_thread_context_success_and_mock(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_thread_requests_ticket_association(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    response = MagicMock()
+    response.json.return_value = {"id": "thread-1"}
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+
+    result = await hubspot._fetch_thread(client, "thread-1")
+
+    assert result == {"id": "thread-1"}
+    client.get.assert_awaited_once_with(
+        "https://api.hubapi.com/conversations/v3/conversations/threads/thread-1",
+        params={"association": "TICKET"},
+    )
+    response.raise_for_status.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_hydrate_thread_context_uses_caller_ticket_when_thread_association_is_missing(
     monkeypatch,
 ) -> None:
@@ -846,6 +896,58 @@ async def test_hydrate_thread_context_uses_caller_ticket_when_thread_association
     fetch_ticket.assert_awaited_once_with(client, "ticket-from-worker")
     assert context["ticket_id"] == "ticket-from-worker"
     assert context["ticket_id_source"] == "caller"
+    assert context["pipeline"] == "ai-pipeline"
+    assert context["pipeline_stage"] == "ai-active"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_hydrate_thread_context_recovers_ticket_from_canonical_instance(monkeypatch) -> None:
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "test-token")
+    await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:thread-reentered",
+        hubspot_thread_id="thread-reentered",
+        hubspot_ticket_id="ticket-persisted",
+    )
+    thread = {
+        "threadAssociations": {},
+        "associatedContactId": "contact-1",
+        "originalChannelId": "WHATSAPP",
+    }
+    ticket = {
+        "properties": {
+            "subject": "Ticket reaberto",
+            "hs_pipeline": "ai-pipeline",
+            "hs_pipeline_stage": "ai-active",
+        },
+        "associations": {},
+    }
+    client = MagicMock()
+    with (
+        patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
+        patch.object(hubspot, "_fetch_thread", new=AsyncMock(return_value=thread)),
+        patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)) as fetch_ticket,
+        patch.object(
+            hubspot,
+            "_fetch_conversation_history",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "customer-after-reopen",
+                        "direction": "INCOMING",
+                        "text": "Quero falar com um atendente",
+                        "created_at": "2026-07-28T23:56:25Z",
+                    }
+                ]
+            ),
+        ),
+        patch.object(hubspot, "_hydrate_latest_incoming_image", new=AsyncMock()),
+    ):
+        context = await hydrate_thread_context("thread-reentered")
+
+    fetch_ticket.assert_awaited_once_with(client, "ticket-persisted")
+    assert context["ticket_id"] == "ticket-persisted"
+    assert context["ticket_id_source"] == "local_canonical_instance"
     assert context["pipeline"] == "ai-pipeline"
     assert context["pipeline_stage"] == "ai-active"
 

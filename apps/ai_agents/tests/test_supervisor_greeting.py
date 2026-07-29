@@ -480,9 +480,11 @@ def test_integrated_chain_passes_missing_data_to_salomao_v1() -> None:
     response = supervisor._run_integrated_chain("Não aparece o campo telefone")
 
     assert response is not None
-    assert response.outcome == "candidate_resolved"
+    assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
     assert response.message == "Informe o ID da igreja para eu continuar."
+    assert response.decision is not None
+    assert "candidate_resolution_requires_customer_input" in response.decision.risk_flags
     assert len(salomao.calls) == 1
     assert salomao.calls[0]["triage_decision"].dados_faltantes == ["id_da_igreja"]
 
@@ -669,6 +671,27 @@ def test_salomao_v1_low_confidence_does_not_force_handoff_without_v1_request() -
     assert response.outcome == "candidate_resolved"
     assert response.decision is not None
     assert response.decision.outcome == "candidate_resolved"
+
+
+def test_salomao_v1_cannot_resolve_while_asking_for_more_customer_data() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-open-question"
+    draft = SalomaoChatDraft(
+        response_text=(
+            "Revisei o cenário. Em qual etapa o erro acontece? Se puder, me envie um print da mensagem exibida."
+        ),
+        confidence=0.9,
+        resolved=True,
+        requires_human_handoff=False,
+        model_name="salomao_v1",
+    )
+
+    response = supervisor._response_from_salomao_draft(draft, ["salomao_chat: OK"])
+
+    assert response.outcome == "waiting_customer"
+    assert response.decision is not None
+    assert response.decision.outcome == "waiting_customer"
+    assert "candidate_resolution_requires_customer_input" in response.decision.risk_flags
 
 
 def test_complete_salomao_v1_markdown_is_preserved() -> None:

@@ -58,6 +58,22 @@ def test_processors_scrub_nested_pii_and_add_context(monkeypatch) -> None:
     assert scrubbed["nested"]["Authorization"] == "[REDACTED]"
     assert scrubbed["nested"]["items"][0]["cpf"] == "[REDACTED]"
 
+    embedded = scrub_pii(
+        None,
+        "error",
+        {
+            "error": (
+                "ConnectionError redis://default:redis-secret@redis.internal:6379/0 "
+                "password=another-secret "
+                "https://example.test/callback?access_token=token-secret"
+            )
+        },
+    )
+    assert "redis-secret" not in embedded["error"]
+    assert "another-secret" not in embedded["error"]
+    assert "token-secret" not in embedded["error"]
+    assert "redis://default:[REDACTED]@redis.internal:6379/0" in embedded["error"]
+
     monkeypatch.setenv("DJANGO_ENV", "test")
     assert add_service_context(None, "info", {}) == {"service": "judah", "env": "test"}
     custom = add_service_context(None, "info", {"service": "custom", "env": "prod"})

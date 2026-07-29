@@ -48,6 +48,7 @@ from apps.ai_agents.contracts import (
     TriageDecision,
 )
 from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
+from apps.ai_agents.services.decision_policy import enforce_resolution_semantics
 from apps.ai_agents.services.guardrails import apply_output_guardrails
 from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
@@ -956,6 +957,22 @@ class SalomaoSupervisorAgent:
             handoff_reason = None
             message = draft.response_text
 
+        decision = enforce_resolution_semantics(
+            SupervisorDecision(
+                outcome=outcome,
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type=("assign_ticket_to_human_queue" if requires_handoff else "send_thread_reply"),
+                    payload={
+                        "recommended_actions": [action.model_dump(mode="json") for action in draft.recommended_actions]
+                    },
+                    idempotency_key=f"{self.session_id}:supervisor:{outcome}",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=self._risk_flags(effective_triage),
+                confidence=draft.confidence,
+            )
+        )
         return SalomaoResponse(
             session_id=self.session_id,
             message=message,
@@ -969,20 +986,7 @@ class SalomaoSupervisorAgent:
             model_name=draft.model_name or "salomao_v1",
             latency_ms=0,
             triage_decision=effective_triage,
-            decision=SupervisorDecision(
-                outcome=outcome,
-                final_response=message,
-                hubspot_action=HubSpotAction(
-                    action_type=("assign_ticket_to_human_queue" if requires_handoff else "send_thread_reply"),
-                    payload={
-                        "recommended_actions": [action.model_dump(mode="json") for action in draft.recommended_actions]
-                    },
-                    idempotency_key=f"{self.session_id}:supervisor:{outcome}",
-                ),
-                trace_summary=agent_trace,
-                risk_flags=self._risk_flags(effective_triage),
-                confidence=draft.confidence,
-            ),
+            decision=decision,
         )
 
     def _response_from_specialized_service(

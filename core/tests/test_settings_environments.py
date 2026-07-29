@@ -30,6 +30,9 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.NOVO_STAGE_SYNC_ENABLED); "
         "print(settings.CELERY_RESULT_BACKEND); "
         "print(settings.CELERY_TASK_IGNORE_RESULT); "
+        "print(settings.CELERY_TASK_STORE_ERRORS_EVEN_IF_IGNORED); "
+        "print(settings.CELERY_TASK_REMOTE_TRACEBACKS); "
+        "print(settings.CELERY_RESULT_EXTENDED); "
         "print(settings.CELERY_WORKER_HIJACK_ROOT_LOGGER); "
         "print(settings.CELERY_WORKER_REDIRECT_STDOUTS); "
         "print(settings.CELERY_WORKER_REDIRECT_STDOUTS_LEVEL); "
@@ -60,6 +63,9 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
         "None",
         "True",
         "False",
+        "False",
+        "False",
+        "False",
         "True",
         "INFO",
         "False",
@@ -80,6 +86,9 @@ def test_production_keeps_stricter_root_logging() -> None:
         "True",
         "None",
         "True",
+        "False",
+        "False",
+        "False",
         "False",
         "True",
         "INFO",

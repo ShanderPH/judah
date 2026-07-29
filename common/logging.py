@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -212,6 +213,34 @@ _PII_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+_URI_CREDENTIALS = re.compile(
+    r"(?P<scheme>[a-z][a-z0-9+.-]*://)(?P<userinfo>[^/@\s]+)@",
+    flags=re.IGNORECASE,
+)
+_SENSITIVE_QUERY_VALUE = re.compile(
+    r"(?P<prefix>[?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+",
+    flags=re.IGNORECASE,
+)
+_SENSITIVE_REPR_VALUE = re.compile(
+    r"(?P<prefix>\b(?:access_token|api_?key|password|secret|token)\s*=\s*)[^,\s>]+",
+    flags=re.IGNORECASE,
+)
+
+
+def _scrub_sensitive_text(value: str) -> str:
+    """Redact credentials embedded inside URLs, tracebacks, and object reprs."""
+
+    def _redact_uri(match: re.Match[str]) -> str:
+        userinfo = match.group("userinfo")
+        if ":" not in userinfo:
+            return f"{match.group('scheme')}[REDACTED]@"
+        username, _password = userinfo.rsplit(":", maxsplit=1)
+        return f"{match.group('scheme')}{username}:[REDACTED]@"
+
+    value = _URI_CREDENTIALS.sub(_redact_uri, value)
+    value = _SENSITIVE_QUERY_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", value)
+    return _SENSITIVE_REPR_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", value)
+
 
 def scrub_pii(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """Structlog processor: redact known PII fields before emitting the log.
@@ -231,6 +260,8 @@ def scrub_pii(logger: WrappedLogger, method_name: str, event_dict: EventDict) ->
             return [_scrub(item) for item in value]
         if isinstance(value, tuple):
             return tuple(_scrub(item) for item in value)
+        if isinstance(value, str):
+            return _scrub_sensitive_text(value)
         return value
 
     for key in list(event_dict.keys()):

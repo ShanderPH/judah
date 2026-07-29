@@ -28,6 +28,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import structlog
+from asgiref.sync import sync_to_async
 from django.conf import settings
 
 from apps.ai_agents.contracts import ConversationContext, ConversationMessage
@@ -413,9 +414,30 @@ async def _hydrate_latest_incoming_image(client: httpx.AsyncClient, context: dic
 
 
 async def _fetch_thread(client: httpx.AsyncClient, thread_id: str) -> dict[str, Any]:
-    response = await client.get(f"{HUBSPOT_API_BASE}/conversations/v3/conversations/threads/{thread_id}")
+    # HubSpot only guarantees ``threadAssociations.associatedTicketId`` when
+    # association=TICKET is requested explicitly.
+    response = await client.get(
+        f"{HUBSPOT_API_BASE}/conversations/v3/conversations/threads/{thread_id}",
+        params={"association": "TICKET"},
+    )
     response.raise_for_status()
     return response.json()
+
+
+def _recover_ticket_id_from_local_instance(thread_id: str) -> str:
+    """Recover a previously verified thread-to-ticket identity from persistence."""
+    # Keep the ORM import lazy: this service is also imported by tooling before
+    # Django finishes app initialization.
+    from apps.ai_agents.models import ConversationInstance
+
+    return str(
+        ConversationInstance.objects.filter(hubspot_thread_id=str(thread_id))
+        .exclude(hubspot_ticket_id__isnull=True)
+        .exclude(hubspot_ticket_id="")
+        .values_list("hubspot_ticket_id", flat=True)
+        .first()
+        or ""
+    ).strip()
 
 
 def _parse_restored_thread_ids(value: Any) -> list[str]:
@@ -814,6 +836,18 @@ async def hydrate_thread_context(
                     reason="thread_association_missing",
                     action="fetch_ticket_using_caller_context",
                 )
+            else:
+                recovered_ticket_id = await sync_to_async(_recover_ticket_id_from_local_instance)(str(thread_id))
+                if recovered_ticket_id:
+                    context["ticket_id"] = recovered_ticket_id
+                    context["ticket_id_source"] = "local_canonical_instance"
+                    logger.info(
+                        "hubspot_thread_ticket_identity_recovered",
+                        thread_id=thread_id,
+                        ticket_id=recovered_ticket_id,
+                        reason="provider_thread_association_missing",
+                        action="fetch_ticket_using_persisted_canonical_identity",
+                    )
             contact_id = thread.get("associatedContactId")
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
@@ -927,16 +961,39 @@ def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, An
         }
 
     # An unassigned ticket can still be answered manually from the inbox.
-    # Any human participation takes precedence over an already-running AI task.
-    latest_outgoing = next(
+    # Human authority blocks the AI only while that human message is newer than
+    # the latest customer turn. A later visitor message re-enters the AI route
+    # once HubSpot has also removed the human owner.
+    history = normalize_conversation_history(list(context.get("conversation_history") or []))
+    latest_incoming = next(
         (
             message
-            for message in reversed(context.get("conversation_history") or [])
-            if str(message.get("direction") or "").upper() == "OUTGOING"
+            for message in reversed(history)
+            if str(message.get("direction") or "").upper() == "INCOMING"
+            and (str(message.get("text") or "").strip() or message.get("attachments"))
         ),
         None,
     )
-    if latest_outgoing is not None and _message_is_from_human_agent(latest_outgoing):
+    latest_human_outgoing = next(
+        (
+            message
+            for message in reversed(history)
+            if str(message.get("direction") or "").upper() == "OUTGOING" and _message_is_from_human_agent(message)
+        ),
+        None,
+    )
+    human_has_current_authority = False
+    if latest_human_outgoing is not None:
+        if latest_incoming is None:
+            human_has_current_authority = True
+        else:
+            human_key = conversation_message_sort_key(latest_human_outgoing)
+            incoming_key = conversation_message_sort_key(latest_incoming)
+            # Without timestamps the relative order cannot be trusted, so keep
+            # the existing fail-closed behavior.
+            human_has_current_authority = human_key[0] == 0 or incoming_key[0] == 0 or human_key >= incoming_key
+
+    if human_has_current_authority:
         return {
             "eligible": False,
             "reason": "human_agent_participating",
