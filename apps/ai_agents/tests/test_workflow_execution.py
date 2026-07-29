@@ -507,8 +507,8 @@ async def test_handoff_route_is_idempotent_per_customer_turn() -> None:
         .values_list("idempotency_key", flat=True)
     )
     assert keys == [
-        f"handoff:v3:{instance.pk}:ticket-1:message-1",
-        f"handoff:v3:{instance.pk}:ticket-1:message-2",
+        f"handoff:v4:{instance.pk}:ticket-1:message-1:636459134:939275049",
+        f"handoff:v4:{instance.pk}:ticket-1:message-2:636459134:939275049",
     ]
 
 
@@ -598,7 +598,11 @@ async def test_observation_failure_never_cancels_novo_handoff() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_off_hours_handoff_warns_customer_and_still_routes_to_novo() -> None:
+@override_settings(
+    HUBSPOT_OFF_HOURS_PIPELINE_ID="off-hours-pipeline",
+    HUBSPOT_OFF_HOURS_STAGE_ID="off-hours-stage",
+)
+async def test_off_hours_handoff_warns_customer_and_uses_configured_route() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -638,10 +642,18 @@ async def test_off_hours_handoff_warns_customer_and_still_routes_to_novo() -> No
         )
 
     assert send_reply.await_args.args[1] == HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
-    route_handoff.assert_awaited_once()
+    route_handoff.assert_awaited_once_with(
+        "ticket-1",
+        "off-hours-stage",
+        pipeline_id="off-hours-pipeline",
+        eligibility_thread_id="thread-1",
+        expected_customer_turn_id="message-1",
+    )
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.QUEUE_PENDING
     assert instance.metadata["human_handoff_dispatch"]["route_updated"] is True
+    assert instance.metadata["human_handoff_dispatch"]["queue_admission"] == "off_hours_stage_workflow"
+    assert instance.metadata["human_handoff_dispatch"]["is_off_hours"] is True
 
 
 @pytest.mark.django_db(transaction=True)
@@ -736,6 +748,105 @@ async def test_waiting_customer_reply_keeps_ticket_open() -> None:
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
     assert instance.metadata["waiting_for_fields"] == ["payment_type"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_candidate_resolution_with_open_question_is_kept_open() -> None:
+    instance = await sync_to_async(_instance)()
+    response = (
+        "Confira as configurações do evento. "
+        "Em qual etapa o erro acontece? Se puder, me envie um print da mensagem de erro."
+    )
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message=response,
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: OK"],
+        tokens_used=5,
+        model_name="test-model",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response=response,
+            confidence=0.9,
+        ),
+    )
+    close_route = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-question"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Meu evento não aparece",
+            result=result,
+        )
+
+    close_route.assert_not_awaited()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    decision = instance.metadata["last_supervisor_decision"]
+    assert decision["outcome"] == "waiting_customer"
+    assert "candidate_resolution_requires_customer_input" in decision["risk_flags"]
+    run = await AgentRun.objects.aget(instance=instance, agent_name="SalomaoSupervisor")
+    assert run.output_structured["outcome"] == "waiting_customer"
+
+
+@pytest.mark.django_db
+def test_legacy_close_replay_cannot_close_an_open_question() -> None:
+    instance = _instance()
+    instance.state = ConversationInstance.State.FAILED_RETRYABLE
+    instance.save(update_fields=["state", "updated_at"])
+    response = "Em qual etapa o erro acontece? Se puder, me envie um print da mensagem exibida."
+    decision = SupervisorDecision(
+        outcome="candidate_resolved",
+        final_response=response,
+        confidence=0.9,
+    )
+    agent_run = AgentRun.objects.create(
+        instance=instance,
+        agent_name="SalomaoSupervisor",
+        model_name="salomao_v1",
+        output_structured=decision.model_dump(mode="json"),
+        status=AgentRun.Status.SUCCEEDED,
+    )
+    audit = ToolCallAuditLog.objects.create(
+        instance=instance,
+        agent_run=agent_run,
+        tool_name="update_ticket_stage",
+        input={"ticket_id": "ticket-1"},
+        status=ToolCallAuditLog.Status.FAILED,
+        idempotency_key="legacy-close-open-question",
+        error_message="provider timeout",
+    )
+
+    with patch("apps.ai_agents.services.hubspot.update_hubspot_ticket_route") as close_route:
+        result = resume_pending_ticket_effect(instance)
+
+    close_route.assert_not_called()
+    instance.refresh_from_db()
+    audit.refresh_from_db()
+    assert result == {
+        "closed": False,
+        "suppressed": True,
+        "reason": "candidate_resolution_requires_customer_input",
+    }
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.metadata["last_supervisor_decision"]["outcome"] == "waiting_customer"
+    assert audit.status == ToolCallAuditLog.Status.SUCCEEDED
+    assert audit.output == result
 
 
 @pytest.mark.django_db(transaction=True)

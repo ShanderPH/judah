@@ -166,7 +166,9 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_IGNORE_RESULT = True
-CELERY_STORE_ERRORS_EVEN_IF_IGNORED = False
+CELERY_TASK_STORE_ERRORS_EVEN_IF_IGNORED = False
+CELERY_TASK_REMOTE_TRACEBACKS = False
+CELERY_RESULT_EXTENDED = False
 CELERY_BROKER_POOL_LIMIT = config("CELERY_BROKER_POOL_LIMIT", default=2, cast=int)
 CELERY_REDIS_MAX_CONNECTIONS = config("CELERY_REDIS_MAX_CONNECTIONS", default=4, cast=int)
 CELERY_TIMEZONE = "America/Sao_Paulo"
@@ -525,6 +527,10 @@ LOGGING: dict = {
             "processors": [
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
                 structlog.processors.dict_tracebacks,
+                # ``dict_tracebacks`` materializes exception text after the
+                # pre-chain. Scrub once more so generated traceback structures
+                # cannot expose credentials embedded in connection reprs.
+                scrub_pii,
                 structlog.processors.JSONRenderer(),
             ],
             "foreign_pre_chain": _STRUCTLOG_PRE_CHAIN,
@@ -658,6 +664,8 @@ structlog.configure(
         *_STRUCTLOG_PRE_CHAIN,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.ExceptionRenderer(),
+        # ExceptionRenderer also runs after the shared pre-chain.
+        scrub_pii,
         structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
     ],
     logger_factory=structlog.stdlib.LoggerFactory(),

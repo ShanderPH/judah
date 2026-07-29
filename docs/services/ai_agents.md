@@ -169,9 +169,12 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Agressividade severa, ameaça ou insultos claros também produzem handoff
   imediato; frustração comum continua sendo atendida pela IA.
 - No handoff, o cliente recebe primeiro uma mensagem curta informando o
-  encaminhamento. Em seguida, o ticket é movido para
-  `HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`) e persistido na fila do Matchmaker;
-  retries são idempotentes e não duplicam a confirmação.
+  encaminhamento. Durante o expediente, o ticket é movido para
+  `HUBSPOT_SUPPORT_PIPELINE_ID / HUBSPOT_SUPPORT_NEW_STAGE_ID` (`Novo`).
+  Fora do expediente, ele é movido para
+  `HUBSPOT_OFF_HOURS_PIPELINE_ID / HUBSPOT_OFF_HOURS_STAGE_ID`, onde aguarda
+  o fluxo operacional configurado no HubSpot. Retries são idempotentes e não
+  duplicam a confirmação.
 - Dados faltantes ou pergunta de esclarecimento → `WAITING_FOR_CUSTOMER`,
   sem fechar o ticket.
 - Resposta conclusiva (`candidate_resolved`) fecha o ticket somente depois

@@ -75,6 +75,8 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | `HUBSPOT_SUPPORT_PIPELINE_ID` | Autoatribuição e HubSpot client | Pipeline principal do suporte N1. |
 | `HUBSPOT_SUPPORT_NEW_STAGE_ID` | Autoatribuição e lifecycle | Estágio de entrada/NOVO do suporte N1. |
 | `HUBSPOT_SUPPORT_CLOSED_STAGE_ID` | Fechamento e lifecycle | Estágio FECHADO do suporte N1. |
+| `HUBSPOT_OFF_HOURS_PIPELINE_ID` | Action Agent | Pipeline de destino para pedidos de atendimento humano fora do expediente. O padrão é a pipeline da Triagem IA. |
+| `HUBSPOT_OFF_HOURS_STAGE_ID` | Action Agent | Estágio de espera fora do expediente. O padrão é `HUBSPOT_HUMAN_ESCALATION_STAGE_ID`. |
 | `HUBSPOT_DEFAULT_TICKET_*` | HubSpot client e MCP | Pipeline e estágios genéricos para criação/atualização de tickets. |
 | `HUBSPOT_N2_PIPELINE_ID` | Consulta de protocolos | Pipeline técnico N2 consultável pelo cliente. |
 | `HUBSPOT_N2_*_STAGE_ID` | Consulta de protocolos | Estágios de entrada, prioridade e resolução do N2. |
@@ -187,6 +189,8 @@ HUBSPOT_IMAGE_MAX_BYTES=8388608
 HUBSPOT_SUPPORT_PIPELINE_ID=636459134
 HUBSPOT_SUPPORT_NEW_STAGE_ID=939275049
 HUBSPOT_SUPPORT_CLOSED_STAGE_ID=939275052
+HUBSPOT_OFF_HOURS_PIPELINE_ID=636594474
+HUBSPOT_OFF_HOURS_STAGE_ID=1113543321
 HUBSPOT_DEFAULT_TICKET_PIPELINE_ID=0
 HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID=1
 HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID=2

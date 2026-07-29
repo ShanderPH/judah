@@ -23,6 +23,7 @@ from apps.ai_agents.services.conversation_turn import (
     current_incoming_turn_audit,
     latest_incoming_message_id,
 )
+from apps.ai_agents.services.decision_policy import enforce_resolution_semantics
 from apps.ai_agents.services.feature_subscriptions import fetch_active_feature_subscriptions, fetch_church_plan
 from apps.ai_agents.services.handoff import build_handoff_package, format_handoff_observation
 from apps.ai_agents.services.instance_identity import (
@@ -493,10 +494,11 @@ def request_human_handoff(
     ai_summary: str,
     agent_run: AgentRun | None = None,
 ) -> dict[str, Any]:
-    """Move the ticket to human support through HubSpot's canonical stage.
+    """Move the ticket to the configured human-support route.
 
-    The authoritative NOVO-stage webhook owns cycle creation and queue
-    admission. This path must not create a competing cycle-less projection.
+    During business hours, the authoritative NOVO-stage webhook owns cycle
+    creation and queue admission. Outside business hours, HubSpot's configured
+    off-hours stage workflow owns the later admission into NOVO.
     """
     engine = LifecycleEngine()
     if instance.state != ConversationInstance.State.HUMAN_HANDOFF_REQUESTED:
@@ -548,9 +550,15 @@ def request_human_handoff(
     if not turn_id:
         raise ValueError("Human handoff requires a customer turn identifier.")
 
-    idempotency_key = f"handoff:v3:{instance.pk}:{ticket_id}:{turn_id}"
-    support_pipeline_id = str(settings.HUBSPOT_SUPPORT_PIPELINE_ID)
-    support_stage_id = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
+    is_off_hours = bool(conversation_context and conversation_context.is_off_hours)
+    support_pipeline_id = str(
+        settings.HUBSPOT_OFF_HOURS_PIPELINE_ID if is_off_hours else settings.HUBSPOT_SUPPORT_PIPELINE_ID
+    )
+    support_stage_id = str(
+        settings.HUBSPOT_OFF_HOURS_STAGE_ID if is_off_hours else settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
+    )
+    queue_admission = "off_hours_stage_workflow" if is_off_hours else "hubspot_stage_webhook"
+    idempotency_key = f"handoff:v4:{instance.pk}:{ticket_id}:{turn_id}:{support_pipeline_id}:{support_stage_id}"
     prepared = _prepare_tool_call(
         instance=instance,
         tool_name="assign_ticket_to_human_queue",
@@ -562,6 +570,8 @@ def request_human_handoff(
             "priority": package.get("priority") or "",
             "reason": _text_fingerprint(reason),
             "summary": _text_fingerprint(ai_summary),
+            "is_off_hours": is_off_hours,
+            "queue_admission": queue_admission,
         },
         agent_run=agent_run,
     )
@@ -580,6 +590,7 @@ def request_human_handoff(
             if route_result.get("suppressed"):
                 output = {
                     "queued": False,
+                    "queue_admission": queue_admission,
                     "ticket_id": str(ticket_id),
                     "pipeline_id": support_pipeline_id,
                     "stage_id": support_stage_id,
@@ -587,6 +598,7 @@ def request_human_handoff(
                     "route_updated": False,
                     "suppressed": True,
                     "reason": str(route_result.get("reason") or "ticket_not_eligible_for_ai"),
+                    "is_off_hours": is_off_hours,
                 }
                 _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
                 engine.update_metadata(instance, human_handoff_dispatch=output)
@@ -599,12 +611,13 @@ def request_human_handoff(
 
             output = {
                 "queued": False,
-                "queue_admission": "hubspot_stage_webhook",
+                "queue_admission": queue_admission,
                 "ticket_id": str(ticket_id),
                 "pipeline_id": support_pipeline_id,
                 "stage_id": support_stage_id,
                 "owner_mutated": False,
                 "route_updated": True,
+                "is_off_hours": is_off_hours,
             }
             _finish_tool_call(prepared.audit_id, output=output, succeeded=True)
         except Exception as exc:
@@ -658,7 +671,11 @@ def request_human_handoff(
         engine.transition(
             instance,
             ConversationInstance.State.QUEUE_PENDING,
-            reason="HubSpot accepted the human route; awaiting canonical NOVO-stage queue admission.",
+            reason=(
+                "HubSpot accepted the off-hours route; awaiting the configured stage workflow."
+                if is_off_hours
+                else "HubSpot accepted the human route; awaiting canonical NOVO-stage queue admission."
+            ),
             actor_type="system",
         )
     return {**package, "dispatch": output}
@@ -672,6 +689,45 @@ def complete_ai_resolution(
     agent_run: AgentRun | None = None,
 ) -> dict[str, Any]:
     """Close a conclusively answered ticket in the AI triage pipeline."""
+    normalized_decision = enforce_resolution_semantics(decision)
+    if normalized_decision != decision:
+        engine = LifecycleEngine()
+        if instance.state == ConversationInstance.State.FAILED_RETRYABLE:
+            engine.transition(
+                instance,
+                ConversationInstance.State.AI_SERVICE_PENDING,
+                reason="A legacy close replay was rejected because the response still requires customer input.",
+                actor_type="resolution_policy",
+            )
+            engine.transition(
+                instance,
+                ConversationInstance.State.AI_SERVICE_RUNNING,
+                reason="Restoring the delivered response to its correct non-terminal state.",
+                actor_type="resolution_policy",
+            )
+        if instance.state == ConversationInstance.State.AI_SERVICE_RUNNING:
+            _set_waiting_state(instance, decision=normalized_decision)
+        else:
+            engine.update_metadata(
+                instance,
+                awaiting_resolution_confirmation=False,
+                waiting_for_fields=normalized_decision.missing_data,
+                last_supervisor_decision=normalized_decision.model_dump(mode="json"),
+            )
+        output = {
+            "closed": False,
+            "suppressed": True,
+            "reason": "candidate_resolution_requires_customer_input",
+        }
+        logger.warning(
+            "ai_resolution_close_rejected",
+            conversation_instance_id=str(instance.pk),
+            ticket_id=instance.hubspot_ticket_id or conversation_context.ticket_id,
+            action="preserve_waiting_customer_state",
+            risk_flags=normalized_decision.risk_flags,
+        )
+        return output
+
     ticket_id = instance.hubspot_ticket_id or conversation_context.ticket_id
     if not ticket_id:
         raise ValueError("AI resolution requires a HubSpot ticket ID.")
@@ -850,6 +906,8 @@ def resume_pending_ticket_effect(instance: ConversationInstance) -> dict[str, An
             decision=decision,
             agent_run=audit.agent_run,
         )
+        if result.get("suppressed") and result.get("reason") == "candidate_resolution_requires_customer_input":
+            _finish_tool_call(str(audit.pk), output=result, succeeded=True)
 
     logger.info(
         "pending_ticket_effect_resumed",
@@ -911,6 +969,24 @@ async def apply_supervisor_result(
         risk_flags=["legacy_supervisor_response"],
         confidence=0.5,
     )
+    normalized_decision = enforce_resolution_semantics(decision)
+    if normalized_decision != decision:
+        decision = normalized_decision
+        result = result.model_copy(
+            update={
+                "decision": decision,
+                "supervisor_decision": decision,
+                "outcome": decision.outcome,
+                "risk_flags": decision.risk_flags,
+            }
+        )
+        logger.warning(
+            "candidate_resolution_downgraded",
+            conversation_instance_id=str(instance.pk),
+            ticket_id=conversation_context.ticket_id,
+            risk_flags=decision.risk_flags,
+            action="keep_ticket_open_waiting_for_customer",
+        )
     agent_run = await sync_to_async(record_supervisor_runs)(
         instance=instance,
         message=message,
