@@ -11,8 +11,9 @@ sem direção são confirmadas pela thread, eventos fora de ordem não podem
 retroceder o lifecycle e efeitos no ticket exigem revalidação da thread e do
 turno do cliente.
 
-As correções desta etapa estão somente no working tree local. O PR histórico
-`#96` não foi atualizado, conforme a instrução de não subir nada ainda.
+PR: `https://github.com/ShanderPH/judah/pull/97` (base `main`).
+O commit de código `2597bf454d4f4e143294f942a91dfc256cab45ed`
+passou em todos os checks locais e remotos.
 
 ## Arquivos principais
 

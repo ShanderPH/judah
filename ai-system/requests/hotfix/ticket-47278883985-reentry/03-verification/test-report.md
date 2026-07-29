@@ -62,13 +62,17 @@ Nenhuma credencial ou banco de staging/produção foi carregado.
 
 ## Gate remoto
 
-Um smoke real deve ser executado somente após publicar o diff por PR, fazer
-deploy do SHA exato e realizar upload autorizado do projeto Judah HubSpot
-Integration. Esse gate não foi executado porque não houve autorização de PR,
-deploy ou upload nesta etapa.
+Um smoke real deve ser executado somente após merge da PR, deploy do SHA exato
+e upload autorizado do projeto Judah HubSpot Integration. Esse gate não foi
+executado porque deploy e upload não fazem parte desta etapa.
 
 ## GitHub
 
-- As correções desta etapa permanecem apenas no working tree local, conforme
-  solicitado. Nenhum PR foi criado ou atualizado e, portanto, ainda não há CI
-  remoto correspondente a este diff.
+- PR: `#97`, base `main`, branch `agent/fix-ticket-reentry-offhours`.
+- Commit de código validado: `2597bf454d4f4e143294f942a91dfc256cab45ed`.
+- CI run: `30464399975`.
+- `Lint & Type Check`: aprovado.
+- `Tests (Python 3.14)`: aprovado.
+- `Security Scan`: aprovado.
+- `Django System Checks`: aprovado.
+- Vercel e preview comments: aprovados.
