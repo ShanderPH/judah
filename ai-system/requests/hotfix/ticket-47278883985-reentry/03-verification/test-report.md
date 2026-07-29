@@ -40,3 +40,14 @@ Um smoke real de reentrada e handoff fora do expediente deve ser executado
 apenas após deploy do SHA exato, com observação do ticket no HubSpot. Esse gate
 não foi executado porque esta solicitação não autorizou deploy ou mutação
 remota.
+
+## GitHub
+
+- PR: `#96`, base `main`.
+- Commit de código verificado: `5e51fdf7c16e62c35d8efd0f705c1779517be983`.
+- CI run: `30422369383`.
+- `Lint & Type Check`: aprovado.
+- `Tests (Python 3.14)`: aprovado.
+- `Security Scan`: aprovado.
+- `Django System Checks`: aprovado.
+- Vercel preview e comentários: aprovados.

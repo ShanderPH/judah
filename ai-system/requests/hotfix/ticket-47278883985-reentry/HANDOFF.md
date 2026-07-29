@@ -7,6 +7,8 @@ de uma associação ausente, participação humana histórica não bloqueia um t
 posterior do visitante, fechamento exige resposta realmente conclusiva e o
 handoff fora do expediente usa sua rota própria.
 
+PR: `https://github.com/ShanderPH/judah/pull/96` (base `main`).
+
 ## Arquivos principais
 
 - `apps/ai_agents/services/hubspot.py`
