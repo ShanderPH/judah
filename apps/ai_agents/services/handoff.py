@@ -388,6 +388,60 @@ def format_handoff_observation(package: dict[str, Any]) -> str:
         [
             "",
             f"**Resumo da conversa:** {package.get('conversation_summary') or 'Sem histórico textual suficiente.'}",
+        ]
+    )
+    church_plan = package.get("church_plan")
+    if isinstance(church_plan, dict):
+        plan = _plain_text(str(church_plan.get("plan") or "")).strip() or "Não informado"
+        is_active = church_plan.get("is_active")
+        is_blocked = church_plan.get("is_blocked")
+        active_label = "Sim" if is_active is True else "Não" if is_active is False else "Não informado"
+        blocked_label = "Sim" if is_blocked is True else "Não" if is_blocked is False else "Não informado"
+        lines.extend(
+            [
+                "",
+                f"**Plano da igreja:** `{plan}` — **is_active:** {active_label}; **is_blocked:** {blocked_label}",
+            ]
+        )
+    else:
+        church_plan_message = _plain_text(str(package.get("church_plan_lookup_message") or "")).strip()
+        lines.extend(
+            [
+                "",
+                f"**Plano da igreja:** {church_plan_message or 'Não foi possível consultar.'}",
+            ]
+        )
+    obtained_modules = package.get("obtained_modules") or []
+    if obtained_modules:
+        lines.extend(["", "**Módulos obtidos:**"])
+        for module in obtained_modules:
+            if not isinstance(module, dict):
+                continue
+            alias = re.sub(r"\s+", " ", str(module.get("alias") or "").replace("`", "")).strip()
+            if not alias:
+                continue
+            details = []
+            name = _plain_text(str(module.get("name") or "")).strip()
+            price = _plain_text(str(module.get("price") or "")).strip()
+            plan_limit = _plain_text(str(module.get("plan_limit") or "")).strip()
+            if name:
+                details.append(f"name: {name}")
+            if price:
+                details.append(f"price: {price}")
+            if plan_limit:
+                details.append(f"limite {plan_limit}")
+            suffix = f" — {', '.join(details)}" if details else ""
+            lines.append(f"- `{alias}`{suffix}")
+    else:
+        module_lookup_message = _plain_text(str(package.get("module_lookup_message") or "")).strip()
+        lines.extend(
+            [
+                "",
+                f"**Módulos obtidos:** {module_lookup_message or 'Nenhum módulo ativo foi retornado.'}",
+            ]
+        )
+    lines.extend(
+        [
             "",
             f"**Próximo passo recomendado:** {package.get('recommended_next_step') or 'Revisar o histórico e assumir o atendimento.'}",
         ]
@@ -415,6 +469,8 @@ def build_handoff_package(
     triage_decision: TriageDecision | None = None,
     ai_summary: str = "",
     missing_data: list[str] | None = None,
+    feature_subscription_lookup: dict[str, Any] | None = None,
+    church_plan_lookup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the minimum context a human agent needs after AI escalation."""
     recent_messages = []
@@ -445,12 +501,24 @@ def build_handoff_package(
         customer_tone=customer_tone,
         missing_data=effective_missing_data,
     )
+    module_lookup = feature_subscription_lookup or {
+        "church_id": conversation_context.church_id if conversation_context is not None else None,
+        "module_lookup_status": "not_requested",
+        "module_lookup_message": "Consulta de módulos não executada.",
+        "obtained_modules": [],
+    }
+    plan_lookup = church_plan_lookup or {
+        "church_plan_lookup_status": "not_requested",
+        "church_plan_lookup_message": "Consulta do plano da igreja não executada.",
+        "church_plan": None,
+    }
     package = HandoffPackage(
         conversation_instance_id=str(instance.pk),
         state=instance.state,
         hubspot_thread_id=instance.hubspot_thread_id,
         hubspot_ticket_id=instance.hubspot_ticket_id,
         hubspot_contact_id=instance.hubspot_contact_id,
+        church_id=module_lookup.get("church_id"),
         source_message_id=instance.last_message_id or instance.last_event_id,
         channel=instance.channel,
         assigned_agent_id=instance.assigned_agent_id,
@@ -464,6 +532,12 @@ def build_handoff_package(
         customer_tone_context=customer_tone_context,
         conversation_summary=conversation_summary,
         recommended_next_step=recommended_next_step,
+        module_lookup_status=str(module_lookup.get("module_lookup_status") or "not_requested"),
+        module_lookup_message=str(module_lookup.get("module_lookup_message") or ""),
+        obtained_modules=list(module_lookup.get("obtained_modules") or []),
+        church_plan_lookup_status=str(plan_lookup.get("church_plan_lookup_status") or "not_requested"),
+        church_plan_lookup_message=str(plan_lookup.get("church_plan_lookup_message") or ""),
+        church_plan=plan_lookup.get("church_plan"),
         recent_messages=recent_messages,
         recommended_queue="support_n1",
     )

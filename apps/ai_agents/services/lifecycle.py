@@ -20,7 +20,10 @@ from apps.ai_agents.models import (
     ToolCallAuditLog,
 )
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
-from apps.ai_agents.services.instance_identity import find_conversation_instance, ticket_scope_instances
+from apps.ai_agents.services.instance_identity import (
+    find_conversation_instance,
+    promote_or_get_thread_instance,
+)
 from common.idempotency import canonical_event_key
 
 logger = structlog.get_logger(__name__)
@@ -706,10 +709,19 @@ class LifecycleEngine:
         lookup: dict[str, str] | None = None
         idempotency_key = self._instance_idempotency_key(event)
         if event.hubspot_thread_id:
+            promoted = promote_or_get_thread_instance(
+                ticket_id=event.hubspot_ticket_id,
+                thread_id=event.hubspot_thread_id,
+            )
+            if promoted is not None:
+                return promoted, False
             lookup = {"hubspot_thread_id": event.hubspot_thread_id}
         elif event.hubspot_ticket_id:
-            instance = ticket_scope_instances(event.hubspot_ticket_id).select_for_update().first()
+            instance = find_conversation_instance(ticket_id=event.hubspot_ticket_id)
             if instance is not None:
+                # Lock the resolved placeholder/canonical row inside the outer
+                # lifecycle transaction before appending the ticket event.
+                instance = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
                 return instance, False
 
         if lookup:

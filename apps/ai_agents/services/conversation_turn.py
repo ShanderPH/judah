@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 IMAGE_PLACEHOLDER = "[Imagem enviada pelo cliente]"
@@ -15,13 +16,57 @@ def _has_content(message: dict[str, Any]) -> bool:
     return bool(str(message.get("text") or "").strip() or message.get("attachments"))
 
 
+def _message_timestamp(value: Any) -> float | None:
+    """Normalize HubSpot ISO/epoch timestamps without guessing missing values."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, int | float) or str(value).strip().lstrip("-").isdigit():
+        numeric = float(value)
+        # HubSpot emits epoch milliseconds; accepting seconds keeps fixtures and
+        # imported historical rows deterministic as well.
+        return numeric / 1000 if abs(numeric) >= 10_000_000_000 else numeric
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def conversation_message_sort_key(message: dict[str, Any]) -> tuple[int, float, str]:
+    """Return an oldest-first key with a deterministic message-ID tie-break.
+
+    Missing or malformed timestamps are deliberately older than dated
+    messages, so an incomplete provider row can never become the latest turn.
+    """
+    timestamp = _message_timestamp(message.get("created_at"))
+    return (
+        0 if timestamp is None else 1,
+        timestamp or 0.0,
+        incoming_message_id(message),
+    )
+
+
+def normalize_conversation_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a canonical chronological copy independent of provider ordering."""
+    return sorted(messages, key=conversation_message_sort_key)
+
+
 def current_incoming_turn(context: dict[str, Any]) -> list[dict[str, Any]]:
     """Return consecutive incoming messages since the latest outgoing reply.
 
     HubSpot history is the durable source of truth. System/unknown events are
     ignored, while an outgoing message closes the previous customer turn.
     """
-    history = [message for message in context.get("conversation_history") or [] if _has_content(message)]
+    history = [
+        message
+        for message in normalize_conversation_history(list(context.get("conversation_history") or []))
+        if _has_content(message)
+    ]
     if not history or str(history[-1].get("direction") or "").upper() != "INCOMING":
         return []
 
@@ -52,7 +97,8 @@ def incoming_message_id(message: dict[str, Any]) -> str:
 
 def latest_incoming_message_id(context: dict[str, Any]) -> str:
     """Return the identity of the most recent incoming message, if present."""
-    for message in reversed(context.get("conversation_history") or []):
+    history = normalize_conversation_history(list(context.get("conversation_history") or []))
+    for message in reversed(history):
         if str(message.get("direction") or "").upper() == "INCOMING":
             return incoming_message_id(message)
     return ""
@@ -96,10 +142,12 @@ def extract_current_customer_turn(message: str) -> str:
 __all__ = [
     "CURRENT_CUSTOMER_TURN_MARKER",
     "IMAGE_PLACEHOLDER",
+    "conversation_message_sort_key",
     "current_incoming_turn",
     "current_incoming_turn_audit",
     "current_incoming_turn_text",
     "extract_current_customer_turn",
     "incoming_message_id",
     "latest_incoming_message_id",
+    "normalize_conversation_history",
 ]

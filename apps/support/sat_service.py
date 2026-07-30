@@ -127,6 +127,144 @@ def _legacy_sat_heartbeat() -> dict:
     return sat_heartbeat()
 
 
+def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
+    """Persist the local schedule veto instead of leaving stale agents online."""
+    from apps.support.availability_runtime import availability_writer_id, runtime_environment
+    from apps.support.eligibility_service import EligibilityReason
+    from apps.support.models import Agent, AgentAvailabilityDecision, AgentStatusHistory
+
+    lease = _acquire_reconciliation_lease()
+    if lease is None:
+        return {
+            "agents_checked": 0,
+            "status_changes": 0,
+            "agents_came_online": 0,
+            "skipped_off_hours": True,
+            "skipped_locked": True,
+        }
+    lease_token, fencing_token = lease
+    now = timezone.now()
+    writer_id = availability_writer_id()
+    environment = runtime_environment()
+    status_changes = 0
+    agents_checked = 0
+
+    try:
+        with transaction.atomic():
+            agents = list(
+                Agent.objects.select_for_update()
+                .filter(Q(is_active=True) | Q(is_active__isnull=True))
+                .exclude(hubspot_owner_id__isnull=True)
+                .order_by("id")
+            )
+            for agent in agents:
+                if agent.availability_fencing_token > fencing_token:
+                    logger.warning(
+                        "availability_writer_conflict",
+                        agent_id=str(agent.id),
+                        stale_fencing_token=fencing_token,
+                        current_fencing_token=agent.availability_fencing_token,
+                        source="local_business_hours_veto",
+                    )
+                    continue
+
+                agents_checked += 1
+                old_status = agent.status_enum
+                old_material_state = (
+                    agent.status_enum,
+                    agent.eligibility_state,
+                    agent.eligibility_reason,
+                    agent.remote_availability_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
+                new_status = Agent.StatusEnum.AWAY
+                reason = EligibilityReason.OUTSIDE_WORKING_HOURS.value
+                new_material_state = (
+                    new_status,
+                    "ineligible",
+                    reason,
+                    agent.remote_availability_status,
+                    agent.auto_assign_enabled,
+                    agent.is_active,
+                )
+                material_state_changed = new_material_state != old_material_state
+                if material_state_changed:
+                    agent.availability_revision += 1
+                agent.availability_fencing_token = fencing_token
+                agent.availability_writer_id = writer_id
+                agent.availability_online_since = None
+                agent.availability_sample_count = 0
+                agent.eligibility_state = "ineligible"
+                agent.eligibility_reason = reason
+                agent.eligibility_evaluated_at = now
+                agent.sat_last_heartbeat_at = now
+                agent.updated_at = now
+
+                if old_status != new_status:
+                    sat_accumulate_time(agent, old_status, new_status, now)
+                    agent.status_enum = new_status
+                    agent.last_status_change_at = now
+                    status_changes += 1
+                    AgentStatusHistory.objects.create(
+                        agent=agent,
+                        old_status=old_status,
+                        new_status=new_status,
+                        sync_source="local_business_hours_veto",
+                        metadata={
+                            "task_id": task_id,
+                            "writer_id": writer_id,
+                            "runtime_environment": environment,
+                            "eligibility_reason": reason,
+                            "fencing_token": fencing_token,
+                        },
+                    )
+
+                agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
+                if material_state_changed:
+                    AgentAvailabilityDecision.objects.create(
+                        agent=agent,
+                        revision=agent.availability_revision,
+                        old_status=old_status,
+                        new_status=new_status,
+                        remote_status=agent.remote_availability_status,
+                        raw_state_hash=hashlib.sha256(
+                            f"local_schedule_veto:{environment}:{now.date().isoformat()}".encode()
+                        ).hexdigest(),
+                        observed_at=now,
+                        eligibility_state="ineligible",
+                        eligibility_reason=reason,
+                        task_id=task_id,
+                        writer_id=writer_id,
+                        runtime_environment=environment,
+                        fencing_token=fencing_token,
+                    )
+    finally:
+        if not _release_reconciliation_lease(lease_token):
+            logger.warning(
+                "sat_lease_release_rejected",
+                writer_id=writer_id,
+                fencing_token=fencing_token,
+            )
+
+    logger.info(
+        "sat_off_hours_availability_materialized",
+        agents_checked=agents_checked,
+        status_changes=status_changes,
+        eligibility_reason=EligibilityReason.OUTSIDE_WORKING_HOURS.value,
+        writer_id=writer_id,
+        fencing_token=fencing_token,
+    )
+    return {
+        "agents_checked": agents_checked,
+        "status_changes": status_changes,
+        "agents_came_online": 0,
+        "skipped_off_hours": True,
+        "off_hours_materialized": True,
+        "fencing_token": fencing_token,
+    }
+
+
 def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     """Reconcile authoritative HubSpot availability into fail-closed state.
 
@@ -176,12 +314,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
             "skipped_non_authoritative_runtime": True,
         }
     if not is_business_hours():
-        return {
-            "agents_checked": 0,
-            "status_changes": 0,
-            "agents_came_online": 0,
-            "skipped_off_hours": True,
-        }
+        return _materialize_off_hours_availability(task_id=task_id)
 
     lease = _acquire_reconciliation_lease()
     if lease is None:

@@ -138,6 +138,7 @@ class HandoffPackage(BaseModel):
     hubspot_thread_id: str | None = None
     hubspot_ticket_id: str | None = None
     hubspot_contact_id: str | None = None
+    church_id: str | None = None
     source_message_id: str = ""
     channel: str = ""
     assigned_agent_id: str | None = None
@@ -151,6 +152,12 @@ class HandoffPackage(BaseModel):
     customer_tone_context: str = ""
     conversation_summary: str = ""
     recommended_next_step: str = ""
+    module_lookup_status: str = "not_requested"
+    module_lookup_message: str = ""
+    obtained_modules: list[dict[str, Any]] = Field(default_factory=list)
+    church_plan_lookup_status: str = "not_requested"
+    church_plan_lookup_message: str = ""
+    church_plan: dict[str, Any] | None = None
     recent_messages: list[dict[str, Any]] = Field(default_factory=list)
     recommended_queue: str = "support_n1"
 

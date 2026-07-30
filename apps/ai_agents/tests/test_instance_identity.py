@@ -40,32 +40,26 @@ def test_thread_lookup_never_falls_back_to_another_thread_on_same_ticket() -> No
 
     assert find_conversation_instance(thread_id="thread-missing", ticket_id="ticket-shared") is None
     assert find_conversation_instance(thread_id="thread-existing", ticket_id="ticket-shared") == existing
-    assert find_conversation_instance(ticket_id="ticket-shared") is None
+    assert find_conversation_instance(ticket_id="ticket-shared") == existing
 
 
 @pytest.mark.django_db
-def test_ticket_placeholder_is_separate_from_conversation_threads() -> None:
-    thread_instance = ensure_conversation_instance(
-        context={"ticket_id": "ticket-2", "thread_ids": ["thread-2"]},
-        ticket_id="ticket-2",
-        session_id="hubspot-thread-thread-2",
-    )
+def test_ticket_placeholder_is_promoted_when_thread_identity_becomes_known() -> None:
     ticket_instance = ensure_conversation_instance(
         context={"ticket_id": "ticket-2", "thread_ids": []},
         ticket_id="ticket-2",
         session_id="hubspot-ticket-ticket-2",
     )
-
-    assert ticket_instance.pk != thread_instance.pk
-    assert ticket_instance.hubspot_thread_id is None
-    assert (
-        ensure_conversation_instance(
-            context={"ticket_id": "ticket-2", "thread_ids": []},
-            ticket_id="ticket-2",
-            session_id="hubspot-ticket-ticket-2",
-        ).pk
-        == ticket_instance.pk
+    thread_instance = ensure_conversation_instance(
+        context={"ticket_id": "ticket-2", "thread_ids": ["thread-2"]},
+        ticket_id="ticket-2",
+        session_id="hubspot-thread-thread-2",
     )
+
+    assert ticket_instance.pk == thread_instance.pk
+    assert thread_instance.hubspot_thread_id == "thread-2"
+    assert thread_instance.idempotency_key == "conversation:thread:thread-2"
+    assert thread_instance.metadata["identity_promotions"][-1]["from"] == "ticket:ticket-2"
 
 
 @pytest.mark.django_db
@@ -82,6 +76,34 @@ def test_thread_identifier_remains_unique() -> None:
             hubspot_thread_id="unique-thread",
             hubspot_ticket_id="ticket-b",
         )
+
+
+@pytest.mark.django_db
+def test_duplicate_placeholder_is_superseded_when_canonical_exists() -> None:
+    canonical = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:canonical-thread",
+        hubspot_thread_id="canonical-thread",
+        hubspot_ticket_id="canonical-ticket",
+    )
+    placeholder = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:canonical-ticket",
+        hubspot_ticket_id="canonical-ticket",
+        state=ConversationInstance.State.FAILED_RETRYABLE,
+        failure_count=261,
+    )
+
+    resolved = ensure_conversation_instance(
+        context={"ticket_id": "canonical-ticket", "thread_ids": ["canonical-thread"]},
+        ticket_id="canonical-ticket",
+        session_id="hubspot-thread-canonical-thread",
+    )
+
+    placeholder.refresh_from_db()
+    assert resolved.pk == canonical.pk
+    assert placeholder.state == ConversationInstance.State.IGNORED
+    assert placeholder.failure_count == 0
+    assert placeholder.idempotency_key.startswith("conversation:superseded:")
+    assert placeholder.metadata["identity_supersession"]["canonical_instance_id"] == str(canonical.pk)
 
 
 @pytest.mark.django_db
@@ -118,9 +140,24 @@ def test_hydration_tracks_latest_incoming_message_as_turn_identity() -> None:
             "ticket_id": "ticket-turn",
             "thread_ids": ["thread-turn"],
             "conversation_history": [
-                {"id": "incoming-1", "direction": "INCOMING", "text": "Primeira"},
-                {"id": "outgoing-1", "direction": "OUTGOING", "text": "Resposta"},
-                {"id": "incoming-2", "direction": "INCOMING", "text": "Segunda"},
+                {
+                    "id": "incoming-1",
+                    "direction": "INCOMING",
+                    "text": "Primeira",
+                    "created_at": "2026-07-28T12:00:00Z",
+                },
+                {
+                    "id": "outgoing-1",
+                    "direction": "OUTGOING",
+                    "text": "Resposta",
+                    "created_at": "2026-07-28T12:01:00Z",
+                },
+                {
+                    "id": "incoming-2",
+                    "direction": "INCOMING",
+                    "text": "Segunda",
+                    "created_at": "2026-07-28T12:02:00Z",
+                },
             ],
         },
         ticket_id="ticket-turn",
@@ -139,9 +176,24 @@ def test_hydration_audits_consecutive_messages_as_one_customer_turn() -> None:
             "ticket_id": "ticket-batch",
             "thread_ids": ["thread-batch"],
             "conversation_history": [
-                {"id": "outgoing-1", "direction": "OUTGOING", "text": "Como posso ajudar?"},
-                {"id": "incoming-1", "direction": "INCOMING", "text": "Tenho interesse"},
-                {"id": "incoming-2", "direction": "INCOMING", "text": "nos planos e valores"},
+                {
+                    "id": "outgoing-1",
+                    "direction": "OUTGOING",
+                    "text": "Como posso ajudar?",
+                    "created_at": "2026-07-28T12:00:00Z",
+                },
+                {
+                    "id": "incoming-1",
+                    "direction": "INCOMING",
+                    "text": "Tenho interesse",
+                    "created_at": "2026-07-28T12:01:00Z",
+                },
+                {
+                    "id": "incoming-2",
+                    "direction": "INCOMING",
+                    "text": "nos planos e valores",
+                    "created_at": "2026-07-28T12:02:00Z",
+                },
             ],
         },
         ticket_id="ticket-batch",
@@ -154,8 +206,8 @@ def test_hydration_audits_consecutive_messages_as_one_customer_turn() -> None:
         "message_ids": ["incoming-1", "incoming-2"],
         "first_message_id": "incoming-1",
         "last_message_id": "incoming-2",
-        "first_created_at": None,
-        "last_created_at": None,
+        "first_created_at": "2026-07-28T12:01:00Z",
+        "last_created_at": "2026-07-28T12:02:00Z",
     }
 
 
