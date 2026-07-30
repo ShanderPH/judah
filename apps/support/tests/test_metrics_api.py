@@ -35,6 +35,7 @@ def auth_user() -> User:
         username="metricsuser",
         email="metrics@example.com",
         password="MetricsPass1",
+        role=User.Role.MANAGER,
     )
 
 

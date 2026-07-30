@@ -46,15 +46,14 @@ class TestRequireRole:
         user = SimpleNamespace(role="manager")
         assert endpoint(_make_request(user)) == "ok"
 
-    def test_allows_user_without_role_attribute(self) -> None:
-        # The decorator only checks ``role`` when present — a service-account
-        # user without that attribute passes through.
+    def test_rejects_user_without_role_attribute(self) -> None:
         @require_role("admin")
         def endpoint(request):
             return "ok"
 
         service = object()
-        assert endpoint(_make_request(service)) == "ok"
+        with pytest.raises(ForbiddenError):
+            endpoint(_make_request(service))
 
 
 class TestRoleShortcuts:

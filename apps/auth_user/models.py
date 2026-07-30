@@ -47,3 +47,10 @@ class User(AbstractUser):
     def is_agent(self) -> bool:
         """Check if the user has agent role."""
         return self.role == self.Role.AGENT
+
+    @property
+    def capabilities(self) -> list[str]:
+        """Return the frontend-facing capabilities derived from this role."""
+        from apps.auth_user.capabilities import capabilities_for_role
+
+        return capabilities_for_role(self.role)

@@ -10,6 +10,7 @@ from apps.auth_user.schemas import (
     ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
+    RefreshRequest,
     RegisterRequest,
     UpdateProfileRequest,
 )
@@ -17,7 +18,7 @@ from common.exceptions import CircuitOpenError, UnauthorizedError
 
 
 def test_register_and_profile_endpoint_delegation() -> None:
-    request = SimpleNamespace(auth=SimpleNamespace(pk=1))
+    request = SimpleNamespace(auth=SimpleNamespace(pk=1, role="admin"))
     user = SimpleNamespace(pk=2)
     register_payload = RegisterRequest(
         username="new",
@@ -69,18 +70,18 @@ def test_login_success_and_token_mint_failure() -> None:
 
 
 def test_refresh_success_and_invalid_token() -> None:
-    token = MagicMock()
-    token.__str__.return_value = "refresh-token"
-    token.access_token.__str__.return_value = "access-token"
-    with patch.object(api, "RefreshToken", return_value=token):
-        response = api.refresh_token(None, "refresh-token")
+    rotated = SimpleNamespace(refresh="rotated-refresh-token", access="access-token")
+    payload = RefreshRequest(refresh="refresh-token")
+    with patch.object(api.TokenRefreshOutputSchema, "model_validate", return_value=rotated):
+        response = api.refresh_token(None, payload)
     assert response.access == "access-token"
+    assert response.refresh == "rotated-refresh-token"
 
     with (
-        patch.object(api, "RefreshToken", side_effect=ValueError("invalid")),
+        patch.object(api.TokenRefreshOutputSchema, "model_validate", side_effect=ValueError("invalid")),
         pytest.raises(UnauthorizedError),
     ):
-        api.refresh_token(None, "bad")
+        api.refresh_token(None, RefreshRequest(refresh="bad"))
 
 
 def test_logout_is_idempotent_for_valid_and_invalid_tokens() -> None:
