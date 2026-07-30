@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from django.db import migrations
 
 PROTECTED_TABLES = (
@@ -40,17 +42,56 @@ def _existing_client_roles(schema_editor) -> set[str]:
         return {str(row[0]) for row in cursor.fetchall()}
 
 
+def _manageable_tables(schema_editor, tables: set[str]) -> set[str]:
+    """Return tables the current database role can alter as an owner."""
+    if not tables:
+        return set()
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_roles active_role ON active_role.rolname = current_user
+            WHERE n.nspname = 'public'
+              AND c.relname = ANY(%s)
+              AND (
+                  active_role.rolsuper
+                  OR c.relowner = active_role.oid
+                  OR pg_has_role(current_user, c.relowner, 'USAGE')
+              )
+            """,
+            [list(tables)],
+        )
+        return {str(row[0]) for row in cursor.fetchall()}
+
+
+def _warn_unmanageable_tables(tables: set[str], manageable: set[str]) -> None:
+    skipped = sorted(tables - manageable)
+    if skipped:
+        warnings.warn(
+            "Operational RLS requires a table-owner connection; skipped: "
+            + ", ".join(skipped)
+            + ". Apply the approved Supabase privileged migration separately.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 def protect_operational_tables(apps, schema_editor) -> None:
     """Revoke Data API roles and enable RLS as defense in depth."""
     del apps
     if schema_editor.connection.vendor != "postgresql":
         return
     existing = _existing_tables(schema_editor)
+    protected = existing.intersection(PROTECTED_TABLES)
+    manageable = _manageable_tables(schema_editor, protected)
+    _warn_unmanageable_tables(protected, manageable)
     roles = _existing_client_roles(schema_editor)
     quote = schema_editor.connection.ops.quote_name
     with schema_editor.connection.cursor() as cursor:
         for table in PROTECTED_TABLES:
-            if table not in existing:
+            if table not in manageable:
                 continue
             qualified_table = f"public.{quote(table)}"
             cursor.execute(
@@ -70,12 +111,15 @@ def restore_supabase_client_grants(apps, schema_editor) -> None:
     if schema_editor.connection.vendor != "postgresql":
         return
     existing = _existing_tables(schema_editor)
+    protected = existing.intersection(PROTECTED_TABLES)
+    manageable = _manageable_tables(schema_editor, protected)
+    _warn_unmanageable_tables(protected, manageable)
     roles = _existing_client_roles(schema_editor)
     quote = schema_editor.connection.ops.quote_name
     privileges = ", ".join(SUPABASE_DEFAULT_TABLE_PRIVILEGES)
     with schema_editor.connection.cursor() as cursor:
         for table in PROTECTED_TABLES:
-            if table not in existing:
+            if table not in manageable:
                 continue
             qualified_table = f"public.{quote(table)}"
             cursor.execute(f"ALTER TABLE {qualified_table} DISABLE ROW LEVEL SECURITY")

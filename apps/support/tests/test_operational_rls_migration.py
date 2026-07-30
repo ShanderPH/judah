@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from importlib import import_module
+from unittest.mock import MagicMock
 
 import pytest
 from django.db import connection
@@ -17,6 +19,7 @@ SAMPLE_TABLES = (
     "assignment_attempts",
     "token_blacklist_outstandingtoken",
 )
+rls_migration = import_module("apps.support.migrations.0026_protect_operational_tables_rls")
 
 
 @pytest.fixture
@@ -69,3 +72,32 @@ def test_operational_rls_forward_reverse_forward(restore_migrations: None) -> No
     _assert_protected(False)
     _migrate(MIGRATION_AFTER)
     _assert_protected(True)
+
+
+def test_operational_rls_skips_tables_not_owned_by_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_editor = MagicMock()
+    schema_editor.connection.vendor = "postgresql"
+    schema_editor.connection.ops.quote_name.side_effect = lambda value: f'"{value}"'
+    monkeypatch.setattr(
+        rls_migration,
+        "_existing_tables",
+        MagicMock(return_value={"conversation_instances"}),
+    )
+    monkeypatch.setattr(
+        rls_migration,
+        "_manageable_tables",
+        MagicMock(return_value=set()),
+    )
+    monkeypatch.setattr(
+        rls_migration,
+        "_existing_client_roles",
+        MagicMock(return_value={"anon", "authenticated"}),
+    )
+
+    with pytest.warns(RuntimeWarning, match="table-owner connection"):
+        rls_migration.protect_operational_tables(None, schema_editor)
+
+    cursor = schema_editor.connection.cursor.return_value.__enter__.return_value
+    cursor.execute.assert_not_called()
