@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { AUTH_COOKIE_NAMES } from "@/src/lib/auth/constants";
 import { fetchCurrentUser, refreshBackendTokens } from "@/src/lib/backend";
 import type { AuthTokens, User } from "@/src/types/api";
+import { TOKEN_FALLBACK_MAX_AGE, isExpiredToken, tokenMaxAge } from "@/src/lib/auth/token-policy";
 
 interface CookieEntry {
   value: string;
@@ -29,10 +30,9 @@ interface CookieMutator {
   delete(name: string): void;
 }
 
-interface SessionResult {
-  user: User | null;
-  tokens: AuthTokens | null;
-}
+export type SessionResult =
+  | { status: "authenticated"; user: User; tokens: AuthTokens | null }
+  | { status: "expired" | "invalid" | "missing"; user: null; tokens: null };
 
 const cookieOptions = {
   path: "/",
@@ -54,11 +54,11 @@ export function readAuthTokens(source: CookieReader): {
 export function writeAuthCookies(target: CookieMutator, tokens: AuthTokens): void {
   target.set(AUTH_COOKIE_NAMES.accessToken, tokens.access, {
     ...cookieOptions,
-    maxAge: 60 * 60,
+    maxAge: tokenMaxAge(tokens.access, TOKEN_FALLBACK_MAX_AGE.access),
   });
   target.set(AUTH_COOKIE_NAMES.refreshToken, tokens.refresh, {
     ...cookieOptions,
-    maxAge: 60 * 60 * 24 * 7,
+    maxAge: tokenMaxAge(tokens.refresh, TOKEN_FALLBACK_MAX_AGE.refresh),
   });
 }
 
@@ -70,12 +70,13 @@ export function clearAuthCookies(target: CookieMutator): void {
 export async function resolveSessionFromTokens(tokens: {
   accessToken: string | null;
   refreshToken: string | null;
-}): Promise<SessionResult> {
+}, requestId?: string): Promise<SessionResult> {
   if (tokens.accessToken) {
-    const user = await fetchCurrentUser(tokens.accessToken);
+    const user = await fetchCurrentUser(tokens.accessToken, requestId);
 
     if (user) {
       return {
+        status: "authenticated",
         user,
         tokens:
           tokens.refreshToken === null
@@ -89,22 +90,28 @@ export async function resolveSessionFromTokens(tokens: {
   }
 
   if (!tokens.refreshToken) {
-    return { user: null, tokens: null };
+    if (!tokens.accessToken) return { status: "missing", user: null, tokens: null };
+    return {
+      status: isExpiredToken(tokens.accessToken) ? "expired" : "invalid",
+      user: null,
+      tokens: null,
+    };
   }
 
-  const refreshedTokens = await refreshBackendTokens(tokens.refreshToken);
+  const refreshedTokens = await refreshBackendTokens(tokens.refreshToken, requestId);
 
   if (!refreshedTokens) {
-    return { user: null, tokens: null };
+    return { status: "invalid", user: null, tokens: null };
   }
 
-  const user = await fetchCurrentUser(refreshedTokens.access);
+  const user = await fetchCurrentUser(refreshedTokens.access, requestId);
 
   if (!user) {
-    return { user: null, tokens: null };
+    return { status: "invalid", user: null, tokens: null };
   }
 
   return {
+    status: "authenticated",
     user,
     tokens: refreshedTokens,
   };
@@ -119,6 +126,7 @@ export function jsonWithSession<T>(
   },
 ): NextResponse {
   const response = NextResponse.json(payload, { status: options?.status ?? 200 });
+  response.headers.set("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate");
 
   if (options?.tokens) {
     writeAuthCookies(response.cookies, options.tokens);

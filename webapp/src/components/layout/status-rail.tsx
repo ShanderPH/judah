@@ -37,14 +37,14 @@ export function StatusRail() {
   const overview = useApiQuery(fetchOverview);
 
   return (
-    <aside className="hidden flex-col gap-4 xl:sticky xl:top-3 xl:flex xl:max-h-[calc(100svh-1.5rem)] xl:overflow-y-auto judah-scroll">
+    <aside aria-label="Status dos servicos" className="hidden flex-col gap-4 xl:sticky xl:top-3 xl:flex xl:max-h-[calc(100svh-1.5rem)] xl:overflow-y-auto judah-scroll">
       <Card variant="default" className="judah-glass rounded-[var(--radius-lg)] p-5">
         <div className="flex items-center justify-between">
           <div>
             <p className="judah-mono text-[10px] uppercase tracking-[0.28em] text-[var(--muted)]">
               Status Rail
             </p>
-            <h3 className="mt-1.5 text-xl font-semibold leading-tight">Servicos Judah</h3>
+            <h2 className="mt-1.5 text-xl font-semibold leading-tight">Servicos Judah</h2>
           </div>
           {overview.isLoading || overview.isRefreshing ? <Spinner size="sm" color="accent" /> : null}
         </div>

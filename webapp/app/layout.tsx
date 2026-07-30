@@ -1,17 +1,14 @@
 import type { Metadata, Viewport } from "next";
-import "@fontsource/montserrat/300.css";
-import "@fontsource/montserrat/400.css";
 import "@fontsource/montserrat/500.css";
 import "@fontsource/montserrat/600.css";
 import "@fontsource/montserrat/700.css";
-import "@fontsource/inter/300.css";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
-import "@fontsource/inter/700.css";
 import "./globals.css";
 
-import { SmoothScrollProvider } from "@/src/lib/motion/smooth-scroll";
+import { MotionProvider } from "@/src/lib/motion/motion-provider";
+import { THEME_BOOTSTRAP } from "@/src/lib/security/policy";
 
 export const metadata: Metadata = {
   title: "Judah WebApp",
@@ -28,8 +25,6 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
-const themeBootstrap = `(()=>{try{const s=localStorage.getItem('judah-theme');const m=window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.theme=s||(m?'dark':'light');}catch(e){document.documentElement.dataset.theme='light';}})();`;
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -38,10 +33,14 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
+        <script
+          type={typeof window === "undefined" ? "text/javascript" : "text/plain"}
+          suppressHydrationWarning
+          dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }}
+        />
       </head>
-      <body className="judah-shell judah-grain">
-        <SmoothScrollProvider>{children}</SmoothScrollProvider>
+      <body className="judah-shell">
+        <MotionProvider>{children}</MotionProvider>
       </body>
     </html>
   );

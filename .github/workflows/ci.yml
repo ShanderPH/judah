@@ -34,6 +34,51 @@ env:
   AGNO_TELEMETRY: "false"
 
 jobs:
+  webapp:
+    name: WebApp quality and supply chain
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install deterministic dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: |
+          mkdir -p reports
+          npm test -- --reporter=default --reporter=junit --outputFile.junit=reports/vitest.xml
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Upload WebApp test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-vitest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: webapp/reports/vitest.xml
+          if-no-files-found: warn
+          retention-days: 14
+
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-latest

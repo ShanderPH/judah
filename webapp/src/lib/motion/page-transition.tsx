@@ -1,38 +1,40 @@
 "use client";
 
-import gsap from "gsap";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
 export function PageTransition({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const ref = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (!ref.current) return;
-    const node = ref.current;
-    const tween = gsap.fromTo(
-      node,
-      { autoAlpha: 0, y: 12 },
-      {
-        autoAlpha: 1,
-        y: 0,
-        duration: 0.5,
-        ease: "power3.out",
-        clearProps: "all",
-      },
-    );
-    const safety = window.setTimeout(() => {
-      gsap.set(node, { autoAlpha: 1, y: 0, clearProps: "all" });
-    }, 900);
-    return () => {
-      window.clearTimeout(safety);
-      tween.kill();
-    };
-  }, [pathname]);
+  useGSAP(
+    () => {
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        if (!rootRef.current) return;
+        gsap.fromTo(
+          rootRef.current,
+          { autoAlpha: 0, y: 16, scale: 0.995 },
+          {
+            autoAlpha: 1,
+            y: 0,
+            scale: 1,
+            duration: MOTION.duration.base,
+            ease: MOTION.ease.enter,
+            clearProps: "transform,opacity,visibility,willChange",
+            willChange: "transform,opacity",
+          },
+        );
+      });
+      return () => media.revert();
+    },
+    { dependencies: [pathname], revertOnUpdate: true, scope: rootRef },
+  );
 
   return (
-    <div ref={ref} className="contents">
+    <div ref={rootRef} className="min-w-0" data-route-transition={pathname}>
       {children}
     </div>
   );

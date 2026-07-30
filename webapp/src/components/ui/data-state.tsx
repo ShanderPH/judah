@@ -64,3 +64,18 @@ export function DataState({
 
   return null;
 }
+
+export function DegradedNotice({ services }: { services: string[] }) {
+  if (services.length === 0) return null;
+  return (
+    <Alert status="warning" className="rounded-[var(--radius-md)]" role="status">
+      <Alert.Indicator />
+      <Alert.Content>
+        <Alert.Title>Visao parcialmente indisponivel</Alert.Title>
+        <Alert.Description>
+          Os demais widgets continuam utilizaveis. Falha em: {services.join(", ")}.
+        </Alert.Description>
+      </Alert.Content>
+    </Alert>
+  );
+}

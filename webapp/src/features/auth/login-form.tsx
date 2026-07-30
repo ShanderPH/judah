@@ -1,13 +1,13 @@
 "use client";
 
 import { Alert, Button, CloseButton, Input, Label, TextField } from "@heroui/react";
-import gsap from "gsap";
 import { ArrowRight, LockKeyhole, Mail, ShieldCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { authClient, ApiClientError } from "@/src/lib/api/client";
 import { LoginCarousel } from "@/src/features/auth/login-carousel";
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
 interface LoginErrorView {
   title: string;
@@ -81,28 +81,27 @@ export function LoginForm({
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  useEffect(() => {
-    if (!cardRef.current) return;
-    const targets =
-      "[data-card-eyebrow],[data-card-title],[data-card-desc],[data-card-field],[data-card-action],[data-card-foot]";
-    const ctx = gsap.context(() => {
-      gsap.from(targets, {
-        autoAlpha: 0,
-        y: 18,
-        duration: 0.6,
-        ease: "power3.out",
-        stagger: 0.08,
-        clearProps: "all",
+  useGSAP(
+    () => {
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        gsap.from(
+          "[data-card-eyebrow],[data-card-title],[data-card-desc],[data-card-field],[data-card-action],[data-card-foot]",
+          {
+            autoAlpha: 0,
+            y: 18,
+            duration: MOTION.duration.slow,
+            ease: MOTION.ease.enter,
+            stagger: 0.07,
+            clearProps: "transform,opacity,visibility,willChange",
+            willChange: "transform,opacity",
+          },
+        );
       });
-    }, cardRef);
-    const safety = window.setTimeout(() => {
-      gsap.set(targets, { autoAlpha: 1, y: 0, clearProps: "all" });
-    }, 1500);
-    return () => {
-      window.clearTimeout(safety);
-      ctx.revert();
-    };
-  }, []);
+      return () => media.revert();
+    },
+    { scope: cardRef },
+  );
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -128,12 +127,26 @@ export function LoginForm({
   useEffect(() => {
     if (!error || !alertRef.current) return;
     alertRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    gsap.fromTo(
-      alertRef.current,
-      { autoAlpha: 0, y: -8, scale: 0.98 },
-      { autoAlpha: 1, y: 0, scale: 1, duration: 0.32, ease: "power2.out" },
-    );
   }, [error]);
+
+  useGSAP(
+    () => {
+      if (!error || !alertRef.current) return;
+      gsap.fromTo(
+        alertRef.current,
+        { autoAlpha: 0, y: -8, scale: 0.985 },
+        {
+          autoAlpha: 1,
+          y: 0,
+          scale: 1,
+          duration: MOTION.duration.base,
+          ease: MOTION.ease.enter,
+          clearProps: "transform,opacity,visibility,willChange",
+        },
+      );
+    },
+    { dependencies: [error], revertOnUpdate: true, scope: cardRef },
+  );
 
   return (
     <div className="relative z-10 mx-auto grid min-h-svh w-full max-w-[1480px] gap-4 px-3 py-4 md:gap-6 md:px-6 md:py-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(420px,480px)] lg:items-stretch">

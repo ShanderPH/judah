@@ -1,8 +1,8 @@
 "use client";
 
-import gsap from "gsap";
-import { useEffect, useRef } from "react";
+import { useId, useRef } from "react";
 
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 import { formatDateLabel } from "@/src/lib/utils/format";
 
 export function SimpleBarChart({
@@ -10,32 +10,44 @@ export function SimpleBarChart({
 }: {
   data: Array<{ label: string; value: number }>;
 }) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const max = Math.max(...data.map((item) => item.value), 1);
 
-  useEffect(() => {
-    if (!ref.current) return;
-    const ctx = gsap.context(() => {
-      gsap.from("[data-bar-fill]", {
-        scaleX: 0,
-        transformOrigin: "left center",
-        duration: 0.9,
-        ease: "power3.out",
-        stagger: 0.04,
+  useGSAP(
+    () => {
+      if (data.length === 0) return;
+
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        gsap.from("[data-bar-fill]", {
+          scaleX: 0,
+          transformOrigin: "left center",
+          duration: MOTION.duration.slow,
+          ease: MOTION.ease.enter,
+          stagger: 0.04,
+        });
+        gsap.from("[data-bar-row]", {
+          autoAlpha: 0,
+          y: 10,
+          duration: MOTION.duration.base,
+          ease: MOTION.ease.enter,
+          stagger: 0.04,
+          clearProps: "transform,opacity,visibility,willChange",
+        });
       });
-      gsap.from("[data-bar-row]", {
-        autoAlpha: 0,
-        y: 12,
-        duration: 0.5,
-        ease: "power2.out",
-        stagger: 0.04,
-      });
-    }, ref);
-    return () => ctx.revert();
-  }, [data]);
+      return () => media.revert();
+    },
+    { dependencies: [data], revertOnUpdate: true, scope: rootRef },
+  );
 
   return (
-    <div ref={ref} className="space-y-3">
+    <div ref={rootRef} className="space-y-3">
+      <table className="sr-only">
+        <caption>Atribuicoes por data</caption>
+        <thead><tr><th>Data</th><th>Total</th></tr></thead>
+        <tbody>{data.map((item) => <tr key={item.label}><td>{formatDateLabel(item.label)}</td><td>{item.value}</td></tr>)}</tbody>
+      </table>
+      <div aria-hidden="true" className="space-y-3">
       {data.map((item) => (
         <div key={item.label} data-bar-row className="space-y-1.5">
           <div className="judah-mono flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-[var(--muted)]">
@@ -51,6 +63,7 @@ export function SimpleBarChart({
           </div>
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -60,9 +73,9 @@ export function SimpleLineChart({
 }: {
   data: Array<{ label: string; value: number }>;
 }) {
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const pathRef = useRef<SVGPolylineElement | null>(null);
-
+  const gradientId = useId().replace(/:/g, "");
   const max = Math.max(...data.map((item) => item.value), 1);
   const min = Math.min(...data.map((item) => item.value), 0);
   const range = Math.max(max - min, 1);
@@ -75,33 +88,47 @@ export function SimpleLineChart({
     })
     .join(" ");
 
-  useEffect(() => {
-    if (!pathRef.current) return;
-    const length = pathRef.current.getTotalLength?.() ?? 0;
-    if (!length) return;
-    gsap.fromTo(
-      pathRef.current,
-      { strokeDasharray: length, strokeDashoffset: length },
-      {
-        strokeDashoffset: 0,
-        duration: 1.4,
-        ease: "power3.out",
-      },
-    );
-  }, [points]);
+  useGSAP(
+    () => {
+      const path = pathRef.current;
+      if (!path) return;
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        const length = path.getTotalLength();
+        gsap.fromTo(
+          path,
+          { strokeDasharray: length, strokeDashoffset: length, autoAlpha: 0.35 },
+          {
+            strokeDashoffset: 0,
+            autoAlpha: 1,
+            duration: 1.1,
+            ease: MOTION.ease.enter,
+            clearProps: "strokeDasharray,strokeDashoffset,opacity,visibility",
+          },
+        );
+      });
+      return () => media.revert();
+    },
+    { dependencies: [points], revertOnUpdate: true, scope: rootRef },
+  );
 
   if (data.length === 0) return null;
 
   return (
-    <div className="space-y-3">
+    <div ref={rootRef} className="space-y-3">
+      <table className="sr-only">
+        <caption>Serie temporal</caption>
+        <thead><tr><th>Data</th><th>Valor</th></tr></thead>
+        <tbody>{data.map((item) => <tr key={item.label}><td>{formatDateLabel(item.label)}</td><td>{item.value}</td></tr>)}</tbody>
+      </table>
       <svg
-        ref={svgRef}
         viewBox="0 0 100 100"
         preserveAspectRatio="none"
         className="h-40 w-full overflow-visible rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)]/40 p-1"
+        aria-hidden="true"
       >
         <defs>
-          <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+          <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor="var(--brand-500)" />
             <stop offset="100%" stopColor="var(--brand-300)" />
           </linearGradient>
@@ -109,7 +136,7 @@ export function SimpleLineChart({
         <polyline
           ref={pathRef}
           fill="none"
-          stroke="url(#lineGrad)"
+          stroke={`url(#${gradientId})`}
           strokeWidth="1.6"
           strokeLinecap="round"
           strokeLinejoin="round"

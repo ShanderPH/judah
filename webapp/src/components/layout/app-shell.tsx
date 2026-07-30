@@ -13,21 +13,23 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 
 import { useSession } from "@/src/lib/auth/session-context";
+import { CAPABILITIES, hasCapability, type Capability } from "@/src/lib/auth/access-policy";
 import { cn } from "@/src/lib/utils/misc";
 import { StatusRail } from "@/src/components/layout/status-rail";
 import { ThemeToggle } from "@/src/components/layout/theme-toggle";
 import { PageTransition } from "@/src/lib/motion/page-transition";
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
-const navigation = [
-  { href: "/dashboard", icon: Gauge, label: "Dashboard", hint: "Visao geral" },
-  { href: "/queue", icon: Orbit, label: "Fila", hint: "Operacao em tempo real" },
-  { href: "/auto-assignment", icon: Activity, label: "Autoatribuicao", hint: "Distribuicao" },
-  { href: "/agents", icon: Users, label: "Agentes", hint: "Gestao da equipe" },
-  { href: "/metrics", icon: BarChart3, label: "Metricas", hint: "Analytics" },
+const navigation: ReadonlyArray<{ href: string; icon: typeof Gauge; label: string; hint: string; capability: Capability }> = [
+  { href: "/dashboard", icon: Gauge, label: "Dashboard", hint: "Visao geral", capability: CAPABILITIES.dashboardRead },
+  { href: "/queue", icon: Orbit, label: "Fila", hint: "Operacao em tempo real", capability: CAPABILITIES.supportAdminRead },
+  { href: "/auto-assignment", icon: Activity, label: "Autoatribuicao", hint: "Distribuicao", capability: CAPABILITIES.supportAdminRead },
+  { href: "/agents", icon: Users, label: "Agentes", hint: "Gestao da equipe", capability: CAPABILITIES.supportAdminRead },
+  { href: "/metrics", icon: BarChart3, label: "Metricas", hint: "Analytics", capability: CAPABILITIES.metricsRead },
 ];
 
 function Sidebar({
@@ -40,19 +42,62 @@ function Sidebar({
   const pathname = usePathname();
   const { user } = useSession();
   const ref = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!isMobileOpen) return;
+
+    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isMobileOpen, onClose]);
+
+  useGSAP(
+    () => {
+      const media = gsap.matchMedia();
+      media.add(
+        {
+          allowMotion: "(prefers-reduced-motion: no-preference)",
+          desktop: "(min-width: 1024px)",
+        },
+        (context) => {
+          if (!context.conditions?.allowMotion || !context.conditions.desktop) return;
+          gsap.from("[data-side-item], nav > a", {
+            autoAlpha: 0,
+            x: -14,
+            duration: MOTION.duration.base,
+            stagger: 0.045,
+            ease: MOTION.ease.enter,
+            clearProps: "transform,opacity,visibility,willChange",
+          });
+        },
+      );
+      return () => media.revert();
+    },
+    { scope: ref },
+  );
 
   return (
     <>
       <aside
         ref={ref}
+        aria-label="Navegacao principal"
         className={cn(
           "judah-glass judah-scroll fixed inset-y-3 left-3 z-40 flex w-[280px] flex-col gap-6 overflow-y-auto rounded-[var(--radius-xl)] p-5 transition-transform duration-300 lg:sticky lg:top-3 lg:left-0 lg:max-h-[calc(100svh-1.5rem)] lg:translate-x-0",
-          isMobileOpen ? "translate-x-0" : "-translate-x-[110%] lg:translate-x-0",
+          isMobileOpen
+            ? "visible translate-x-0"
+            : "invisible -translate-x-[110%] lg:visible lg:translate-x-0",
         )}
       >
         <div data-side-item className="space-y-3">
           <div className="flex items-center justify-between">
-            <Link href="/dashboard" className="flex items-center gap-2.5">
+            <Link href="/dashboard" prefetch={false} className="flex items-center gap-2.5">
               <span className="grid size-9 place-items-center rounded-2xl bg-gradient-to-br from-[var(--accent)] to-[var(--brand-700)] text-[var(--accent-foreground)] shadow-[var(--field-shadow)]">
                 <Sparkles className="size-4" strokeWidth={2.2} />
               </span>
@@ -64,6 +109,7 @@ function Sidebar({
               </div>
             </Link>
             <Button
+              ref={closeButtonRef}
               isIconOnly
               variant="ghost"
               className="lg:hidden"
@@ -99,13 +145,14 @@ function Sidebar({
         </Card>
 
         <nav className="flex flex-col gap-1.5">
-          {navigation.map((item) => {
+          {navigation.filter((item) => hasCapability(user, item.capability)).map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href;
             return (
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                                 aria-current={isActive ? "page" : undefined}
                 className={cn(
                   "judah-focus-ring group relative flex items-center gap-3 rounded-[var(--radius-md)] border px-3 py-3 text-sm transition-all duration-300",
@@ -142,7 +189,7 @@ function Sidebar({
         <div data-side-item className="mt-auto">
           <div className="judah-divider mb-4" />
           <p className="judah-mono text-[10px] uppercase tracking-[0.24em] text-[var(--muted)]">
-            v0.1.0 • backend live
+            v0.1.0 • sessao protegida
           </p>
         </div>
       </aside>
@@ -159,7 +206,13 @@ function Sidebar({
   );
 }
 
-function TopBar({ onMenuOpen }: { onMenuOpen: () => void }) {
+function TopBar({
+  menuButtonRef,
+  onMenuOpen,
+}: {
+  menuButtonRef: React.RefObject<HTMLButtonElement | null>;
+  onMenuOpen: () => void;
+}) {
   const { signOut, user } = useSession();
   const pathname = usePathname();
   const current = navigation.find((item) => item.href === pathname);
@@ -168,6 +221,7 @@ function TopBar({ onMenuOpen }: { onMenuOpen: () => void }) {
     <div className="judah-glass sticky top-3 z-20 mb-4 flex items-center justify-between gap-3 rounded-[var(--radius-lg)] px-4 py-3 md:px-5">
       <div className="flex min-w-0 items-center gap-3">
         <Button
+          ref={menuButtonRef}
           isIconOnly
           variant="tertiary"
           className="lg:hidden"
@@ -203,14 +257,12 @@ function TopBar({ onMenuOpen }: { onMenuOpen: () => void }) {
 }
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
-  const pathname = usePathname();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
-  const [trackedPath, setTrackedPath] = useState(pathname);
-  if (trackedPath !== pathname) {
-    setTrackedPath(pathname);
-    if (isMobileOpen) setIsMobileOpen(false);
-  }
-  const closeMobile = useCallback(() => setIsMobileOpen(false), []);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeMobile = useCallback(() => {
+    setIsMobileOpen(false);
+    window.requestAnimationFrame(() => menuButtonRef.current?.focus());
+  }, []);
   const openMobile = useCallback(() => setIsMobileOpen(true), []);
 
   return (
@@ -222,7 +274,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         />
 
         <main className="min-w-0">
-          <TopBar onMenuOpen={openMobile} />
+          <TopBar menuButtonRef={menuButtonRef} onMenuOpen={openMobile} />
           <PageTransition>
             <div className="space-y-4 md:space-y-5">{children}</div>
           </PageTransition>

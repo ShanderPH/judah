@@ -25,6 +25,7 @@ export interface User {
   first_name: string;
   last_name: string;
   role: Role;
+  capabilities: string[];
   avatar_url: string;
   is_ai_agent: boolean;
 }

@@ -1,10 +1,10 @@
 # Judah WebApp
 
-Painel administrativo em Next.js 16.2.4 para o Judah.
+Painel administrativo em Next.js 16.2.12 para o Judah.
 
 ## Stack
 
-- Next.js 16.2.4
+- Next.js 16.2.12
 - React 19
 - TypeScript
 - HeroUI v3.0.3
@@ -37,20 +37,37 @@ Se o backend estiver em outra origem, ajuste o valor.
 ## Rodar localmente
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
 Abra `http://localhost:3000`.
 
+Para uma verificacao autenticada e descartavel no browser, siga
+[`docs/verification/local-ui-browser-fixture.md`](docs/verification/local-ui-browser-fixture.md).
+O procedimento usa somente banco local aprovado por `common.database_safety`,
+nao versiona senha e cria dados suficientes para validar a terceira pagina da fila.
+
 ## Validacao executada
 
 ```bash
+npm ci
 npm run lint
+npm run typecheck
+npm test
 npm run build
+npm audit --omit=dev --audit-level=high
 ```
 
-Os dois comandos passaram nesta implementacao.
+O CI executa a mesma sequencia com lockfile deterministico e publica o relatorio JUnit do Vitest.
+
+## Seguranca operacional
+
+- CSP inicia em `Content-Security-Policy-Report-Only`; `/sandbox-chat` recebe a allowlist HubSpot separada.
+- Auth, BFF, sandbox e paginas administrativas usam `Cache-Control: no-store`.
+- Logs server-side sao JSON, aceitam somente campos operacionais e propagam `X-Request-ID` ao Judah.
+- HSTS permanece desabilitado ate a topologia HTTPS e todos os subdominios serem validados.
+- A politica de acesso e retencao esta em `docs/security/logging-and-retention.md`.
 
 ## Estrutura principal
 
@@ -83,11 +100,9 @@ pois o projeto `inchurch-sandbox` usa autenticacao estatica de app privado.
 - `GET /api/v1/support/special-schedules/`
 - `GET /api/v1/analytics/reports/`
 
-## Lacunas do backend documentadas
+## Contratos administrativos
 
-- O backend autentica por `username`, nao por email de forma garantida.
-- Nao existe endpoint de logout.
-- Nao existe CRUD publico de agentes ou de regras avancadas de autoatribuicao.
-- Nao existe endpoint de atribuicao manual ou redistribuicao administrativa.
-- Nao existe leitura publica de `AgentMetrics`, `AgentDailyTimeLog` ou `ConversationReassignment`.
-- `support/tickets/*` nao foi usado como base do painel porque o contrato atual esta inconsistente com os modelos do backend.
+- O login aceita username ou email e a sessao do browser permanece encapsulada no BFF.
+- Agentes, metricas, time logs, reatribuicoes e acoes de fila usam endpoints tipados e capabilities derivadas do papel.
+- Atribuicao manual, force-reassign, sync e inativacao exigem confirmacao e registram auditoria administrativa.
+- `support/tickets/*` nao e usado como base do painel; a fila segue os contratos dedicados de `support/queue/*`.

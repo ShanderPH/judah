@@ -10,19 +10,20 @@ import {
 
 import { useApiQuery } from "@/src/hooks/use-api-query";
 import { loadMetricsOverview } from "@/src/lib/api/overview";
+import type { MetricsOverviewData } from "@/src/lib/api/overview-loaders";
 import {
   formatInteger,
   formatMinutes,
   formatPercentFromRatio,
   formatSeconds,
 } from "@/src/lib/utils/format";
-import { DataState } from "@/src/components/ui/data-state";
+import { DataState, DegradedNotice } from "@/src/components/ui/data-state";
 import { MetricCard } from "@/src/components/ui/metric-card";
 import { PageIntro } from "@/src/components/ui/page-intro";
 import { SimpleBarChart, SimpleLineChart } from "@/src/components/ui/simple-chart";
 
-export function MetricsOverview() {
-  const overview = useApiQuery(loadMetricsOverview);
+export function MetricsOverview({ initialData }: { initialData: MetricsOverviewData }) {
+  const overview = useApiQuery(loadMetricsOverview, initialData);
 
   if (overview.isLoading && !overview.data) return <DataState isLoading />;
   if (overview.error && !overview.data)
@@ -40,6 +41,7 @@ export function MetricsOverview() {
         title="Metricas reais de fila, agentes e analytics."
         description="queue_performance_metrics, agent_metrics, agent_daily_time_logs, conversation_reassignments e analytics_daily_reports — todos expostos pelo backend e cruzados aqui."
       />
+      <DegradedNotice services={data.degradedServices} />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 xl:grid-cols-4">
         <MetricCard
