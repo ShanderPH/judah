@@ -51,17 +51,16 @@ def test_hubspot_webhook_debug_accepts_and_queues() -> None:
 
 
 @override_settings(HUBSPOT_APP_SECRET="secret", DEBUG=False)
-def test_hubspot_webhook_bad_signature_persists_without_dispatch() -> None:
+def test_hubspot_webhook_bad_signature_is_rejected_before_persistence() -> None:
     request = RequestFactory().post("/webhook", data=b"[]", content_type="application/json")
     with (
         patch("apps.webhooks.api._is_valid_hubspot_request", return_value=False),
-        patch("apps.webhooks.api.record_webhook_event", return_value=SimpleNamespace(pk="event-1")),
+        patch("apps.webhooks.api.record_webhook_event") as record,
         patch("apps.webhooks.tasks.process_webhook_event_task.delay") as delay,
+        pytest.raises(HttpError, match="Invalid HubSpot production webhook signature"),
     ):
-        status, result = api.hubspot_webhook(request, [{"objectId": "1"}])
-    assert status == 202
-    assert result["status"] == "signature_mismatch"
-    assert result["events_queued"] == 0
+        api.hubspot_webhook(request, [{"objectId": "1"}])
+    record.assert_not_called()
     delay.assert_not_called()
 
 

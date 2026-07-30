@@ -100,6 +100,12 @@ Custo e consumo de tokens por execução.
   instâncias de conversa. Eventos que possuem apenas `ticket_id` usam um registro de
   escopo do ticket sem `thread_id` e nunca reutilizam uma conversa arbitrária.
 - `ConversationEvent`: ledger append-only de eventos normalizados a partir de webhooks HubSpot.
+- `conversation.newMessage` não informa direção no payload. O evento entra
+  como observação neutra, agenda hidratação da thread e somente a mensagem
+  confirmada como `INCOMING` atualiza `last_message_id` e inicia novo turno.
+- O app **Judah HubSpot Integration** é a fonte única dos webhooks de produção
+  e usa `/api/v1/webhooks/hubspot/` com `HUBSPOT_APP_SECRET`, inclusive para
+  `conversation.newMessage`. Payload inválido é rejeitado antes da persistência.
 - `ConversationStateTransition`: trilha auditavel de toda mudanca de estado.
 - `AgentRun`: snapshot de execucao de agente/modelo com entrada, saida, tokens, latencia, custo e status.
 - `ToolCallAuditLog`: auditoria de tools externas ou com efeito colateral.
@@ -114,6 +120,9 @@ Custo e consumo de tokens por execução.
   tentativas explícitas de sobrescrever instruções antes do LLM.
 - `run_lifecycle_watchdog`: detecta instâncias presas e transiciona para
   `FAILED_RETRYABLE`; o dispatcher periódico reexecuta ou faz handoff seguro.
+- `reconcile_waiting_customer_messages`: safety net limitado para conversas em
+  `WAITING_FOR_CUSTOMER`; compara o último `message_id` `INCOMING` do HubSpot
+  com o turno persistido e retoma o pipeline por evento idempotente.
 
 ## Endpoints
 
@@ -152,7 +161,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - `retry_pending_ticket_effect_task(instance_id)`: retoma somente um PATCH
   durável de rota/fechamento, sem executar novamente o modelo ou a resposta ao
   cliente.
-- `run_lifecycle_watchdog_task()`: detecta execuções presas.
+- `run_lifecycle_watchdog_task()`: detecta execuções presas e executa, sob
+  lock Redis, a reconciliação limitada de mensagens perdidas. O lote combina
+  conversas recentes com rotação anti-starvation.
 - `retry_failed_lifecycle_instances_task()`: reexecuta falhas elegíveis e faz
   handoff quando o orçamento termina.
 
@@ -180,6 +191,9 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - Resposta conclusiva (`candidate_resolved`) fecha o ticket somente depois
   que a mensagem foi entregue ao cliente e o HubSpot confirmou a mudança para
   `HUBSPOT_AI_TRIAGE_PIPELINE_ID / HUBSPOT_CLOSED_STAGE_ID`.
+- `candidate_resolved` exige evidência positiva de solução e é rebaixado para
+  `waiting_customer` sempre que a resposta pede ou autoriza novo áudio, vídeo,
+  arquivo, documento, imagem, dado ou outra ação futura do cliente.
 - Uma nova mensagem `INCOMING` reabre o lifecycle fechado da mesma conversa
   para que uma nova dúvida nunca seja perdida.
 - Tools externas exigem estado permitido, chave de idempotência e
@@ -196,6 +210,10 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   Salomão retoma todos os pedidos pendentes e apresenta somente o caminho
   aplicável, em geral com 3 a 7 passos curtos e detalhes adicionais sob demanda.
 - Quando `SALOMAO_V1_BASE_URL` estiver preenchido, `/api/v1/ai/salomao/chat` e eventos `conversation.newMessage` seguem pelo Supervisor; o Salomao v1 entra como membro `SalomaoChat`, nao como bypass direto.
+- Em produção, o projeto HubSpot `Judah HubSpot Integration` é a fonte única e
+  ativa de `conversation.newMessage`. A propriedade booleana
+  `hs_last_message_from_visitor` não é gatilho de mensagem. Eventos `COMMENT`
+  e `WELCOME_MESSAGE` são registrados, mas nunca iniciam um turno da IA.
 - `/api/v1/ai/triage/` permanece dedicado ao Heimdall.
 - Eventos de conversa com direcao `OUTGOING` sao ignorados para evitar que o Judah responda a propria mensagem.
 - A resposta automática só é elegível enquanto o ticket permanecer exatamente

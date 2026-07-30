@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -54,6 +55,118 @@ def test_normalizer_extracts_conversation_message_identifiers() -> None:
         event_type="conversation.newMessage",
         payload=event.payload,
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("message_type", ["COMMENT", "WELCOME_MESSAGE"])
+def test_non_customer_conversation_message_is_ignored(message_type: str) -> None:
+    event = _conversation_event(messageType=message_type, direction="")
+
+    normalized = EventNormalizer().normalize_webhook_event(event)
+    decision = RoutingPolicyEngine().route(normalized)
+
+    assert normalized.event_type == "conversation_non_customer_message"
+    assert normalized.channel == "chat"
+    assert decision.route == "IGNORE"
+
+
+@pytest.mark.django_db
+def test_directionless_message_requires_provider_verification_without_mutating_customer_cursor() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:directionless",
+        hubspot_thread_id="directionless",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_message_id="incoming-previous",
+    )
+    raw_event = _conversation_event(
+        objectId="directionless",
+        eventId="evt-directionless",
+        messageId="message-to-verify",
+        messageType="MESSAGE",
+        direction="",
+    )
+
+    result = record_lifecycle_for_webhook_event(raw_event)
+
+    instance.refresh_from_db()
+    assert result.decision.route == "MESSAGE_VERIFY"
+    assert result.event.event_type == "conversation_message_observed"
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.last_message_id == "incoming-previous"
+
+
+@pytest.mark.django_db
+def test_late_provider_event_is_audited_without_rewinding_newer_ticket_state() -> None:
+    now = timezone.now()
+    newer = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-newer",
+        event_type="ticket_stage_changed",
+        idempotency_key="provider-order:newer",
+        payload={"eventId": "evt-newer"},
+        occurred_at=now,
+        hubspot_ticket_id="ticket-provider-order",
+        pipeline_stage_id="ai-triage",
+    )
+    older = NormalizedEvent(
+        source="hubspot",
+        source_event_id="evt-older",
+        event_type="ticket_closed",
+        idempotency_key="provider-order:older",
+        payload={"eventId": "evt-older"},
+        occurred_at=now - timedelta(minutes=5),
+        hubspot_ticket_id="ticket-provider-order",
+        pipeline_stage_id="closed",
+    )
+    engine = LifecycleEngine()
+    first = engine.record_normalized_event(
+        newer,
+        decision=RoutingPolicyEngine().route(
+            NormalizedEvent(
+                **{
+                    **newer.__dict__,
+                    "event_type": "conversation_message_received",
+                    "direction": "INCOMING",
+                }
+            )
+        ),
+    )
+    second = engine.record_normalized_event(
+        older,
+        decision=RoutingPolicyEngine().route(older),
+    )
+
+    first.instance.refresh_from_db()
+    assert second.event_created is True
+    assert second.stale_event is True
+    assert first.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
+    assert first.instance.last_event_id == "evt-newer"
+    assert first.instance.metadata["last_provider_event_occurred_at"] == now.isoformat()
+    assert ConversationEvent.objects.filter(instance=first.instance).count() == 2
+
+
+@pytest.mark.django_db
+def test_internal_comment_does_not_replace_last_customer_message_id() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:comment-cursor",
+        hubspot_thread_id="comment-cursor",
+        state=ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        last_message_id="incoming-previous",
+    )
+    raw_event = _conversation_event(
+        objectId="comment-cursor",
+        eventId="evt-comment",
+        messageId="comment-1",
+        messageType="COMMENT",
+        direction="",
+    )
+
+    result = record_lifecycle_for_webhook_event(raw_event)
+
+    instance.refresh_from_db()
+    assert result.decision.route == "IGNORE"
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.last_message_id == "incoming-previous"
 
 
 @pytest.mark.django_db
@@ -167,6 +280,7 @@ def test_outgoing_event_is_logged_without_terminalizing_active_conversation() ->
     assert result.event_created is True
     assert result.decision.route == "IGNORE"
     assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.last_message_id == ""
 
 
 @pytest.mark.django_db
@@ -441,7 +555,12 @@ def test_new_customer_message_reopens_closed_conversation() -> None:
 )
 @pytest.mark.parametrize(
     "initial_state",
-    [ConversationInstance.State.QUEUE_PENDING, ConversationInstance.State.CLOSED],
+    [
+        ConversationInstance.State.QUEUE_PENDING,
+        ConversationInstance.State.HUMAN_ASSIGNED,
+        ConversationInstance.State.HUMAN_IN_PROGRESS,
+        ConversationInstance.State.CLOSED,
+    ],
 )
 def test_verified_ai_stage_reopens_ticket_lifecycle(initial_state: str) -> None:
     ticket_id = f"ticket-ai-reopen-{initial_state}"
@@ -468,6 +587,31 @@ def test_verified_ai_stage_reopens_ticket_lifecycle(initial_state: str) -> None:
     assert result.instance.pk == instance.pk
     assert result.instance.state == ConversationInstance.State.CONTEXT_HYDRATING
     assert result.instance.closed_at is None
+
+
+@pytest.mark.django_db
+def test_customer_message_preserves_human_lifecycle_until_provider_revalidation() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:human-current-authority",
+        hubspot_thread_id="human-current-authority",
+        state=ConversationInstance.State.HUMAN_IN_PROGRESS,
+        assigned_agent_id="owner-1",
+    )
+
+    result = record_lifecycle_for_webhook_event(
+        _conversation_event(
+            objectId="human-current-authority",
+            eventId="evt-human-customer-message",
+            messageId="msg-human-customer-message",
+        )
+    )
+
+    result.instance.refresh_from_db()
+    assert result.event_created is True
+    assert result.decision.route == "AI_TRIAGE"
+    assert result.instance.pk == instance.pk
+    assert result.instance.state == ConversationInstance.State.HUMAN_IN_PROGRESS
+    assert result.instance.assigned_agent_id == "owner-1"
 
 
 @pytest.mark.django_db

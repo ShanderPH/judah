@@ -50,6 +50,7 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
 | `SALOMAO_V1_MAX_ATTEMPTS` | `apps/integrations/salomao_v1/client.py` | Tentativas para timeout, HTTP 429 e HTTP 5xx (padrão: `3`). |
+| `SALOMAO_WAITING_RECONCILIATION_LIMIT` | `apps/ai_agents/tasks.py` | Lote do safety net que compara o último `message_id` do HubSpot nas conversas aguardando cliente (padrão: `50`, limite interno: `200`). É opcional; `conversation.newMessage` permanece o gatilho imediato. |
 | `SALOMAO_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima do draft do Salomão antes de transbordar para humano (padrão: `0.65`). |
 | `HEIMDALL_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima da triagem Heimdall antes de transbordar para humano (padrão: `0.65`). |
 
@@ -58,7 +59,7 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | Variável | Onde é usada | Descrição |
 |----------|--------------|-----------|
 | `HUBSPOT_ACCESS_TOKEN` | `apps/integrations/hubspot/client.py` | Token OAuth de private app. |
-| `HUBSPOT_APP_SECRET` | `apps/webhooks/api.py`, `apps/ai_agents/api/webhooks.py` | Secret para validar assinatura HMAC v1/v3 dos webhooks. |
+| `HUBSPOT_APP_SECRET` | `apps/webhooks/api.py`, `apps/ai_agents/api/webhooks.py` | Secret do app **Judah HubSpot Integration**, que autentica todos os webhooks de produção em `/api/v1/webhooks/hubspot/`, inclusive `conversation.newMessage`. |
 | `HUBSPOT_SANDBOX_APP_SECRET` | `apps/webhooks/api.py` | Secret isolado do app `inchurch-sandbox-App` para validar `/api/v1/webhooks/hubspot/sandbox/`. |
 | `HUBSPOT_PORTAL_ID` | `apps/ai_agents/mcp_servers/hubspot_server.py` | Portal ID para construir URLs de ticket. |
 | `HUBSPOT_N1_TEAM_ID` | `core/settings/base.py` | ID do time N1 de suporte (padrão: `8`). |

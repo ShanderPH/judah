@@ -10,9 +10,12 @@
       "requiredScopes": [
         "oauth",
         "tickets",
+        "conversations.read",
+        "conversations.write",
         "crm.objects.contacts.read",
         "crm.objects.users.read",
-        "settings.users.read"
+        "settings.users.read",
+        "settings.users.teams.read"
       ]
     },
     "permittedUrls": {

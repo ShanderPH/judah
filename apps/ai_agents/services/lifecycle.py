@@ -34,6 +34,7 @@ RouteName = Literal[
     "AI_TRIAGE",
     "AI_SERVICE",
     "HUMAN_HANDOFF",
+    "MESSAGE_VERIFY",
     "CLOSE",
     "WAIT_FOR_CONTACT_DATA",
 ]
@@ -109,6 +110,7 @@ class LifecycleRecordResult:
     event: ConversationEvent
     decision: RouteDecision
     event_created: bool
+    stale_event: bool = False
 
 
 TERMINAL_STATES = {
@@ -288,12 +290,9 @@ class EventNormalizer:
         occurred_at_raw = _as_text(payload.get("occurredAt") or payload.get("occurred_at"))
         occurred_at = _parse_hubspot_timestamp(occurred_at_raw)
         direction = _as_text(payload.get("direction") or payload.get("messageDirection")).upper()
+        message_type = _as_text(payload.get("messageType")).upper()
         channel = normalize_channel(
-            payload.get("channel")
-            or payload.get("channelType")
-            or payload.get("messageType")
-            or payload.get("source")
-            or payload.get("sourceType")
+            payload.get("channel") or payload.get("channelType") or payload.get("source") or payload.get("sourceType")
         )
 
         normalized_type = raw_event_type
@@ -302,7 +301,17 @@ class EventNormalizer:
         pipeline_stage_id: str | None = None
 
         if raw_event_type == "conversation.newMessage":
-            normalized_type = "conversation_message_received"
+            # HubSpot emits this event for internal comments and welcome
+            # messages as well as visitor and agent messages. The webhook
+            # contract does not include ``direction``. A MESSAGE without an
+            # explicit direction must therefore be verified against provider
+            # history before it can mutate the customer-turn lifecycle.
+            if message_type and message_type != "MESSAGE":
+                normalized_type = "conversation_non_customer_message"
+            elif direction in {"INCOMING", "OUTGOING"}:
+                normalized_type = "conversation_message_received"
+            else:
+                normalized_type = "conversation_message_observed"
             hubspot_thread_id = _thread_id_from_payload(payload) or object_id or None
         elif raw_event_type == "ticket.propertyChange":
             hubspot_ticket_id = object_id or None
@@ -431,6 +440,14 @@ class RoutingPolicyEngine:
                 can_send_reply=True,
             )
 
+        if event.event_type == "conversation_message_observed":
+            return RouteDecision(
+                route="MESSAGE_VERIFY",
+                target_state=ConversationInstance.State.NORMALIZED,
+                reason="HubSpot message notification requires provider direction verification.",
+                can_send_reply=can_reply,
+            )
+
         return RouteDecision(
             route="IGNORE",
             target_state=ConversationInstance.State.IGNORED,
@@ -451,9 +468,11 @@ class LifecycleEngine:
         decision = decision or RoutingPolicyEngine().route(event)
         with transaction.atomic():
             instance, instance_created = self._get_or_create_instance(event)
-            self._refresh_instance_snapshot(instance, event)
+            stale_event = self._is_stale_provider_event(instance, event)
+            if not stale_event:
+                self._refresh_instance_snapshot(instance, event)
             lifecycle_event, event_created = self._append_event(instance, event)
-            if event_created:
+            if event_created and not stale_event:
                 if instance.state == ConversationInstance.State.RECEIVED:
                     self.transition(
                         instance,
@@ -477,25 +496,41 @@ class LifecycleEngine:
                         reason="Assigned human agent sent the first outgoing message.",
                         source_event_id=event.source_event_id,
                     )
-                elif decision.route != "IGNORE":
+                elif decision.route not in {"IGNORE", "MESSAGE_VERIFY"}:
                     can_reopen_terminal = (
                         event.event_type == "ticket_entered_n1"
                         or decision.route in {"AI_TRIAGE", "AI_SERVICE"}
                         or (event.event_type == "conversation_message_received" and event.direction == "INCOMING")
+                    )
+                    preserve_human_authority_until_provider_check = (
+                        event.event_type == "conversation_message_received"
+                        and decision.route in {"AI_TRIAGE", "AI_SERVICE"}
+                        and instance.state
+                        in {
+                            ConversationInstance.State.HUMAN_ASSIGNED,
+                            ConversationInstance.State.HUMAN_IN_PROGRESS,
+                        }
                     )
                     allow_authoritative_queue_entry = (
                         event.event_type == "ticket_entered_n1"
                         and decision.route == "AUTO_ASSIGNMENT"
                         and decision.target_state == ConversationInstance.State.QUEUE_PENDING
                     )
-                    self.transition(
-                        instance,
-                        decision.target_state,
-                        reason=decision.reason,
-                        source_event_id=event.source_event_id,
-                        allow_terminal_reopen=can_reopen_terminal,
-                        allow_authoritative_queue_entry=allow_authoritative_queue_entry,
+                    allow_authoritative_ai_entry = (
+                        event.event_type == "ticket_stage_changed"
+                        and decision.route in {"AI_TRIAGE", "AI_SERVICE"}
+                        and decision.target_state == ConversationInstance.State.CONTEXT_HYDRATING
                     )
+                    if not preserve_human_authority_until_provider_check:
+                        self.transition(
+                            instance,
+                            decision.target_state,
+                            reason=decision.reason,
+                            source_event_id=event.source_event_id,
+                            allow_terminal_reopen=can_reopen_terminal,
+                            allow_authoritative_queue_entry=allow_authoritative_queue_entry,
+                            allow_authoritative_ai_entry=allow_authoritative_ai_entry,
+                        )
                 elif instance_created and not event.hubspot_ticket_id:
                     # A ticket can emit metadata/property events before the
                     # actionable pipeline or customer-message event. Keeping
@@ -519,7 +554,30 @@ class LifecycleEngine:
             event=lifecycle_event,
             decision=decision,
             event_created=event_created,
+            stale_event=stale_event,
         )
+
+    @staticmethod
+    def _is_stale_provider_event(instance: ConversationInstance, event: NormalizedEvent) -> bool:
+        """Keep late provider deliveries in the ledger without rewinding state.
+
+        HubSpot explicitly does not guarantee webhook delivery order. Only
+        events with comparable provider timestamps participate in this guard;
+        equal timestamps remain processable because separate events can share
+        the same millisecond.
+        """
+        if event.occurred_at is None:
+            return False
+        raw_cursor = (instance.metadata or {}).get("last_provider_event_occurred_at")
+        if not raw_cursor:
+            return False
+        try:
+            provider_cursor = datetime.fromisoformat(str(raw_cursor))
+        except TypeError, ValueError:
+            return False
+        if provider_cursor.tzinfo is None:
+            provider_cursor = provider_cursor.replace(tzinfo=UTC)
+        return event.occurred_at < provider_cursor
 
     def _close_all_ticket_instances(
         self,
@@ -557,6 +615,7 @@ class LifecycleEngine:
         source_event_id: str = "",
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
+        allow_authoritative_ai_entry: bool = False,
     ) -> ConversationInstance:
         if instance.state == to_state:
             return instance
@@ -565,6 +624,7 @@ class LifecycleEngine:
             to_state,
             allow_terminal_reopen=allow_terminal_reopen,
             allow_authoritative_queue_entry=allow_authoritative_queue_entry,
+            allow_authoritative_ai_entry=allow_authoritative_ai_entry,
         )
         now = timezone.now()
         from_state = instance.state
@@ -573,9 +633,13 @@ class LifecycleEngine:
         instance.last_activity_at = now
         if to_state == ConversationInstance.State.CLOSED and instance.closed_at is None:
             instance.closed_at = now
-        elif allow_terminal_reopen and to_state not in TERMINAL_STATES:
+        elif (allow_terminal_reopen or allow_authoritative_ai_entry) and to_state not in TERMINAL_STATES:
             instance.closed_at = None
-        instance.save(update_fields=["state", "state_version", "last_activity_at", "closed_at", "updated_at"])
+        update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
+        if allow_authoritative_ai_entry:
+            instance.assigned_agent_id = None
+            update_fields.append("assigned_agent_id")
+        instance.save(update_fields=update_fields)
         ConversationStateTransition.objects.create(
             instance=instance,
             from_state=from_state,
@@ -700,7 +764,11 @@ class LifecycleEngine:
             "pipeline_id": event.pipeline_id,
             "pipeline_stage_id": event.pipeline_stage_id,
             "last_event_id": event.source_event_id,
-            "last_message_id": event.message_id,
+            "last_message_id": (
+                event.message_id
+                if event.event_type == "conversation_message_received" and event.direction == "INCOMING"
+                else ""
+            ),
             "last_activity_at": event.occurred_at or timezone.now(),
             "ai_session_id": self._ai_session_id(event),
             "metadata": {"last_payload": event.payload},
@@ -757,9 +825,11 @@ class LifecycleEngine:
         )
 
     def _refresh_instance_snapshot(self, instance: ConversationInstance, event: NormalizedEvent) -> None:
-        update_fields = ["last_event_id", "last_message_id", "last_activity_at", "metadata", "updated_at"]
+        update_fields = ["last_event_id", "last_activity_at", "metadata", "updated_at"]
         instance.last_event_id = event.source_event_id or instance.last_event_id
-        instance.last_message_id = event.message_id or instance.last_message_id
+        if event.event_type == "conversation_message_received" and event.direction == "INCOMING" and event.message_id:
+            instance.last_message_id = event.message_id
+            update_fields.append("last_message_id")
         instance.last_activity_at = event.occurred_at or timezone.now()
         if event.hubspot_contact_id:
             instance.hubspot_contact_id = event.hubspot_contact_id
@@ -775,6 +845,8 @@ class LifecycleEngine:
             update_fields.append("pipeline_stage_id")
         metadata = dict(instance.metadata or {})
         metadata["last_payload"] = event.payload
+        if event.occurred_at is not None:
+            metadata["last_provider_event_occurred_at"] = event.occurred_at.isoformat()
         instance.metadata = metadata
         instance.save(update_fields=list(dict.fromkeys(update_fields)))
 
@@ -785,6 +857,7 @@ class LifecycleEngine:
         *,
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
+        allow_authoritative_ai_entry: bool = False,
     ) -> None:
         if from_state in TERMINAL_STATES:
             if allow_terminal_reopen:
@@ -794,6 +867,11 @@ class LifecycleEngine:
             # The calculated HubSpot NOVO-stage timestamp is authoritative.
             # It may race with an in-flight AI projection, but callers cannot
             # use this exception for ordinary application transitions.
+            return
+        if allow_authoritative_ai_entry and to_state == ConversationInstance.State.CONTEXT_HYDRATING:
+            # A configured HubSpot AI-stage event or a worker that just
+            # revalidated that same route may supersede stale human lifecycle
+            # state. Ordinary callers cannot use this exception.
             return
         if to_state in {ConversationInstance.State.CLOSED, ConversationInstance.State.RESOLVED_BY_HUMAN}:
             return

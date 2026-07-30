@@ -214,3 +214,20 @@ def test_salomao_v1_empty_response_becomes_handoff_draft() -> None:
     assert draft.resolved is False
     assert draft.requires_human_handoff is True
     assert draft.confidence == 0.0
+
+
+def test_salomao_v1_non_transfer_is_not_automatically_resolved() -> None:
+    draft = salomao_v1_result_to_draft(
+        SalomaoV1ChatResult(
+            response=(
+                "Pode mandar sim. No áudio, mencione qual é o problema e em qual módulo ele acontece. "
+                "Se aparecer um erro, envie também um print."
+            ),
+            session_id="hubspot-thread-audio",
+            transfer_requested=False,
+        ),
+        conversation_context=_conversation_context(),
+    )
+
+    assert draft.requires_human_handoff is False
+    assert draft.resolved is False

@@ -16,8 +16,10 @@ from apps.ai_agents.services.execution import (
     HUMAN_HANDOFF_CONFIRMATION,
     HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION,
     apply_supervisor_result,
+    complete_ai_resolution,
     handle_resolution_confirmation,
     publish_handoff_observation,
+    request_human_handoff,
     resume_pending_ticket_effect,
 )
 from apps.support.models import NewConversation
@@ -660,9 +662,10 @@ async def test_off_hours_handoff_warns_customer_and_uses_configured_route() -> N
 @pytest.mark.asyncio
 async def test_off_hours_regular_support_still_replies_normally() -> None:
     instance = await sync_to_async(_instance)()
+    response = "Acesse Pessoas, abra Membros e clique em Criar membro."
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
-        message="Claro, vou te ajudar com isso.",
+        message=response,
         sources=[],
         requires_human_handoff=False,
         handoff_reason=None,
@@ -672,7 +675,7 @@ async def test_off_hours_regular_support_still_replies_normally() -> None:
         latency_ms=2,
         decision=SupervisorDecision(
             outcome="candidate_resolved",
-            final_response="Claro, vou te ajudar com isso.",
+            final_response=response,
             confidence=0.9,
         ),
     )
@@ -697,7 +700,7 @@ async def test_off_hours_regular_support_still_replies_normally() -> None:
             result=result,
         )
 
-    assert send_reply.await_args.args[1] == "Claro, vou te ajudar com isso."
+    assert send_reply.await_args.args[1] == response
     close_route.assert_awaited_once()
     await sync_to_async(instance.refresh_from_db)()
     assert instance.state == ConversationInstance.State.CLOSED
@@ -802,6 +805,58 @@ async def test_candidate_resolution_with_open_question_is_kept_open() -> None:
     assert "candidate_resolution_requires_customer_input" in decision["risk_flags"]
     run = await AgentRun.objects.aget(instance=instance, agent_name="SalomaoSupervisor")
     assert run.output_structured["outcome"] == "waiting_customer"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_audio_request_regression_never_closes_ticket() -> None:
+    instance = await sync_to_async(_instance)()
+    response = (
+        "Pode mandar sim — se o canal permitir anexar áudio por aqui.\n\n"
+        "No áudio, mencione qual é o problema e em qual módulo ou tela da InChurch ele acontece. "
+        "Se aparecer erro na tela, um print junto também ajuda bastante."
+    )
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message=response,
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["salomao_chat: OK"],
+        tokens_used=5,
+        model_name="salomao_v1",
+        latency_ms=2,
+        decision=SupervisorDecision(
+            outcome="candidate_resolved",
+            final_response=response,
+            confidence=0.86,
+        ),
+    )
+    close_route = AsyncMock(return_value={"updated": True})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-audio-request"}),
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=close_route,
+        ),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Posso mandar áudio?",
+            result=result,
+        )
+
+    close_route.assert_not_awaited()
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
+    assert instance.metadata["last_supervisor_decision"]["outcome"] == "waiting_customer"
+    assert "candidate_resolution_requires_customer_input" in instance.metadata["last_supervisor_decision"]["risk_flags"]
 
 
 @pytest.mark.django_db
@@ -1248,7 +1303,7 @@ async def test_human_takeover_after_handoff_confirmation_never_reroutes_ticket()
 
 
 @pytest.mark.django_db
-def test_customer_confirmation_closes_candidate_resolution() -> None:
+def test_legacy_customer_confirmation_marker_never_closes_only_local_lifecycle() -> None:
     instance = ConversationInstance.objects.create(
         idempotency_key="conversation:thread:confirmation",
         hubspot_thread_id="confirmation",
@@ -1256,8 +1311,58 @@ def test_customer_confirmation_closes_candidate_resolution() -> None:
         metadata={"awaiting_resolution_confirmation": True},
     )
 
-    assert handle_resolution_confirmation(instance, "Sim, resolveu") is True
+    assert handle_resolution_confirmation(instance, "Sim, resolveu") is False
 
     instance.refresh_from_db()
-    assert instance.state == ConversationInstance.State.CLOSED
+    assert instance.state == ConversationInstance.State.CONTEXT_HYDRATING
     assert instance.metadata["awaiting_resolution_confirmation"] is False
+
+
+@pytest.mark.django_db
+def test_handoff_without_provider_thread_fails_before_mutating_lifecycle() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:missing-handoff-thread",
+        hubspot_ticket_id="ticket-missing-thread",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+        last_message_id="message-1",
+    )
+    context = _context().model_copy(update={"thread_id": None})
+
+    with pytest.raises(ValueError, match="thread ID"):
+        request_human_handoff(
+            instance=instance,
+            reason="Cliente pediu atendimento humano.",
+            conversation_context=context,
+            triage_decision=_triage(),
+            ai_summary="Resumo",
+        )
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.AI_SERVICE_RUNNING
+    assert not ToolCallAuditLog.objects.filter(instance=instance).exists()
+
+
+@pytest.mark.django_db
+def test_resolution_without_provider_thread_fails_before_ticket_patch() -> None:
+    instance = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:missing-resolution-thread",
+        hubspot_ticket_id="ticket-missing-thread",
+        state=ConversationInstance.State.AI_SERVICE_RUNNING,
+        last_message_id="message-1",
+    )
+    context = _context().model_copy(update={"thread_id": None})
+
+    with pytest.raises(ValueError, match="thread ID"):
+        complete_ai_resolution(
+            instance=instance,
+            conversation_context=context,
+            decision=SupervisorDecision(
+                outcome="candidate_resolved",
+                final_response="Acesse o painel, clique em Salvar e conclua a configuração.",
+                confidence=0.95,
+            ),
+        )
+
+    instance.refresh_from_db()
+    assert instance.state == ConversationInstance.State.AI_SERVICE_RUNNING
+    assert not ToolCallAuditLog.objects.filter(instance=instance).exists()

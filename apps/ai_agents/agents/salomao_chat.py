@@ -18,6 +18,10 @@ from apps.ai_agents.contracts import (
     TriageDecision,
 )
 from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
+from apps.ai_agents.services.decision_policy import (
+    customer_input_signals,
+    resolution_evidence_signals,
+)
 from apps.integrations.salomao_v1 import SalomaoV1ChatResult, SalomaoV1Client, is_salomao_v1_configured
 from common.exceptions import ExternalServiceError
 
@@ -173,10 +177,22 @@ def salomao_v1_result_to_draft(
             customer_visible_protocol=_protocol(conversation_context),
         )
 
+    customer_signals = customer_input_signals(response_text)
+    resolution_signals = resolution_evidence_signals(response_text)
+    resolved = bool(resolution_signals) and not customer_signals and not result.transfer_requested
+    logger.info(
+        "salomao_chat_resolution_classified",
+        session_id=result.session_id,
+        transfer_requested=result.transfer_requested,
+        resolved=resolved,
+        customer_input_signals=customer_signals or None,
+        resolution_evidence_signals=resolution_signals or None,
+    )
+
     return SalomaoChatDraft(
         response_text=response_text,
         confidence=0.72 if result.transfer_requested else 0.86,
-        resolved=not result.transfer_requested,
+        resolved=resolved,
         requires_human_handoff=result.transfer_requested,
         handoff_reason="Salomao v1 requested transfer." if result.transfer_requested else None,
         missing_data=[],

@@ -69,6 +69,26 @@ class TestHandleHubspotEvent:
     @override_settings(
         AI_ROUTING_ENABLED=True,
         SALOMAO_V1_BASE_URL="https://salomao.local",
+    )
+    def test_internal_comment_does_not_dispatch_ai_pipeline(self) -> None:
+        event = _event(
+            "conversation.newMessage",
+            {
+                "objectId": "77",
+                "threadId": "thread-77",
+                "messageId": "comment-1",
+                "messageType": "COMMENT",
+            },
+        )
+
+        with patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn") as mock_schedule:
+            handle_hubspot_event(event)
+
+        mock_schedule.assert_not_called()
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="https://salomao.local",
         HUBSPOT_AI_REPLY_DISABLED_CHANNELS="whatsapp",
     )
     def test_whatsapp_conversation_dispatches_ai_pipeline(self) -> None:
