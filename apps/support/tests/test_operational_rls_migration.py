@@ -36,6 +36,14 @@ def _migrate(target: tuple[str, str]) -> None:
     MigrationExecutor(connection).migrate([target])
 
 
+def _ensure_client_roles() -> None:
+    with connection.cursor() as cursor:
+        for role in ("anon", "authenticated"):
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)", [role])
+            if not cursor.fetchone()[0]:
+                cursor.execute(f"CREATE ROLE {connection.ops.quote_name(role)} NOLOGIN")
+
+
 def _assert_protected(expected: bool) -> None:
     with connection.cursor() as cursor:
         for table in SAMPLE_TABLES:
@@ -52,6 +60,7 @@ def _assert_protected(expected: bool) -> None:
 
 
 def test_operational_rls_forward_reverse_forward(restore_migrations: None) -> None:
+    _ensure_client_roles()
     _migrate(MIGRATION_BEFORE)
     _assert_protected(False)
     _migrate(MIGRATION_AFTER)
