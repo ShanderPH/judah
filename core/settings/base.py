@@ -208,6 +208,19 @@ CELERY_TASK_ROUTES = {
 # This isolates the dormant AI drop from the legacy auto-assignment system.
 AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
 AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
+# Independent execution controls. Defaults preserve the legacy coupling while
+# deployments can explicitly suspend Salomao without disabling human routing
+# or automatic assignment.
+SALOMAO_SUPERVISOR_ENABLED = config(
+    "SALOMAO_SUPERVISOR_ENABLED",
+    default=True,
+    cast=bool,
+)
+SALOMAO_WAITING_RECONCILIATION_ENABLED = config(
+    "SALOMAO_WAITING_RECONCILIATION_ENABLED",
+    default=True,
+    cast=bool,
+)
 
 # Controls automatic agent availability writes from HubSpot polling, SAT and
 # availability webhooks. Staging overrides this to False unconditionally.

@@ -119,6 +119,8 @@ def readiness_check(request) -> JsonResponse:
             "authoritative_writer": is_authoritative_availability_runtime(),
             "writer_id": availability_writer_id(),
             "auto_assignment_enabled": bool(settings.AUTO_ASSIGNMENT_ENABLED),
+            "salomao_supervisor_enabled": bool(settings.SALOMAO_SUPERVISOR_ENABLED),
+            "salomao_waiting_reconciliation_enabled": bool(settings.SALOMAO_WAITING_RECONCILIATION_ENABLED),
             "absence_safe_eligibility_shadow": bool(settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW),
             "absence_safe_eligibility_enforced": bool(settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED),
             "conversation_cycles": conversation_cycles,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
@@ -56,6 +57,14 @@ _REQUIRED_LIFECYCLE_TABLES = {
 
 class InvalidStateTransitionError(ValueError):
     """Raised when a lifecycle transition is not allowed."""
+
+
+class EffectOrderingPolicy(StrEnum):
+    """Ordering contract for effects produced by provider events."""
+
+    PRESERVE_PROJECTION_ONLY = "preserve_projection_only"
+    REVALIDATE_CURRENT_PROVIDER_STATE = "revalidate_current_provider_state"
+    PROCESS_IDEMPOTENT_OCCURRENCE = "process_idempotent_occurrence"
 
 
 def is_lifecycle_schema_ready() -> bool:
@@ -111,6 +120,7 @@ class LifecycleRecordResult:
     decision: RouteDecision
     event_created: bool
     stale_event: bool = False
+    effect_policy: EffectOrderingPolicy = EffectOrderingPolicy.REVALIDATE_CURRENT_PROVIDER_STATE
 
 
 TERMINAL_STATES = {
@@ -466,6 +476,7 @@ class LifecycleEngine:
         decision: RouteDecision | None = None,
     ) -> LifecycleRecordResult:
         decision = decision or RoutingPolicyEngine().route(event)
+        effect_policy = self.effect_ordering_policy(event, decision)
         with transaction.atomic():
             instance, instance_created = self._get_or_create_instance(event)
             stale_event = self._is_stale_provider_event(instance, event)
@@ -555,7 +566,20 @@ class LifecycleEngine:
             decision=decision,
             event_created=event_created,
             stale_event=stale_event,
+            effect_policy=effect_policy,
         )
+
+    @staticmethod
+    def effect_ordering_policy(
+        event: NormalizedEvent,
+        decision: RouteDecision,
+    ) -> EffectOrderingPolicy:
+        """Classify whether a late event may still produce a domain effect."""
+        if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
+            return EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
+        if decision.route in {"IGNORE", "MESSAGE_VERIFY"}:
+            return EffectOrderingPolicy.PRESERVE_PROJECTION_ONLY
+        return EffectOrderingPolicy.REVALIDATE_CURRENT_PROVIDER_STATE
 
     @staticmethod
     def _is_stale_provider_event(instance: ConversationInstance, event: NormalizedEvent) -> bool:

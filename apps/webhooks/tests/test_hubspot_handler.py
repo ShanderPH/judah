@@ -64,7 +64,9 @@ class TestHandleHubspotEvent:
 
     def test_conversation_event_routed(self) -> None:
         event = _event("conversation.newMessage", {"objectId": "77"})
-        handle_hubspot_event(event)
+        with patch("apps.ai_agents.tasks.request_human_handoff_task.delay") as handoff:
+            handle_hubspot_event(event)
+        handoff.assert_called_once()
 
     @override_settings(
         AI_ROUTING_ENABLED=True,
@@ -243,10 +245,14 @@ class TestHandleHubspotEvent:
         HUBSPOT_N1_NEW_STAGE_ID="ai-new",
     )
     def test_ai_new_stage_respects_routing_flag(self) -> None:
-        with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
+        with (
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+            patch("apps.ai_agents.tasks.request_human_handoff_task.delay") as handoff,
+        ):
             _handle_pipeline_stage_change("ticket-ai-disabled", "ai-new")
 
         mock_delay.assert_not_called()
+        handoff.assert_called_once()
 
     @override_settings(
         AI_ROUTING_ENABLED=True,
@@ -255,10 +261,14 @@ class TestHandleHubspotEvent:
         HUBSPOT_N1_NEW_STAGE_ID="ai-new",
     )
     def test_ai_new_stage_respects_rollout_cohort(self) -> None:
-        with patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay:
+        with (
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+            patch("apps.ai_agents.tasks.request_human_handoff_task.delay") as handoff,
+        ):
             _handle_pipeline_stage_change("ticket-outside-rollout", "ai-new")
 
         mock_delay.assert_not_called()
+        handoff.assert_called_once()
 
     @override_settings(
         HUBSPOT_SUPPORT_NEW_STAGE_ID="support-new",
