@@ -67,13 +67,28 @@ export function DataState({
 
 export function DegradedNotice({ services }: { services: string[] }) {
   if (services.length === 0) return null;
+  const labels: Record<string, string> = {
+    "agent-metrics": "métricas de agentes",
+    agents: "agentes",
+    "analytics-reports": "relatórios analíticos",
+    "business-hours": "horário comercial",
+    health: "saúde da API",
+    "queue-health": "saúde da fila",
+    "queue-metrics": "métricas da fila",
+    "queue-status": "status da fila",
+    reassignments: "redistribuições",
+    "special-schedules": "escalas especiais",
+    "time-logs": "registros de tempo",
+  };
+  const readableServices = services.map((service) => labels[service] ?? service);
   return (
     <Alert status="warning" className="rounded-[var(--radius-md)]" role="status">
       <Alert.Indicator />
       <Alert.Content>
-        <Alert.Title>Visao parcialmente indisponivel</Alert.Title>
+        <Alert.Title>Visão parcialmente indisponível</Alert.Title>
         <Alert.Description>
-          Os demais widgets continuam utilizaveis. Falha em: {services.join(", ")}.
+          Os demais widgets continuam utilizáveis. Não foi possível consultar: {readableServices.join(", ")}.
+          Se isso persistir após um novo login, confirme se sua conta possui a permissão administrativa necessária.
         </Alert.Description>
       </Alert.Content>
     </Alert>

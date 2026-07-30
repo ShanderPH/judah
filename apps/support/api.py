@@ -320,6 +320,7 @@ def list_queue_metrics(
     response=BusinessHoursResponse,
     summary="Get current business hours configuration",
 )
+@require_manager_or_admin
 def get_business_hours(request) -> dict:
     """Return the current business hours configuration, including whether
     it is currently within business hours."""
@@ -370,6 +371,7 @@ def get_business_hours(request) -> dict:
     response=list[SpecialScheduleResponse],
     summary="List special schedule overrides",
 )
+@require_manager_or_admin
 def list_special_schedules(request) -> list:
     """Return all special schedule overrides (holidays, custom hours)."""
     from apps.support.models import SpecialSchedule
