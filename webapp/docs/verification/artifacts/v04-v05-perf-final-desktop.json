@@ -1,0 +1,39 @@
+{
+  "url": "http://127.0.0.1:3000/dashboard",
+  "perf": {
+    "lcp": 512,
+    "cls": 0.0031958633425669433,
+    "inp": 88,
+    "longTasks": [
+      {
+        "startTime": 923.5,
+        "duration": 51
+      }
+    ],
+    "frameGaps": 1,
+    "maxFrameGap": 62.5
+  },
+  "nav": [
+    {
+      "type": "reload",
+      "domContentLoaded": 175.69999998807907,
+      "load": 177.89999997615814
+    }
+  ],
+  "api": [
+    "http://127.0.0.1:3000/api/backend/health",
+    "http://127.0.0.1:3000/api/backend/support/queue/status",
+    "http://127.0.0.1:3000/api/backend/support/business-hours"
+  ],
+  "rsc": [
+    "http://127.0.0.1:3000/metrics?_rsc=j79Vj4yH5aoiafxS",
+    "http://127.0.0.1:3000/agents?_rsc=j79Vj4yH5aoiafxS",
+    "http://127.0.0.1:3000/auto-assignment?_rsc=j79Vj4yH5aoiafxS",
+    "http://127.0.0.1:3000/queue?_rsc=j79Vj4yH5aoiafxS",
+    "http://127.0.0.1:3000/metrics?_rsc=IOe_mmh6jQxP6_Ru",
+    "http://127.0.0.1:3000/agents?_rsc=IOe_mmh6jQxP6_Ru",
+    "http://127.0.0.1:3000/auto-assignment?_rsc=IOe_mmh6jQxP6_Ru",
+    "http://127.0.0.1:3000/queue?_rsc=IOe_mmh6jQxP6_Ru",
+    "http://127.0.0.1:3000/dashboard?_rsc=IOe_mmh6jQxP6_Ru"
+  ]
+}
