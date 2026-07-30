@@ -2,12 +2,12 @@ request: refactor/webapp-production-readiness
 cycle: F
 state: DEPLOY
 opened_at: 2026-07-29T20:05:00-03:00
-last_update: 2026-07-30T14:14:00-03:00
+last_update: 2026-07-30T14:34:00-03:00
 agent_run_id: codex-desktop
 current_blockers:
   - "O PR ainda precisa executar checks obrigatórios, gerar Vercel Preview e receber approval/code-owner review antes do merge."
   - "A cadeia dev-only do ESLint 9 mantém 9 advisories high; o runtime audit está zerado e a exceção precisa ser aceita ou resolvida antes do merge."
-next_action: "Criar commits escopados, integrar origin/main, publicar a branch e abrir PR pronto para main (Vercel Production)."
+next_action: "Publicar a branch integrada e abrir PR pronto para main (Vercel Production); depois acompanhar checks e Vercel Preview."
 artifacts_generated:
   - 00-context/gate-b-inventory.md
   - 01-plan/master-plan.md
@@ -25,4 +25,4 @@ artifacts_generated:
   - webapp/docs/verification/local-ui-browser-fixture.md
   - webapp/docs/verification/v-04-v-05-browser-attempt-2026-07-30.md
   - webapp/docs/deployment/frontend-gate-g-readiness.md
-verification_runs: 51
+verification_runs: 52

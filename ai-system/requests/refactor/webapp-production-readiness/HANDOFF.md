@@ -111,3 +111,5 @@ Revisão visual posterior removeu o reveal circular do tema. A implementação f
 - O WebApp é hospedado no Vercel. O PR deve mirar `main`, branch observada de Vercel Production; commits do PR geram Vercel Preview para o smoke anterior ao merge.
 
 Risco restante: o audit completo mantém 9 findings high dev-only na cadeia ESLint 9. O upgrade explícito para ESLint 10.8 foi testado sem `--force`, mas `eslint-config-next` 16.2.12 ainda inclui plugin React que usa a API removida `context.getFilename`; a versão 9.39.3 foi restaurada. O runtime audit permanece zerado. Checks, Vercel Preview e approval/code-owner review ainda precisam fechar no PR antes do merge/deploy.
+
+`origin/main` foi integrado na branch da feature sem conflitos. A regressão pós-integração passou com 982 testes backend, 11 skips e 90,25% de cobertura, além de lint, TypeScript, 24 Vitest, build Next de 15 rotas e audit de runtime zerado. Os serviços temporários, o SQLite e o banco PostgreSQL descartável `judah_ci_ui_verification` foram removidos após a coleta de evidências.
