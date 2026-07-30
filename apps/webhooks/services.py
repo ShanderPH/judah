@@ -77,28 +77,21 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
         thread_id = lifecycle.instance.hubspot_thread_id
         ticket_id = lifecycle.instance.hubspot_ticket_id
         ai_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
-        if route == "HUMAN_HANDOFF" or (route != "MESSAGE_VERIFY" and not ai_enabled):
+        supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_enabled))
+        if route == "HUMAN_HANDOFF" or not ai_enabled or not supervisor_enabled:
             request_human_handoff_task.delay(
                 thread_id=thread_id,
                 ticket_id=ticket_id,
                 reason=(
                     decision.reason
                     if route == "HUMAN_HANDOFF"
-                    else "AI routing is disabled; deterministic human fallback applied."
+                    else "Salomao execution is disabled; deterministic human fallback applied."
                 ),
             )
         elif route == "MESSAGE_VERIFY":
             if not thread_id:
                 raise ValueError("MESSAGE_VERIFY route has no thread identifier.")
-            if ai_enabled:
-                schedule_salomao_thread_customer_turn(thread_id)
-            else:
-                logger.info(
-                    "hubspot_conversation_message_verification_skipped",
-                    thread_id=thread_id,
-                    reason="ai_routing_disabled",
-                    action="safe_noop",
-                )
+            schedule_salomao_thread_customer_turn(thread_id)
         else:
             event_type = str(event.event_type or "").lower()
             is_customer_message = event_type == "conversation.newmessage" or (
@@ -194,18 +187,40 @@ def process_webhook_event(event_id) -> bool:
                         event_created=lifecycle.event_created,
                         stale_event=lifecycle.stale_event,
                     )
-                    if lifecycle.stale_event:
+                    process_stale_occurrence = (
+                        lifecycle.stale_event
+                        and lifecycle.effect_policy.value == "process_idempotent_occurrence"
+                        and lifecycle.event_created
+                    )
+                    if lifecycle.stale_event and not process_stale_occurrence:
                         logger.warning(
                             "webhook_event_stale_effects_skipped",
                             event_id=event.pk,
                             conversation_event_id=str(lifecycle.event.pk),
                             occurred_at=lifecycle.event.occurred_at,
+                            projection_skipped=True,
+                            effect_policy=lifecycle.effect_policy.value,
+                            effect_outcome="suppressed",
                             action="preserve_newer_provider_state",
                         )
-                    elif lifecycle.event_created or lifecycle.event.processing_status in {
-                        lifecycle.event.ProcessingStatus.PENDING,
-                        lifecycle.event.ProcessingStatus.FAILED,
-                    }:
+                    elif (
+                        process_stale_occurrence
+                        or lifecycle.event_created
+                        or lifecycle.event.processing_status
+                        in {
+                            lifecycle.event.ProcessingStatus.PENDING,
+                            lifecycle.event.ProcessingStatus.FAILED,
+                        }
+                    ):
+                        if process_stale_occurrence:
+                            logger.warning(
+                                "webhook_event_stale_occurrence_revalidated",
+                                event_id=event.pk,
+                                conversation_event_id=str(lifecycle.event.pk),
+                                projection_skipped=True,
+                                effect_policy=lifecycle.effect_policy.value,
+                                effect_outcome="dispatched_for_provider_revalidation",
+                            )
                         _dispatch_hubspot_lifecycle(event, lifecycle)
                     else:
                         logger.info(

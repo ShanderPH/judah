@@ -49,6 +49,8 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | `SALOMAO_V1_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP do adapter Salomao v1 (mínimo: `120`). |
 | `SALOMAO_V1_IMAGE_TIMEOUT_SECONDS` | `apps/integrations/salomao_v1/client.py` | Timeout HTTP para mensagens com imagem (padrão: `180`). |
 | `SALOMAO_V1_AS_TEAM_AGENT` | `apps/ai_agents/agents/supervisor.py` | Habilita o Salomao v1 como membro do Team Agno do Supervisor quando `SALOMAO_V1_BASE_URL` estiver configurado (padrao: `true`). |
+| `SALOMAO_SUPERVISOR_ENABLED` | dispatch/tasks do Salomão | Autoriza somente reservar e executar o Supervisor. O fallback humano e o Matchmaker permanecem ativos quando `false` (padrão compatível: `true`; produção deve definir explicitamente). |
+| `SALOMAO_WAITING_RECONCILIATION_ENABLED` | watchdog do lifecycle | Autoriza o polling limitado de threads em `WAITING_FOR_CUSTOMER`. Quando `false`, preserva e reporta o backlog sem chamar a Conversations API (padrão compatível: `true`; produção deve definir explicitamente). |
 | `SALOMAO_V1_MAX_ATTEMPTS` | `apps/integrations/salomao_v1/client.py` | Tentativas para timeout, HTTP 429 e HTTP 5xx (padrão: `3`). |
 | `SALOMAO_WAITING_RECONCILIATION_LIMIT` | `apps/ai_agents/tasks.py` | Lote do safety net que compara o último `message_id` do HubSpot nas conversas aguardando cliente (padrão: `50`, limite interno: `200`). É opcional; `conversation.newMessage` permanece o gatilho imediato. |
 | `SALOMAO_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima do draft do Salomão antes de transbordar para humano (padrão: `0.65`). |

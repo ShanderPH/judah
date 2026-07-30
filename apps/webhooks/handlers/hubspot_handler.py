@@ -210,18 +210,45 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict 
 
 def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -> None:
     """Dispatch the ticket Supervisor for a new AI ticket or customer reply."""
-    if not getattr(settings, "AI_ROUTING_ENABLED", False):
-        logger.info("hubspot_ticket_ai_routing_disabled", ticket_id=hubspot_ticket_id, trigger=trigger)
+    ai_routing_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
+    supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_routing_enabled))
+    if not ai_routing_enabled or not supervisor_enabled:
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=hubspot_ticket_id,
+            thread_id=None,
+            reason=f"Salomao unavailable for {trigger}; deterministic human fallback applied.",
+        )
+        logger.info(
+            "hubspot_ticket_salomao_disabled_handoff_dispatched",
+            ticket_id=hubspot_ticket_id,
+            trigger=trigger,
+        )
         return
 
     if not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
-        logger.warning("hubspot_ticket_salomao_not_configured", ticket_id=hubspot_ticket_id, trigger=trigger)
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=hubspot_ticket_id,
+            thread_id=None,
+            reason=f"Salomao is not configured for {trigger}; deterministic human fallback applied.",
+        )
+        logger.warning("hubspot_ticket_salomao_not_configured_handoff", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
     from apps.ai_agents.services.rollout import is_ai_rollout_enabled
 
     if not is_ai_rollout_enabled(hubspot_ticket_id):
-        logger.info("hubspot_ticket_ai_rollout_skipped", ticket_id=hubspot_ticket_id, trigger=trigger)
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=hubspot_ticket_id,
+            thread_id=None,
+            reason=f"Ticket is outside Salomao rollout for {trigger}; deterministic human fallback applied.",
+        )
+        logger.info("hubspot_ticket_ai_rollout_handoff", ticket_id=hubspot_ticket_id, trigger=trigger)
         return
 
     from apps.ai_agents.tasks import run_supervisor_pipeline_task, schedule_supervisor_customer_turn
@@ -313,19 +340,42 @@ def _handle_conversation_event(event_type: str, payload: dict) -> None:
         payload.get("channel") or payload.get("channelType") or payload.get("source") or payload.get("sourceType")
     )
     if not can_send_automated_reply(channel):
-        logger.info("hubspot_conversation_auto_reply_unsupported", object_id=object_id, channel=channel)
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=None,
+            thread_id=object_id,
+            reason=f"Channel {channel} does not support automatic replies.",
+        )
+        logger.info("hubspot_conversation_auto_reply_unsupported_handoff", object_id=object_id, channel=channel)
         return
 
     from django.conf import settings
 
-    if not getattr(settings, "AI_ROUTING_ENABLED", False) or not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
-        logger.debug("hubspot_conversation_ai_routing_disabled", object_id=object_id)
+    ai_routing_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
+    supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_routing_enabled))
+    if not ai_routing_enabled or not supervisor_enabled or not getattr(settings, "SALOMAO_V1_BASE_URL", ""):
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=None,
+            thread_id=object_id,
+            reason="Salomao is disabled or unavailable; deterministic human fallback applied.",
+        )
+        logger.info("hubspot_conversation_salomao_unavailable_handoff", object_id=object_id)
         return
 
     from apps.ai_agents.services.rollout import is_ai_rollout_enabled
 
     if not is_ai_rollout_enabled(str(object_id)):
-        logger.info("hubspot_conversation_ai_rollout_skipped", object_id=object_id)
+        from apps.ai_agents.tasks import request_human_handoff_task
+
+        request_human_handoff_task.delay(
+            ticket_id=None,
+            thread_id=object_id,
+            reason="Conversation is outside Salomao rollout; deterministic human fallback applied.",
+        )
+        logger.info("hubspot_conversation_ai_rollout_handoff", object_id=object_id)
         return
 
     from apps.ai_agents.tasks import schedule_salomao_thread_customer_turn

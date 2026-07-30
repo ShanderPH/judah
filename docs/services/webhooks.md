@@ -93,6 +93,17 @@ X-Hub-Signature = sha256=<HMAC-SHA256(body)>
 ## Pontos de atenção
 
 - O endpoint canônico é `/api/v1/webhooks/hubspot/`. O arquivo `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`, mesmo quando `AI_ROUTING_ENABLED=true`.
+
+### Responsabilidade das subscriptions de ticket
+
+- `hs_v2_date_entered_939275049` é a ocorrência primária de entrada do Matchmaker. A identidade usa o timestamp calculado do provider; entregas tardias preservam a projeção mais nova, mas ainda passam pela revalidação idempotente de pipeline, estágio e owner.
+- `hubspot_owner_id` reconcilia atribuição e autoridade humana.
+- `hs_pipeline_stage` é um sinal compartilhado e redundante, não um requisito exclusivo da atribuição.
+- `hs_v2_date_entered_939271304` sinaliza entrada calculada na rota de IA.
+- `conversation.newMessage` é o sinal primário de mensagem para o Supervisor.
+- `hs_last_message_from_visitor` é apenas sinal auxiliar de transição; nunca é usado como identidade de mensagem.
+
+Reativação, desativação ou alteração dessas subscriptions é um gate operacional separado da publicação do código.
 - O handler Jira atual apenas loga eventos; não há integração funcional além de criação manual via service.
 
 ## Recomendações

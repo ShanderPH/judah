@@ -208,6 +208,13 @@ def run_supervisor_pipeline_task(
     anyway rather than drop the event.
     """
     ticket_id = str(ticket_id)
+    if not bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", settings.AI_ROUTING_ENABLED)):
+        request_human_handoff_task.delay(
+            ticket_id=ticket_id,
+            thread_id=None,
+            reason="Salomao supervisor is disabled at execution reservation.",
+        )
+        return
     lock_key = f"{_LOCK_KEY_PREFIX}:{ticket_id}"
     pending_key = f"{_PENDING_KEY_PREFIX}:{ticket_id}"
     stage_trigger_key = f"{_STAGE_TRIGGER_KEY_PREFIX}:{ticket_id}"
@@ -351,6 +358,13 @@ def run_salomao_v1_thread_pipeline_task(
     compatibility; Salomao v1 is now an internal Supervisor member.
     """
     thread_id = str(thread_id)
+    if not bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", settings.AI_ROUTING_ENABLED)):
+        request_human_handoff_task.delay(
+            ticket_id=None,
+            thread_id=thread_id,
+            reason="Salomao supervisor is disabled at execution reservation.",
+        )
+        return
     lock_key = f"{_THREAD_LOCK_KEY_PREFIX}:{thread_id}"
     pending_key = f"{_THREAD_PENDING_KEY_PREFIX}:{thread_id}"
 
@@ -623,6 +637,34 @@ def run_lifecycle_watchdog_task() -> dict[str, int | bool]:
         ),
     )
     waiting_backlog = waiting_customer_backlog_size()
+    reconciliation_enabled = bool(
+        getattr(
+            settings,
+            "SALOMAO_WAITING_RECONCILIATION_ENABLED",
+            settings.AI_ROUTING_ENABLED,
+        )
+    )
+    if not reconciliation_enabled:
+        logger.info(
+            "waiting_customer_reconciliation_suspended",
+            waiting_backlog=waiting_backlog,
+            reconciliation_limit=reconciliation_limit,
+            reason="salomao_waiting_reconciliation_disabled",
+            action="preserve_backlog_without_provider_polling",
+        )
+        return {
+            "scanned": result.scanned,
+            "marked_retryable": result.marked_retryable,
+            "marked_terminal": result.marked_terminal,
+            "waiting_reconciliation_enabled": False,
+            "waiting_scanned": 0,
+            "customer_turns_recovered": 0,
+            "waiting_unchanged": 0,
+            "waiting_ineligible": 0,
+            "waiting_reconciliation_failed": 0,
+            "waiting_reconciliation_skipped": True,
+            "waiting_reconciliation_backlog": waiting_backlog,
+        }
     if waiting_backlog > reconciliation_limit:
         logger.warning(
             "waiting_customer_reconciliation_backlog",

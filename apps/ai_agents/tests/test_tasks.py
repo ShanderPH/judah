@@ -101,6 +101,36 @@ def test_superseded_message_batch_stops_before_hydration() -> None:
     client.eval.assert_called_once()
 
 
+@override_settings(SALOMAO_SUPERVISOR_ENABLED=False, AI_ROUTING_ENABLED=True)
+def test_disabled_supervisor_converges_before_reserving_execution() -> None:
+    with (
+        patch("apps.ai_agents.tasks.request_human_handoff_task.delay") as handoff,
+        patch("apps.ai_agents.tasks._redis_client") as redis_client,
+    ):
+        run_supervisor_pipeline_task.run("ticket-disabled")
+        run_salomao_v1_thread_pipeline_task.run("thread-disabled")
+
+    assert handoff.call_count == 2
+    redis_client.assert_not_called()
+
+
+@override_settings(SALOMAO_WAITING_RECONCILIATION_ENABLED=False)
+def test_disabled_waiting_reconciliation_preserves_backlog_without_provider_polling() -> None:
+    watchdog_result = SimpleNamespace(scanned=2, marked_retryable=1, marked_terminal=0)
+    with (
+        patch("apps.ai_agents.services.watchdog.run_lifecycle_watchdog", return_value=watchdog_result),
+        patch("apps.ai_agents.services.watchdog.waiting_customer_backlog_size", return_value=7),
+        patch("apps.ai_agents.services.watchdog.reconcile_waiting_customer_messages") as reconcile,
+        patch("apps.ai_agents.tasks._redis_client") as redis_client,
+    ):
+        result = run_lifecycle_watchdog_task.run()
+
+    assert result["waiting_reconciliation_enabled"] is False
+    assert result["waiting_reconciliation_backlog"] == 7
+    reconcile.assert_not_called()
+    redis_client.assert_not_called()
+
+
 def test_newest_message_batch_claim_runs_pipeline() -> None:
     client = Mock()
     client.eval.return_value = 1

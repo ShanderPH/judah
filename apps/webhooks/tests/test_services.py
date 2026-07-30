@@ -340,6 +340,56 @@ class TestProcessWebhookEvent:
         mock_pipeline.assert_called_once_with("thread-stale-message")
         assert ConversationEvent.objects.filter(instance__hubspot_thread_id="thread-stale-message").count() == 2
 
+    def test_late_novo_occurrence_preserves_projection_and_revalidates_once(self) -> None:
+        newer_owner = WebhookEvent.objects.create(
+            event_type="ticket.propertyChange",
+            object_id="ticket-stale-novo",
+            property_name="hubspot_owner_id",
+            property_value="",
+            payload={
+                "eventId": "evt-owner-newer",
+                "objectId": "ticket-stale-novo",
+                "propertyName": "hubspot_owner_id",
+                "propertyValue": "",
+                "occurredAt": "1783022705591",
+            },
+        )
+        older_novo = WebhookEvent.objects.create(
+            event_type="ticket.propertyChange",
+            event_id="evt-novo-older",
+            object_id="ticket-stale-novo",
+            property_name="hs_v2_date_entered_939275049",
+            property_value="1783022705000",
+            payload={
+                "eventId": "evt-novo-older",
+                "objectId": "ticket-stale-novo",
+                "propertyName": "hs_v2_date_entered_939275049",
+                "propertyValue": "1783022705000",
+                "occurredAt": "1783022705000",
+            },
+        )
+
+        with (
+            patch("apps.support.tasks.task_handle_owner_change.delay"),
+            patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
+            patch("apps.support.tasks.task_matchmaker_assign_single.delay") as assign,
+            patch(
+                "apps.webhooks.handlers.hubspot_handler.transaction.on_commit",
+                side_effect=lambda callback: callback(),
+            ),
+        ):
+            assert process_webhook_event(newer_owner.pk) is True
+            assert process_webhook_event(older_novo.pk) is True
+            assert process_webhook_event(older_novo.pk) is True
+
+        assign.assert_called_once_with(
+            "ticket-stale-novo",
+            "1783022705000",
+            "evt-novo-older",
+        )
+        instance = ConversationInstance.objects.get(hubspot_ticket_id="ticket-stale-novo")
+        assert instance.metadata["last_provider_event_occurred_at"].endswith("05.591000+00:00")
+
     def test_failed_lifecycle_dispatch_is_retried_without_losing_ledger_status(self) -> None:
         event = WebhookEvent.objects.create(
             event_type="conversation.newMessage",
@@ -408,7 +458,7 @@ class TestLifecycleDispatch:
                 self._lifecycle("AI_TRIAGE", ticket_id="ticket-disabled"),
             )
 
-        assert "AI routing is disabled" in handoff.call_args.kwargs["reason"]
+        assert "Salomao execution is disabled" in handoff.call_args.kwargs["reason"]
 
     @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
     def test_message_verify_schedules_thread_hydration_without_handoff(self, schedule) -> None:
@@ -424,7 +474,7 @@ class TestLifecycleDispatch:
 
     @patch("apps.ai_agents.tasks.request_human_handoff_task.delay")
     @patch("apps.ai_agents.tasks.schedule_salomao_thread_customer_turn")
-    def test_message_verify_is_safe_noop_when_ai_is_disabled(self, schedule, handoff) -> None:
+    def test_message_verify_falls_back_to_human_when_ai_is_disabled(self, schedule, handoff) -> None:
         event = WebhookEvent(event_type="conversation.newMessage", payload={})
 
         with patch("django.conf.settings.AI_ROUTING_ENABLED", False):
@@ -434,7 +484,11 @@ class TestLifecycleDispatch:
             )
 
         schedule.assert_not_called()
-        handoff.assert_not_called()
+        handoff.assert_called_once_with(
+            thread_id="thread-disabled",
+            ticket_id=None,
+            reason="Salomao execution is disabled; deterministic human fallback applied.",
+        )
 
     @patch("apps.ai_agents.tasks.schedule_supervisor_customer_turn")
     def test_ticket_customer_message_uses_debounced_supervisor(self, schedule) -> None:
