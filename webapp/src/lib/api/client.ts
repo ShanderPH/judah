@@ -27,6 +27,9 @@ import type {
   SyncNovoResponse,
   UpdateAgentPayload,
 } from "@/src/types/api";
+import { normalizePaginatedResponse } from "@/src/lib/api/pagination";
+
+export { normalizePaginatedResponse } from "@/src/lib/api/pagination";
 
 interface LoginPayload {
   identity: string;
@@ -35,6 +38,10 @@ interface LoginPayload {
 
 interface QueryValue {
   [key: string]: boolean | number | string | undefined;
+}
+
+interface RequestOptions {
+  signal?: AbortSignal;
 }
 
 export class ApiClientError extends Error {
@@ -72,6 +79,10 @@ function buildQuery(params?: QueryValue): string {
   return serialized ? `?${serialized}` : "";
 }
 
+function idempotencyHeaders(): HeadersInit {
+  return { "Idempotency-Key": crypto.randomUUID() };
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit & {
@@ -85,12 +96,39 @@ async function request<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${path}${buildQuery(init?.query)}`, {
-    ...init,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers,
-  });
+  const method = (init?.method ?? "GET").toUpperCase();
+  const retryable = method === "GET";
+  let response: Response | null = null;
+
+  for (let attempt = 0; attempt < (retryable ? 2 : 1); attempt += 1) {
+    try {
+      response = await fetch(`${path}${buildQuery(init?.query)}`, {
+        ...init,
+        credentials: "same-origin",
+        cache: "no-store",
+        headers,
+      });
+    } catch (error) {
+      if (init?.signal?.aborted || attempt > 0) throw error;
+    }
+
+    if (response && ![429, 502, 503, 504].includes(response.status)) break;
+    if (attempt === 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(resolve, 250);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            window.clearTimeout(timeout);
+            reject(new DOMException("Request aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+
+  if (!response) throw new Error("Backend indisponivel.");
 
   const text = await response.text();
   const payload = text ? (JSON.parse(text) as unknown) : null;
@@ -102,24 +140,14 @@ async function request<T>(
   return payload as T;
 }
 
-// Django Ninja's paginator returns `{items, count}`. The webapp expects the
-// DRF-style `{results, count, next, previous}` shape. Normalize at the edge so
-// every list endpoint can share the `PaginatedResponse<T>` type without each
-// component having to know which envelope it gets.
 async function requestPaginated<T>(
   path: string,
   init?: RequestInit & {
     query?: QueryValue;
   },
 ): Promise<PaginatedResponse<T>> {
-  const raw = await request<{ items?: T[]; results?: T[]; count?: number }>(path, init);
-  const results = raw.results ?? raw.items ?? [];
-  return {
-    count: raw.count ?? results.length,
-    next: null,
-    previous: null,
-    results,
-  };
+  const raw = await request<unknown>(path, init);
+  return normalizePaginatedResponse<T>(raw, { path, query: init?.query });
 }
 
 export const authClient = {
@@ -136,98 +164,113 @@ export const authClient = {
 };
 
 export const judahApi = {
-  getHealth: () => request<HealthResponse>("/api/backend/health/"),
-  getQueueStatus: () => request<QueueStatusResponse>("/api/backend/support/queue/status/"),
-  getQueueHealth: () => request<QueueHealthResponse>("/api/backend/support/queue/health/"),
-  getBusinessHours: () => request<BusinessHoursResponse>("/api/backend/support/business-hours/"),
-  listSpecialSchedules: () => request<SpecialSchedule[]>("/api/backend/support/special-schedules/"),
+  getHealth: (options?: RequestOptions) => request<HealthResponse>("/api/backend/health", options),
+  getQueueStatus: (options?: RequestOptions) => request<QueueStatusResponse>("/api/backend/support/queue/status", options),
+  getQueueHealth: (options?: RequestOptions) => request<QueueHealthResponse>("/api/backend/support/queue/health", options),
+  getBusinessHours: (options?: RequestOptions) => request<BusinessHoursResponse>("/api/backend/support/business-hours", options),
+  listSpecialSchedules: (options?: RequestOptions) => request<SpecialSchedule[]>("/api/backend/support/special-schedules", options),
   syncNovo: () =>
-    request<SyncNovoResponse>("/api/backend/support/queue/sync-novo/", {
+    request<SyncNovoResponse>("/api/backend/support/queue/sync-novo", {
       method: "POST",
+      headers: idempotencyHeaders(),
     }),
-  listPendingConversations: (params?: QueryValue) =>
-    requestPaginated<PendingConversation>("/api/backend/support/queue/pending/", {
+  listPendingConversations: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<PendingConversation>("/api/backend/support/queue/pending", {
       query: params,
+      ...options,
     }),
-  listAssignedConversations: (params?: QueryValue) =>
-    requestPaginated<AssignedConversation>("/api/backend/support/queue/assigned/", {
+  listAssignedConversations: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<AssignedConversation>("/api/backend/support/queue/assigned", {
       query: params,
+      ...options,
     }),
-  listQueueMetrics: (params?: QueryValue) =>
-    requestPaginated<QueueMetric>("/api/backend/support/queue/metrics/", {
+  listQueueMetrics: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<QueueMetric>("/api/backend/support/queue/metrics", {
       query: params,
+      ...options,
     }),
-  listReports: (params?: QueryValue) =>
-    requestPaginated<DailyReport>("/api/backend/analytics/reports/", {
+  listReports: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<DailyReport>("/api/backend/analytics/reports", {
       query: params,
+      ...options,
     }),
 
   // ----- Agents administration -----
-  listAgents: (params?: QueryValue) =>
-    requestPaginated<Agent>("/api/backend/support/agents/", { query: params }),
+  listAgents: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<Agent>("/api/backend/support/agents", { query: params, ...options }),
   retrieveAgent: (agentId: string) =>
     request<Agent>(`/api/backend/support/agents/${agentId}`),
   createAgent: (payload: CreateAgentPayload) =>
-    request<Agent>("/api/backend/support/agents/", {
+    request<Agent>("/api/backend/support/agents", {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload),
     }),
   updateAgent: (agentId: string, payload: UpdateAgentPayload) =>
     request<Agent>(`/api/backend/support/agents/${agentId}`, {
       method: "PATCH",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload),
     }),
   inactivateAgent: (agentId: string) =>
     request<Agent>(`/api/backend/support/agents/${agentId}/inactivate`, {
       method: "POST",
+      headers: idempotencyHeaders(),
     }),
   reactivateAgent: (agentId: string) =>
     request<Agent>(`/api/backend/support/agents/${agentId}/reactivate`, {
       method: "POST",
+      headers: idempotencyHeaders(),
     }),
 
   // ----- Aggregated reads -----
-  listAgentMetrics: (params?: QueryValue) =>
-    requestPaginated<AgentMetricsRow>("/api/backend/support/metrics/agents/", {
+  listAgentMetrics: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<AgentMetricsRow>("/api/backend/support/metrics/agents", {
       query: params,
+      ...options,
     }),
-  getAgentMetricsSummary: (params?: QueryValue) =>
-    request<AgentMetricsSummary>("/api/backend/support/metrics/agents/summary/", {
+  getAgentMetricsSummary: (params?: QueryValue, options?: RequestOptions) =>
+    request<AgentMetricsSummary>("/api/backend/support/metrics/agents/summary", {
       query: params,
+      ...options,
     }),
   listAgentMetricsForAgent: (agentId: string, params?: QueryValue) =>
     requestPaginated<AgentMetricsRow>(
-      `/api/backend/support/agents/${agentId}/metrics/`,
+      `/api/backend/support/agents/${agentId}/metrics`,
       { query: params },
     ),
   listAgentTimeLogs: (agentId: string, params?: QueryValue) =>
     requestPaginated<AgentDailyTimeLog>(
-      `/api/backend/support/agents/${agentId}/time-logs/`,
+      `/api/backend/support/agents/${agentId}/time-logs`,
       { query: params },
     ),
-  listAllTimeLogs: (params?: QueryValue) =>
-    requestPaginated<AgentDailyTimeLog>("/api/backend/support/time-logs/", {
+  listAllTimeLogs: (params?: QueryValue, options?: RequestOptions) =>
+    requestPaginated<AgentDailyTimeLog>("/api/backend/support/time-logs", {
       query: params,
+      ...options,
     }),
-  listReassignments: (params?: QueryValue) =>
+  listReassignments: (params?: QueryValue, options?: RequestOptions) =>
     requestPaginated<ConversationReassignment>(
-      "/api/backend/support/reassignments/",
-      { query: params },
+      "/api/backend/support/reassignments",
+      { query: params, ...options },
     ),
-  getReassignmentsSummary: (params?: QueryValue) =>
-    request<ReassignmentSummaryRow[]>("/api/backend/support/reassignments/summary/", {
+  getReassignmentsSummary: (params?: QueryValue, options?: RequestOptions) =>
+    request<ReassignmentSummaryRow[]>("/api/backend/support/reassignments/summary", {
       query: params,
+      ...options,
     }),
 
   // ----- Manual assignment actions -----
   manualAssign: (payload: ManualAssignPayload) =>
-    request<AssignmentActionResponse>("/api/backend/support/queue/manual-assign/", {
+    request<AssignmentActionResponse>("/api/backend/support/queue/manual-assign", {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload),
     }),
   forceReassign: (payload: ForceReassignPayload) =>
-    request<AssignmentActionResponse>("/api/backend/support/queue/force-reassign/", {
+    request<AssignmentActionResponse>("/api/backend/support/queue/force-reassign", {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload),
     }),
 };

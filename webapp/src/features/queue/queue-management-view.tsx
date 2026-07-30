@@ -8,6 +8,8 @@ import {
   Label,
   ListBox,
   Modal,
+  Radio,
+  RadioGroup,
   Select,
   Tabs,
   TextField,
@@ -24,6 +26,8 @@ import {
 
 import { useApiQuery } from "@/src/hooks/use-api-query";
 import { ApiClientError, judahApi } from "@/src/lib/api/client";
+import { CAPABILITIES, hasCapability } from "@/src/lib/auth/access-policy";
+import { useSession } from "@/src/lib/auth/session-context";
 import {
   formatDateTime,
   formatSeconds,
@@ -47,11 +51,16 @@ const filterOptions: Array<[AssignedFilter, string]> = [
   ["open", "Abertos"],
   ["closed", "Fechados"],
 ];
+const PAGE_SIZE = 40;
 
 export function QueueManagementView() {
+  const { user } = useSession();
+  const canAssign = hasCapability(user, CAPABILITIES.assignmentsManage);
   const [tab, setTab] = useState("pending");
   const [search, setSearch] = useState("");
   const [assignedClosed, setAssignedClosed] = useState<AssignedFilter>("all");
+  const [pendingOffset, setPendingOffset] = useState(0);
+  const [assignedOffset, setAssignedOffset] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const deferredSearch = useDeferredValue(search);
 
@@ -61,24 +70,27 @@ export function QueueManagementView() {
   }, []);
 
   const pendingFetcher = useCallback(
-    () => judahApi.listPendingConversations({ limit: 40, offset: 0 }),
-    [],
+    (signal: AbortSignal) => judahApi.listPendingConversations(
+      { limit: PAGE_SIZE, offset: pendingOffset },
+      { signal },
+    ),
+    [pendingOffset],
   );
   const assignedFetcher = useCallback(
-    () =>
+    (signal: AbortSignal) =>
       judahApi.listAssignedConversations({
         closed:
           assignedClosed === "all"
             ? undefined
             : assignedClosed === "closed",
-        limit: 40,
-        offset: 0,
-      }),
-    [assignedClosed],
+        limit: PAGE_SIZE,
+        offset: assignedOffset,
+      }, { signal }),
+    [assignedClosed, assignedOffset],
   );
-  const healthFetcher = useCallback(() => judahApi.getQueueHealth(), []);
+  const healthFetcher = useCallback((signal: AbortSignal) => judahApi.getQueueHealth({ signal }), []);
   const agentsFetcher = useCallback(
-    () => judahApi.listAgents({ limit: 100, offset: 0 }),
+    (signal: AbortSignal) => judahApi.listAgents({ limit: 100, offset: 0 }, { signal }),
     [],
   );
 
@@ -111,10 +123,10 @@ export function QueueManagementView() {
   };
 
   const submitAssignment = async () => {
-    if (!draft || !selectedAgent) {
+    if (!draft || !selectedAgent || (draft.mode === "force" && !reason.trim())) {
       setActionFeedback({
         tone: "danger",
-        message: "Selecione um agente para concluir a operacao.",
+        message: "Selecione o agente e informe o motivo exigido para a operacao.",
       });
       return;
     }
@@ -232,23 +244,28 @@ export function QueueManagementView() {
             <p className="judah-mono text-[10px] uppercase tracking-[0.24em] text-[var(--muted)]">
               Filtro
             </p>
-            <div className="grid grid-cols-3 gap-1.5 rounded-[var(--field-radius)] border border-[var(--border)] bg-[var(--surface)]/50 p-1">
+            <RadioGroup
+              aria-label="Status dos atendimentos atribuidos"
+              orientation="horizontal"
+              value={assignedClosed}
+              onChange={(value) => {
+                setAssignedOffset(0);
+                setAssignedClosed(value as AssignedFilter);
+              }}
+              className="flex flex-wrap gap-3 rounded-[var(--field-radius)] border border-[var(--border)] bg-[var(--surface)]/50 px-3 py-2"
+            >
               {filterOptions.map(([value, label]) => (
-                <button
+                <Radio
                   key={value}
-                  type="button"
-                  onClick={() => setAssignedClosed(value)}
-                  className={cn(
-                    "judah-focus-ring rounded-[calc(var(--field-radius)-0.25rem)] px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] transition-all",
-                    assignedClosed === value
-                      ? "bg-[var(--accent)] text-[var(--accent-foreground)] shadow-[var(--field-shadow)]"
-                      : "text-[var(--muted)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]",
-                  )}
+                  value={value}
                 >
-                  {label}
-                </button>
+                  <Radio.Content>
+                    <Radio.Control><Radio.Indicator /></Radio.Control>
+                    <span className="text-xs font-medium uppercase tracking-[0.16em]">{label}</span>
+                  </Radio.Content>
+                </Radio>
               ))}
-            </div>
+            </RadioGroup>
           </div>
         </div>
 
@@ -343,7 +360,7 @@ export function QueueManagementView() {
                             1000,
                         )}
                       </p>
-                      <Button
+                      {canAssign ? <Button
                         size="sm"
                         variant="tertiary"
                         onPress={() =>
@@ -352,11 +369,21 @@ export function QueueManagementView() {
                       >
                         <UserCheck className="size-3.5" />
                         Atribuir
-                      </Button>
+                      </Button> : null}
                     </div>
                   </div>
                 ))}
               </div>
+              {pending.data ? (
+                <PaginationControls
+                  count={pending.data.count}
+                  offset={pendingOffset}
+                  pageSize={PAGE_SIZE}
+                  hasNext={pending.data.next !== null}
+                  hasPrevious={pending.data.previous !== null}
+                  onPageChange={setPendingOffset}
+                />
+              ) : null}
             </Card>
           )}
         </Tabs.Panel>
@@ -428,7 +455,7 @@ export function QueueManagementView() {
                         />
                         {item.closed_at ? "fechado" : "ativo"}
                       </span>
-                      {!item.closed_at ? (
+                      {!item.closed_at && canAssign ? (
                         <Button
                           size="sm"
                           variant="tertiary"
@@ -444,6 +471,16 @@ export function QueueManagementView() {
                   </div>
                 ))}
               </div>
+              {assigned.data ? (
+                <PaginationControls
+                  count={assigned.data.count}
+                  offset={assignedOffset}
+                  pageSize={PAGE_SIZE}
+                  hasNext={assigned.data.next !== null}
+                  hasPrevious={assigned.data.previous !== null}
+                  onPageChange={setAssignedOffset}
+                />
+              ) : null}
             </Card>
           )}
         </Tabs.Panel>
@@ -579,7 +616,7 @@ export function QueueManagementView() {
                 {draft?.mode === "force" ? (
                   <TextField name="reason" value={reason} onChange={setReason} fullWidth>
                     <Label className="judah-mono text-[10px] uppercase tracking-[0.24em] text-[var(--muted)]">
-                      Motivo (opcional)
+                      Motivo obrigatorio
                     </Label>
                     <Input
                       variant="secondary"
@@ -604,6 +641,7 @@ export function QueueManagementView() {
                 </Button>
                 <Button
                   isPending={isSubmittingAction}
+                  isDisabled={!selectedAgent || (draft?.mode === "force" && reason.trim().length === 0)}
                   onPress={() => void submitAssignment()}
                 >
                   Confirmar
@@ -614,6 +652,54 @@ export function QueueManagementView() {
         </Modal.Backdrop>
       </Modal>
     </section>
+  );
+}
+
+function PaginationControls({
+  count,
+  hasNext,
+  hasPrevious,
+  offset,
+  onPageChange,
+  pageSize,
+}: {
+  count: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  offset: number;
+  onPageChange: (offset: number) => void;
+  pageSize: number;
+}) {
+  const first = count === 0 ? 0 : offset + 1;
+  const last = Math.min(offset + pageSize, count);
+  return (
+    <nav
+      aria-label="Paginacao dos atendimentos"
+      className="flex flex-col gap-3 border-t border-[var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <p className="text-sm text-[var(--muted)]" aria-live="polite">
+        Mostrando <span className="text-[var(--foreground)]">{first}-{last}</span> de{" "}
+        <span className="text-[var(--foreground)]">{count}</span>
+      </p>
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          variant="tertiary"
+          isDisabled={!hasPrevious}
+          onPress={() => onPageChange(Math.max(0, offset - pageSize))}
+        >
+          Anterior
+        </Button>
+        <Button
+          size="sm"
+          variant="tertiary"
+          isDisabled={!hasNext}
+          onPress={() => onPageChange(offset + pageSize)}
+        >
+          Proxima
+        </Button>
+      </div>
+    </nav>
   );
 }
 

@@ -877,6 +877,50 @@ class SpecialSchedule(models.Model):
         return f"SpecialSchedule {self.date} — {self.start_hour}h-{self.end_hour}h ({self.reason})"
 
 
+class AdministrativeActionAudit(models.Model):
+    """Append-only audit record for human administrative support actions."""
+
+    class Status(models.TextChoices):
+        STARTED = "started", "Started"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor_id = models.CharField(max_length=64)
+    actor_role = models.CharField(max_length=32)
+    action = models.CharField(max_length=96)
+    target_type = models.CharField(max_length=64)
+    target_id = models.CharField(max_length=255, blank=True)
+    reason = models.CharField(max_length=255)
+    correlation_id = models.CharField(max_length=64, db_index=True)
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    request_fingerprint = models.CharField(max_length=64)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.STARTED)
+    http_status = models.PositiveSmallIntegerField(null=True, blank=True)
+    response_payload = models.JSONField(null=True, blank=True)
+    error_code = models.CharField(max_length=128, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "support_administrative_action_audits"
+        ordering = ["-created_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=("action", "idempotency_key"),
+                condition=models.Q(idempotency_key__isnull=False),
+                name="support_admin_audit_action_idempotency_uniq",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=("action", "created_at"), name="sup_adm_action_created_idx"),
+            models.Index(fields=("actor_id", "created_at"), name="sup_adm_actor_created_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.action} by {self.actor_id}: {self.status}"
+
+
 class AgentDailyTimeLog(models.Model):
     """Daily accumulated online/away time per agent.
 

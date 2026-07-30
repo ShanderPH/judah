@@ -65,6 +65,7 @@ router = Router()
 
 @router.get("/agents/", response=list[AgentResponse], summary="List agents")
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_agents(
     request,
     status: str | None = None,
@@ -85,6 +86,7 @@ def list_agents(
 
 
 @router.get("/agents/{agent_id}", response=AgentResponse, summary="Retrieve a single agent")
+@require_manager_or_admin
 def retrieve_agent(request, agent_id: str) -> Agent:
     """Return a single agent by primary key."""
     try:
@@ -230,6 +232,7 @@ def reactivate_agent(request, agent_id: str) -> Agent:
     summary="Per-agent aggregated metrics",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_agent_metrics(request, agent_id: str) -> list[AgentMetrics]:
     """Return historical metric snapshots for a specific agent."""
     try:
@@ -246,6 +249,7 @@ def list_agent_metrics(request, agent_id: str) -> list[AgentMetrics]:
     summary="List agent metric snapshots across the org",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_all_agent_metrics(
     request,
     days: int = 30,
@@ -260,6 +264,7 @@ def list_all_agent_metrics(
     response=AgentMetricsSummary,
     summary="High-level aggregation of agent metrics",
 )
+@require_manager_or_admin
 def agent_metrics_summary(request, days: int = 30) -> dict:
     """Aggregate the most recent snapshots into a single dashboard payload."""
     cutoff = timezone.now() - timedelta(days=min(days, 365))
@@ -293,6 +298,7 @@ def agent_metrics_summary(request, days: int = 30) -> dict:
     summary="Daily online/away time per agent",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_agent_time_logs(request, agent_id: str, days: int = 30) -> list[AgentDailyTimeLog]:
     """Return daily SAT counters for an agent within the last ``days`` days."""
     try:
@@ -310,6 +316,7 @@ def list_agent_time_logs(request, agent_id: str, days: int = 30) -> list[AgentDa
     summary="Daily time logs across all agents",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_time_logs(request, days: int = 7) -> list[AgentDailyTimeLog]:
     """Return daily SAT counters across all agents in the window."""
     cutoff = timezone.localdate() - timedelta(days=min(days, 90))
@@ -322,6 +329,7 @@ def list_time_logs(request, days: int = 7) -> list[AgentDailyTimeLog]:
     summary="List ticket reassignment events",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_reassignments(
     request,
     agent_owner_id: int | None = None,
@@ -340,6 +348,7 @@ def list_reassignments(
     response=list[ReassignmentSummary],
     summary="Net reassignment counts by agent",
 )
+@require_manager_or_admin
 def reassignments_summary(request, days: int = 30) -> list[dict]:
     """Aggregate transfers in/out by agent over the window."""
     cutoff = timezone.now() - timedelta(days=min(days, 365))

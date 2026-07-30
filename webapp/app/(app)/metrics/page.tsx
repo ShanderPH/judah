@@ -1,5 +1,6 @@
 import { MetricsOverview } from "@/src/features/metrics/metrics-overview";
+import { getMetricsSnapshot } from "@/src/lib/api/server-dal";
 
-export default function MetricsPage() {
-  return <MetricsOverview />;
+export default async function MetricsPage() {
+  return <MetricsOverview initialData={await getMetricsSnapshot()} />;
 }

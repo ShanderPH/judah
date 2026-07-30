@@ -1,9 +1,10 @@
 "use client";
 
 import { Card } from "@heroui/react";
-import gsap from "gsap";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
 interface MetricCardProps {
   icon: LucideIcon;
@@ -28,75 +29,109 @@ export function MetricCard({
   detail,
   tone = "default",
 }: MetricCardProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const valueRef = useRef<HTMLParagraphElement | null>(null);
 
-  useEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    if (window.matchMedia("(hover: none)").matches) return;
+  useGSAP(
+    (_, contextSafe) => {
+      if (!contextSafe) return;
+      const root = rootRef.current;
+      if (!root) return;
+      const media = gsap.matchMedia();
 
-    const setX = gsap.quickTo(node, "--rx", { duration: 0.4, ease: "power3.out" });
-    const setY = gsap.quickTo(node, "--ry", { duration: 0.4, ease: "power3.out" });
-    const setLift = gsap.quickTo(node, "y", { duration: 0.4, ease: "power3.out" });
+      media.add(
+        {
+          allowMotion: "(prefers-reduced-motion: no-preference)",
+          finePointer: "(hover: hover) and (pointer: fine)",
+        },
+        (context) => {
+          if (!context.conditions?.allowMotion || !context.conditions.finePointer) return;
+          const rotateX = gsap.quickTo(root, "rotationX", {
+            duration: MOTION.duration.base,
+            ease: MOTION.ease.enter,
+          });
+          const rotateY = gsap.quickTo(root, "rotationY", {
+            duration: MOTION.duration.base,
+            ease: MOTION.ease.enter,
+          });
+          const lift = gsap.quickTo(root, "y", {
+            duration: MOTION.duration.base,
+            ease: MOTION.ease.enter,
+          });
 
-    const handleMove = (event: MouseEvent) => {
-      const rect = node.getBoundingClientRect();
-      const offsetX = ((event.clientX - rect.left) / rect.width - 0.5) * 8;
-      const offsetY = ((event.clientY - rect.top) / rect.height - 0.5) * -8;
-      setX(offsetX);
-      setY(offsetY);
-      setLift(-4);
-    };
-    const handleLeave = () => {
-      setX(0);
-      setY(0);
-      setLift(0);
-    };
-    node.addEventListener("mousemove", handleMove);
-    node.addEventListener("mouseleave", handleLeave);
-    return () => {
-      node.removeEventListener("mousemove", handleMove);
-      node.removeEventListener("mouseleave", handleLeave);
-    };
-  }, []);
+          gsap.set(root, { transformPerspective: 900, transformStyle: "preserve-3d" });
+          const onMove = contextSafe((event: PointerEvent) => {
+            const rect = root.getBoundingClientRect();
+            rotateX(((event.clientY - rect.top) / rect.height - 0.5) * -5);
+            rotateY(((event.clientX - rect.left) / rect.width - 0.5) * 7);
+            lift(-4);
+          });
+          const onLeave = contextSafe(() => {
+            rotateX(0);
+            rotateY(0);
+            lift(0);
+          });
 
-  useEffect(() => {
-    if (!valueRef.current) return;
-    const numericMatch = value.replace(/[^\d.,-]/g, "").replace(",", ".");
-    const target = Number(numericMatch);
-    if (!Number.isFinite(target) || target === 0) return;
-    const obj = { v: 0 };
-    const prefix = value.match(/^[^\d-]+/)?.[0] ?? "";
-    const suffix = value.match(/[^\d.,]+$/)?.[0] ?? "";
-    const tween = gsap.to(obj, {
-      v: target,
-      duration: 1.1,
-      ease: "power3.out",
-      onUpdate: () => {
-        if (!valueRef.current) return;
-        const formatted = Math.round(obj.v).toString();
-        valueRef.current.textContent = `${prefix}${formatted}${suffix}`;
-      },
-    });
-    return () => {
-      tween.kill();
-    };
-  }, [value]);
+          root.addEventListener("pointermove", onMove);
+          root.addEventListener("pointerleave", onLeave);
+          return () => {
+            root.removeEventListener("pointermove", onMove);
+            root.removeEventListener("pointerleave", onLeave);
+          };
+        },
+      );
+
+      return () => media.revert();
+    },
+    { scope: rootRef },
+  );
+
+  useGSAP(
+    () => {
+      const node = valueRef.current;
+      if (!node) return;
+      const numeric = value.match(/-?[\d.,]+/)?.[0];
+      if (!numeric || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        node.textContent = value;
+        return;
+      }
+      const usesDecimalComma = numeric.includes(",");
+      const usesGroupedThousands = !usesDecimalComma && /^-?\d{1,3}(?:\.\d{3})+$/.test(numeric);
+      const normalized = usesDecimalComma
+        ? numeric.replace(/\./g, "").replace(",", ".")
+        : usesGroupedThousands
+          ? numeric.replace(/\./g, "")
+          : numeric;
+      const decimalPlaces = usesDecimalComma
+        ? (numeric.split(",")[1]?.length ?? 0)
+        : usesGroupedThousands
+          ? 0
+          : (numeric.split(".")[1]?.length ?? 0);
+      const target = Number(normalized);
+      if (!Number.isFinite(target)) return;
+      const prefix = value.slice(0, value.indexOf(numeric));
+      const suffix = value.slice(value.indexOf(numeric) + numeric.length);
+      const counter = { current: 0 };
+      const formatter = new Intl.NumberFormat("pt-BR", {
+        minimumFractionDigits: decimalPlaces,
+        maximumFractionDigits: decimalPlaces,
+      });
+      gsap.to(counter, {
+        current: target,
+        duration: 0.9,
+        ease: MOTION.ease.enter,
+        onUpdate: () => {
+          node.textContent = `${prefix}${formatter.format(counter.current)}${suffix}`;
+        },
+      });
+    },
+    { dependencies: [value], revertOnUpdate: true, scope: rootRef },
+  );
 
   return (
     <div
-      ref={ref}
-      className="group relative preserve-3d"
-      style={
-        {
-          ["--rx" as string]: "0deg",
-          ["--ry" as string]: "0deg",
-          transform: "translate3d(0,0,0) rotateX(var(--ry)) rotateY(var(--rx))",
-          transformStyle: "preserve-3d",
-        } as React.CSSProperties
-      }
+      ref={rootRef}
+      className="group relative"
     >
       <div
         aria-hidden
@@ -115,10 +150,7 @@ export function MetricCard({
           </span>
         </div>
         <div className="space-y-1.5">
-          <p
-            ref={valueRef}
-            className="text-balance text-3xl font-semibold tracking-tight md:text-4xl"
-          >
+          <p ref={valueRef} className="text-balance text-3xl font-semibold tracking-tight md:text-4xl">
             {value}
           </p>
           <p className="text-sm leading-snug text-[var(--muted)]">{detail}</p>

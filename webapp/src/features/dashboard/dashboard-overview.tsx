@@ -11,6 +11,7 @@ import {
 
 import { useApiQuery } from "@/src/hooks/use-api-query";
 import { loadDashboardOverview } from "@/src/lib/api/overview";
+import type { DashboardOverviewData } from "@/src/lib/api/overview-loaders";
 import {
   formatDateTime,
   formatInteger,
@@ -19,13 +20,13 @@ import {
   formatSeconds,
   safeNumber,
 } from "@/src/lib/utils/format";
-import { DataState } from "@/src/components/ui/data-state";
+import { DataState, DegradedNotice } from "@/src/components/ui/data-state";
 import { MetricCard } from "@/src/components/ui/metric-card";
 import { PageIntro } from "@/src/components/ui/page-intro";
 import { SimpleBarChart } from "@/src/components/ui/simple-chart";
 
-export function DashboardOverview() {
-  const overview = useApiQuery(loadDashboardOverview);
+export function DashboardOverview({ initialData }: { initialData: DashboardOverviewData }) {
+  const overview = useApiQuery(loadDashboardOverview, initialData);
 
   if (overview.isLoading && !overview.data) return <DataState isLoading />;
   if (overview.error && !overview.data)
@@ -49,6 +50,7 @@ export function DashboardOverview() {
         title="Estado operacional do Judah em tempo real."
         description="Combina health check, snapshot da fila automatica, saude da distribuicao e relatorios diarios. Onde o backend nao publica granularidade suficiente, a interface deixa explicito."
       />
+      <DegradedNotice services={data.degradedServices} />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 xl:grid-cols-4">
         <MetricCard

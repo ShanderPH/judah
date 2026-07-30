@@ -64,14 +64,15 @@ CSRF_COOKIE_SECURE = True
 X_FRAME_OPTIONS = "DENY"
 
 # --- Database ---
-# Supabase Supavisor transaction-mode pooler (port 6543) does not support
-# persistent connections — CONN_MAX_AGE must be 0.
-# Direct connection or session-mode pooler (port 5432) can safely reuse
-# connections; we default to 60 s there.
+# The API runs under ASGI in every deployed profile. Django persistent
+# connections stay disabled regardless of whether the URL uses port 5432 or
+# the Supavisor transaction pooler on 6543; pooling belongs outside Django.
 
 if "default" in DATABASES:
-    _db_port = str(DATABASES["default"].get("PORT") or "5432")
-    DATABASES["default"]["CONN_MAX_AGE"] = 0 if _db_port == "6543" else 60
+    # The API is ASGI in every deployed profile. Keeping Django connections
+    # alive here can retain one connection per execution context and exhaust
+    # the database pool during dashboard fan-out.
+    DATABASES["default"]["CONN_MAX_AGE"] = 0
     DATABASES["default"].setdefault("OPTIONS", {})
     DATABASES["default"]["OPTIONS"].setdefault("connect_timeout", 10)
     _runtime_environment = (

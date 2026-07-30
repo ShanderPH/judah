@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING
 
 import structlog
 from ninja import Router
+from ninja_jwt.schema import TokenRefreshOutputSchema
 from ninja_jwt.tokens import RefreshToken
 
 from apps.auth_user.schemas import (
     ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
+    RefreshRequest,
     RegisterRequest,
     TokenResponse,
     UpdateProfileRequest,
@@ -25,6 +27,7 @@ from apps.auth_user.services import (
     update_profile,
 )
 from common.exceptions import CircuitOpenError, JudahError, UnauthorizedError
+from common.permissions import require_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -76,13 +79,15 @@ def login(request, payload: LoginRequest) -> TokenResponse:
 
 
 @router.post("/refresh", response=TokenResponse, auth=None, summary="Refresh access token")
-def refresh_token(request, refresh: str) -> TokenResponse:
-    """Exchange a valid refresh token for a new access token."""
+def refresh_token(request, payload: RefreshRequest) -> TokenResponse:
+    """Rotate a valid refresh token supplied only in the JSON body."""
     try:
-        token = RefreshToken(refresh)
+        rotated = TokenRefreshOutputSchema.model_validate({"refresh": payload.refresh})
+        if not rotated.access:
+            raise ValueError("Refresh did not produce an access token.")
         return TokenResponse(
-            access=str(token.access_token),
-            refresh=str(token),
+            access=rotated.access,
+            refresh=rotated.refresh,
         )
     except Exception as exc:
         raise UnauthorizedError("Invalid or expired refresh token.") from exc
@@ -125,6 +130,7 @@ def change_my_password(request, payload: ChangePasswordRequest) -> tuple[int, No
 
 
 @router.get("/{user_id}", response=UserResponse, summary="Get user by ID")
+@require_admin
 def get_user(request, user_id: int) -> User:
-    """Fetch a user by their primary key. Requires authentication."""
+    """Fetch a user by primary key for an authenticated administrator."""
     return get_user_by_id(user_id)

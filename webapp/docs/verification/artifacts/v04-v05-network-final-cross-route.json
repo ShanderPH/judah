@@ -1,0 +1,96 @@
+[
+  {
+    "url": "http://127.0.0.1:3000/dashboard",
+    "mainHeadings": [
+      "Dashboard",
+      "Estado operacional do Judah em tempo real."
+    ],
+    "rsc": [],
+    "rscNormalizedCounts": {},
+    "rscDuplicates": [],
+    "api": [
+      "http://127.0.0.1:3000/api/backend/health",
+      "http://127.0.0.1:3000/api/backend/support/queue/status",
+      "http://127.0.0.1:3000/api/backend/support/business-hours"
+    ],
+    "apiDuplicates": [],
+    "console": []
+  },
+  {
+    "url": "http://127.0.0.1:3000/agents",
+    "mainHeadings": [
+      "Agentes",
+      "Cadastro completo da equipe N1, capacidade e regras."
+    ],
+    "rsc": [],
+    "rscNormalizedCounts": {},
+    "rscDuplicates": [],
+    "api": [
+      "http://127.0.0.1:3000/api/backend/health",
+      "http://127.0.0.1:3000/api/backend/support/queue/status",
+      "http://127.0.0.1:3000/api/backend/support/business-hours"
+    ],
+    "apiDuplicates": [],
+    "console": []
+  },
+  {
+    "url": "http://127.0.0.1:3000/metrics",
+    "mainHeadings": [
+      "Metricas",
+      "Metricas reais de fila, agentes e analytics."
+    ],
+    "rsc": [],
+    "rscNormalizedCounts": {},
+    "rscDuplicates": [],
+    "api": [
+      "http://127.0.0.1:3000/api/backend/health",
+      "http://127.0.0.1:3000/api/backend/support/queue/status",
+      "http://127.0.0.1:3000/api/backend/support/business-hours"
+    ],
+    "apiDuplicates": [],
+    "console": []
+  },
+  {
+    "url": "http://127.0.0.1:3000/auto-assignment",
+    "mainHeadings": [
+      "Autoatribuicao",
+      "Observabilidade da autoatribuicao em produção."
+    ],
+    "rsc": [],
+    "rscNormalizedCounts": {},
+    "rscDuplicates": [],
+    "api": [
+      "http://127.0.0.1:3000/api/backend/health",
+      "http://127.0.0.1:3000/api/backend/support/queue/status",
+      "http://127.0.0.1:3000/api/backend/support/business-hours"
+    ],
+    "apiDuplicates": [],
+    "console": []
+  },
+  {
+    "url": "http://127.0.0.1:3000/queue",
+    "mainHeadings": [
+      "Fila",
+      "Gerenciamento visual da fila com diagnostico em tempo real."
+    ],
+    "rsc": [],
+    "rscNormalizedCounts": {},
+    "rscDuplicates": [],
+    "api": [
+      "http://127.0.0.1:3000/api/backend/health",
+      "http://127.0.0.1:3000/api/backend/support/queue/status",
+      "http://127.0.0.1:3000/api/backend/support/business-hours",
+      "http://127.0.0.1:3000/api/backend/support/queue/pending?limit=40&offset=0",
+      "http://127.0.0.1:3000/api/backend/support/queue/assigned?limit=40&offset=0",
+      "http://127.0.0.1:3000/api/backend/support/queue/health",
+      "http://127.0.0.1:3000/api/backend/support/agents?limit=100&offset=0"
+    ],
+    "apiDuplicates": [],
+    "console": [
+      {
+        "type": "error",
+        "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)"
+      }
+    ]
+  }
+]

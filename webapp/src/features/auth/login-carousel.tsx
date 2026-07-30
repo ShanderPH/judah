@@ -1,8 +1,9 @@
 "use client";
 
-import gsap from "gsap";
 import { Activity, Layers, Sparkles, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
 interface Slide {
   eyebrow: string;
@@ -41,69 +42,91 @@ const slides: Slide[] = [
 
 export function LoginCarousel() {
   const [active, setActive] = useState(0);
-  const slidesRef = useRef<HTMLDivElement | null>(null);
-  const phrasesRef = useRef<HTMLDivElement | null>(null);
+  const [isAutoPlaying, setIsAutoPlaying] = useState(true);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (!isAutoPlaying || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
     const id = window.setInterval(() => {
       setActive((current) => (current + 1) % slides.length);
     }, 6500);
     return () => window.clearInterval(id);
-  }, []);
+  }, [isAutoPlaying]);
 
-  useEffect(() => {
-    if (!slidesRef.current) return;
-    const ctx = gsap.context(() => {
-      gsap.to("[data-slide]", {
-        autoAlpha: 0,
-        duration: 0.8,
-        ease: "power2.out",
+  useGSAP(
+    () => {
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        const slides = gsap.utils.toArray<HTMLElement>("[data-slide]");
+        const selected = slides.find((slide) => slide.dataset.slide === String(active));
+        gsap.to(slides, {
+          autoAlpha: 0,
+          duration: MOTION.duration.base,
+          ease: MOTION.ease.exit,
+          overwrite: "auto",
+        });
+        if (selected) {
+          gsap.to(selected, {
+            autoAlpha: 1,
+            duration: MOTION.duration.slow,
+            ease: MOTION.ease.enter,
+            overwrite: "auto",
+          });
+          gsap.fromTo(
+            selected.querySelector("[data-carousel-pan]"),
+            { scale: 1.015, xPercent: -1.5, yPercent: -0.5 },
+            {
+              scale: 1.08,
+              xPercent: 1.5,
+              yPercent: 0.5,
+              duration: 8,
+              ease: "sine.inOut",
+            },
+          );
+        }
+        gsap.from("[data-phrase-block]", {
+          autoAlpha: 0,
+          y: 22,
+          duration: MOTION.duration.slow,
+          stagger: 0.09,
+          ease: MOTION.ease.enter,
+          clearProps: "transform,opacity,visibility,willChange",
+          willChange: "transform,opacity",
+        });
+        gsap.to("[data-slide-indicator]", {
+          width: 10,
+          duration: MOTION.duration.base,
+          ease: MOTION.ease.enter,
+        });
+        gsap.to(`[data-slide-indicator="${active}"]`, {
+          width: 28,
+          duration: MOTION.duration.base,
+          ease: MOTION.ease.enter,
+        });
       });
-      gsap.to(`[data-slide="${active}"]`, {
-        autoAlpha: 1,
-        duration: 1.2,
-        ease: "power3.out",
-      });
-    }, slidesRef);
-    return () => ctx.revert();
-  }, [active]);
-
-  useEffect(() => {
-    if (!phrasesRef.current) return;
-    const ctx = gsap.context(() => {
-      gsap.from("[data-phrase-block]", {
-        autoAlpha: 0,
-        y: 22,
-        duration: 0.7,
-        stagger: 0.1,
-        ease: "power3.out",
-        clearProps: "all",
-      });
-    }, phrasesRef);
-    const safety = window.setTimeout(() => {
-      gsap.set("[data-phrase-block]", { autoAlpha: 1, y: 0, clearProps: "all" });
-    }, 1500);
-    return () => {
-      window.clearTimeout(safety);
-      ctx.revert();
-    };
-  }, [active]);
+      return () => media.revert();
+    },
+    { dependencies: [active], revertOnUpdate: true, scope: rootRef },
+  );
 
   const current = slides[active];
   const Icon = current.icon;
 
   return (
-    <div className="judah-glass-strong relative isolate flex h-full min-h-[460px] flex-col justify-between overflow-hidden rounded-[var(--radius-xl)] p-6 md:p-10">
-      <div ref={slidesRef} className="absolute inset-0 -z-10">
+    <div ref={rootRef} className="judah-glass-strong relative isolate flex h-full min-h-[460px] flex-col justify-between overflow-hidden rounded-[var(--radius-xl)] p-6 md:p-10">
+      <div className="absolute inset-0 -z-10">
         {slides.map((slide, idx) => (
           <div
             key={slide.eyebrow}
             data-slide={idx}
             style={{ opacity: idx === active ? 1 : 0 }}
-            className="absolute inset-0"
+            className="absolute inset-0 transition-opacity duration-700 motion-reduce:transition-none"
           >
             <div
-              className="absolute inset-0 animate-carousel-pan"
+              data-carousel-pan
+              className="absolute inset-0"
               style={{
                 background: `radial-gradient(ellipse 70% 60% at 18% 24%, ${slide.palette.from}38, transparent 65%), radial-gradient(ellipse 55% 50% at 82% 70%, ${slide.palette.to}3a, transparent 65%), linear-gradient(135deg, ${slide.palette.from}1a, ${slide.palette.via}1f 50%, ${slide.palette.to}1c)`,
               }}
@@ -187,20 +210,31 @@ export function LoginCarousel() {
             <button
               key={slide.eyebrow}
               type="button"
-              onClick={() => setActive(idx)}
-              aria-label={`Slide ${idx + 1}`}
-              className="judah-focus-ring h-1.5 rounded-full bg-[var(--ink-300)] transition-all duration-500"
-              style={{
-                width: idx === active ? 28 : 10,
-                background:
-                  idx === active ? "var(--accent)" : "color-mix(in srgb, var(--ink-300) 80%, transparent)",
+              data-slide-trigger={idx}
+              onClick={() => {
+                setIsAutoPlaying(false);
+                setActive(idx);
               }}
-            />
+              aria-label={`Slide ${idx + 1}`}
+              aria-pressed={idx === active}
+              className="judah-focus-ring grid size-8 place-items-center rounded-full"
+            >
+              <span
+                aria-hidden
+                data-slide-indicator={idx}
+                className="h-1.5 rounded-full"
+                style={{
+                  width: idx === active ? 28 : 10,
+                  background:
+                    idx === active ? "var(--accent)" : "color-mix(in srgb, var(--ink-300) 80%, transparent)",
+                }}
+              />
+            </button>
           ))}
         </div>
       </header>
 
-      <div ref={phrasesRef} key={active} className="relative max-w-2xl space-y-5">
+      <div key={active} className="relative max-w-2xl space-y-5">
         <div data-phrase-block className="flex items-center gap-3">
           <span className="grid size-12 place-items-center rounded-2xl bg-[var(--surface)]/80 text-[var(--accent)] shadow-[var(--shadow-glow)] backdrop-blur">
             <Icon className="size-5" strokeWidth={1.8} />

@@ -1,7 +1,8 @@
 "use client";
 
-import gsap from "gsap";
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+
+import { gsap, MOTION, useGSAP } from "@/src/lib/motion/use-gsap";
 
 interface PageIntroProps {
   eyebrow: string;
@@ -13,26 +14,37 @@ interface PageIntroProps {
 export function PageIntro({ eyebrow, title, description, action }: PageIntroProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (!rootRef.current) return;
-    const ctx = gsap.context(() => {
-      gsap.from("[data-intro-item]", {
-        autoAlpha: 0,
-        y: 24,
-        duration: 0.65,
-        ease: "power3.out",
-        stagger: 0.08,
-        clearProps: "transform,opacity",
+  useGSAP(
+    () => {
+      const media = gsap.matchMedia();
+      media.add("(prefers-reduced-motion: no-preference)", () => {
+        const timeline = gsap.timeline();
+        timeline
+          .from("[data-intro-item]", {
+            autoAlpha: 0,
+            y: 24,
+            duration: MOTION.duration.slow,
+            ease: MOTION.ease.enter,
+            stagger: 0.08,
+            clearProps: "transform,opacity,visibility,willChange",
+            willChange: "transform,opacity",
+          })
+          .from(
+            "[data-intro-glow]",
+            {
+              autoAlpha: 0,
+              scale: 0.7,
+              duration: 1.1,
+              ease: MOTION.ease.enter,
+              clearProps: "transform,opacity,visibility,willChange",
+            },
+            0,
+          );
       });
-    }, rootRef);
-    const safety = window.setTimeout(() => {
-      gsap.set("[data-intro-item]", { autoAlpha: 1, y: 0, clearProps: "all" });
-    }, 1200);
-    return () => {
-      window.clearTimeout(safety);
-      ctx.revert();
-    };
-  }, []);
+      return () => media.revert();
+    },
+    { scope: rootRef },
+  );
 
   return (
     <div
@@ -41,6 +53,7 @@ export function PageIntro({ eyebrow, title, description, action }: PageIntroProp
     >
       <div
         aria-hidden
+        data-intro-glow
         className="pointer-events-none absolute -top-24 -right-24 size-72 rounded-full bg-[var(--accent)] opacity-25 blur-3xl animate-pulse-slow"
       />
       <div className="relative flex flex-col gap-5 md:flex-row md:items-end md:justify-between">

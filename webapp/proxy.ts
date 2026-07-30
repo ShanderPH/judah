@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { AUTH_COOKIE_NAMES } from "@/src/lib/auth/constants";
 
-const protectedPrefixes = ["/dashboard", "/queue", "/auto-assignment", "/metrics", "/sandbox-chat"];
+const protectedPrefixes = ["/dashboard", "/queue", "/auto-assignment", "/agents", "/metrics", "/sandbox-chat"];
 
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
@@ -27,7 +27,9 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
-  return NextResponse.next();
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-judah-pathname", pathname);
+  return NextResponse.next({ request: { headers: requestHeaders } });
 }
 
 export const config = {

@@ -81,39 +81,39 @@
   --color-error: #e31d1c;
   --color-info: #0693e3;
 
-  --background: #f7f7f5;
-  --foreground: #1a1a1a;
+  --background: oklch(0.976 0.003 106);
+  --foreground: oklch(0.21 0 0);
 
-  --surface: #ffffff;
-  --surface-foreground: #1a1a1a;
-  --surface-secondary: #ededea;
-  --surface-secondary-foreground: #1a1a1a;
-  --surface-tertiary: #f3f8e8;
-  --surface-tertiary-foreground: #1a1a1a;
+  --surface: oklch(1 0 0);
+  --surface-foreground: oklch(0.21 0 0);
+  --surface-secondary: oklch(0.943 0.004 106);
+  --surface-secondary-foreground: oklch(0.21 0 0);
+  --surface-tertiary: oklch(0.97 0.025 115);
+  --surface-tertiary-foreground: oklch(0.21 0 0);
 
   --overlay: rgb(255 255 255 / 0.78);
   --overlay-foreground: #1a1a1a;
 
-  --default: #ededea;
-  --default-foreground: #1a1a1a;
-  --muted: #7f8795;
+  --default: oklch(0.943 0.004 106);
+  --default-foreground: oklch(0.21 0 0);
+  --muted: oklch(0.49 0.025 255);
 
-  --accent: #90be42;
-  --accent-foreground: #0c1d05;
-  --success: #6eda2c;
-  --success-foreground: #0c1d05;
-  --warning: #f9e813;
-  --warning-foreground: #1a1a1a;
-  --danger: #e31d1c;
-  --danger-foreground: #ffffff;
-  --info: #0693e3;
-  --info-foreground: #ffffff;
+  --accent: oklch(0.46 0.12 124);
+  --accent-foreground: oklch(0.99 0 0);
+  --success: oklch(0.44 0.12 135);
+  --success-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.44 0.12 90);
+  --warning-foreground: oklch(0.99 0 0);
+  --danger: oklch(0.52 0.2 29);
+  --danger-foreground: oklch(1 0 0);
+  --info: oklch(0.63 0.17 242);
+  --info-foreground: oklch(1 0 0);
 
-  --border: #d9d9d9;
-  --separator: #ededea;
-  --focus: #90be42;
-  --link: #75a132;
-  --scrollbar: #c2c4c9;
+  --border: oklch(0.87 0 0);
+  --separator: oklch(0.943 0.004 106);
+  --focus: oklch(0.73 0.15 124);
+  --link: oklch(0.63 0.14 124);
+  --scrollbar: oklch(0.79 0.01 255);
 
   --field-background: #ffffff;
   --field-foreground: #1a1a1a;
@@ -140,32 +140,32 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --background: #0c0c0e;
-  --foreground: #f7f7f5;
+  --background: oklch(0.16 0.005 285);
+  --foreground: oklch(0.976 0.003 106);
 
-  --surface: #161618;
-  --surface-foreground: #f7f7f5;
-  --surface-secondary: #1d1d20;
-  --surface-secondary-foreground: #f7f7f5;
-  --surface-tertiary: #242427;
-  --surface-tertiary-foreground: #f7f7f5;
+  --surface: oklch(0.2 0.005 285);
+  --surface-foreground: oklch(0.976 0.003 106);
+  --surface-secondary: oklch(0.23 0.006 285);
+  --surface-secondary-foreground: oklch(0.976 0.003 106);
+  --surface-tertiary: oklch(0.26 0.006 285);
+  --surface-tertiary-foreground: oklch(0.976 0.003 106);
 
   --overlay: rgb(22 22 24 / 0.78);
   --overlay-foreground: #f7f7f5;
 
-  --default: #1d1d20;
-  --default-foreground: #f7f7f5;
-  --muted: #b6b9c1;
+  --default: oklch(0.23 0.006 285);
+  --default-foreground: oklch(0.976 0.003 106);
+  --muted: oklch(0.76 0.018 255);
 
-  --accent: #a3cf5e;
-  --accent-foreground: #0c1d05;
-  --warning: #f9e813;
-  --warning-foreground: #1a1a1a;
-  --danger: #ff4040;
+  --accent: oklch(0.79 0.14 124);
+  --accent-foreground: oklch(0.2 0.05 130);
+  --warning: oklch(0.92 0.19 103);
+  --warning-foreground: oklch(0.21 0 0);
+  --danger: oklch(0.65 0.23 29);
 
-  --border: #2a2a2d;
-  --separator: #1d1d20;
-  --scrollbar: #3a3a3f;
+  --border: oklch(0.29 0.006 285);
+  --separator: oklch(0.23 0.006 285);
+  --scrollbar: oklch(0.34 0.007 285);
 
   --field-background: #161618;
   --field-foreground: #f7f7f5;
@@ -216,18 +216,6 @@
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
-@keyframes grain {
-  0%, 100% { transform: translate(0, 0); }
-  10% { transform: translate(-3%, -2%); }
-  20% { transform: translate(-5%, 4%); }
-  30% { transform: translate(4%, -3%); }
-  40% { transform: translate(-2%, 5%); }
-  50% { transform: translate(-5%, 2%); }
-  60% { transform: translate(5%, -1%); }
-  70% { transform: translate(-2%, 3%); }
-  80% { transform: translate(2%, -4%); }
-  90% { transform: translate(-3%, 1%); }
-}
 @keyframes carousel-pan {
   0% { transform: scale(1.08) translate3d(0, 0, 0); }
   50% { transform: scale(1.14) translate3d(-2%, -2%, 0); }
@@ -244,7 +232,6 @@
 html {
   min-height: 100%;
   overflow-x: hidden;
-  scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -265,7 +252,6 @@ body {
     radial-gradient(ellipse 50% 45% at 92% 18%, rgb(249 232 19 / 0.22), transparent 65%),
     radial-gradient(ellipse 70% 60% at 50% 110%, rgb(110 218 44 / 0.2), transparent 70%),
     linear-gradient(160deg, #f7f7f5 0%, #f0f3e8 60%, #eaf3d8 100%);
-  background-attachment: fixed;
   background-repeat: no-repeat;
 }
 
@@ -312,28 +298,10 @@ a { color: inherit; text-decoration: none; }
     min-height: 100svh;
   }
 
-  .judah-grain::before {
-    content: "";
-    position: fixed;
-    inset: -120%;
-    z-index: 0;
-    pointer-events: none;
-    opacity: 0.5;
-    mix-blend-mode: soft-light;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    background-size: 240px 240px;
-    animation: grain 7s steps(8) infinite;
-  }
-
-  [data-theme="dark"] .judah-grain::before {
-    opacity: 0.35;
-    mix-blend-mode: overlay;
-  }
-
   .judah-glass {
     background: color-mix(in srgb, var(--surface) 72%, transparent);
-    backdrop-filter: blur(20px) saturate(150%);
-    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(10px) saturate(125%);
+    -webkit-backdrop-filter: blur(10px) saturate(125%);
     border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
     box-shadow: var(--surface-shadow);
   }
@@ -451,6 +419,5 @@ a { color: inherit; text-decoration: none; }
   .animate-pulse-slow { animation: pulse-slow 5s ease-in-out infinite; }
   .animate-drift-1 { animation: drift-1 14s ease-in-out infinite; }
   .animate-drift-2 { animation: drift-2 18s ease-in-out infinite; }
-  .animate-grain { animation: grain 7s steps(8) infinite; }
   .animate-carousel-pan { animation: carousel-pan 12s ease-in-out infinite; }
 }

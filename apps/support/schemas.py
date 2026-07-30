@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, Self
 from uuid import UUID
 
 from ninja import Field, Schema
+from pydantic import model_validator
 
 
 class QueueResponse(Schema):
@@ -294,10 +295,20 @@ class CreateSpecialScheduleRequest(Schema):
     """Request body for creating a special schedule."""
 
     date: date
-    schedule_type: str = "closed"
-    start_hour: int | None = None
-    end_hour: int | None = None
-    reason: str = ""
+    schedule_type: Literal["closed", "custom"] = "closed"
+    start_hour: int | None = Field(default=None, ge=0, le=23)
+    end_hour: int | None = Field(default=None, ge=1, le=24)
+    reason: str = Field(default="", max_length=255)
+
+    @model_validator(mode="after")
+    def validate_custom_hours(self) -> Self:
+        """Require an increasing hour range for custom schedules."""
+        if self.schedule_type == "custom":
+            if self.start_hour is None or self.end_hour is None:
+                raise ValueError("Custom schedules require start_hour and end_hour.")
+            if self.start_hour >= self.end_hour:
+                raise ValueError("start_hour must be earlier than end_hour.")
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Button, Card } from "@heroui/react";
+import { Alert, Button, Card, Modal, useOverlayState } from "@heroui/react";
 import {
   CalendarClock,
   CircleSlash2,
@@ -13,21 +13,27 @@ import { useState } from "react";
 
 import { useApiQuery } from "@/src/hooks/use-api-query";
 import { judahApi } from "@/src/lib/api/client";
+import { CAPABILITIES, hasCapability } from "@/src/lib/auth/access-policy";
+import { useSession } from "@/src/lib/auth/session-context";
 import { loadAutoAssignmentOverview } from "@/src/lib/api/overview";
+import type { AutoAssignmentOverviewData } from "@/src/lib/api/overview-loaders";
 import {
   formatDateTime,
   formatInteger,
   formatSeconds,
   safeNumber,
 } from "@/src/lib/utils/format";
-import { DataState } from "@/src/components/ui/data-state";
+import { DataState, DegradedNotice } from "@/src/components/ui/data-state";
 import { MetricCard } from "@/src/components/ui/metric-card";
 import { PageIntro } from "@/src/components/ui/page-intro";
 
-export function AutoAssignmentOverview() {
-  const overview = useApiQuery(loadAutoAssignmentOverview);
+export function AutoAssignmentOverview({ initialData }: { initialData: AutoAssignmentOverviewData }) {
+  const { user } = useSession();
+  const canSync = hasCapability(user, CAPABILITIES.queueSync);
+  const overview = useApiQuery(loadAutoAssignmentOverview, initialData);
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const syncConfirmation = useOverlayState();
 
   if (overview.isLoading && !overview.data) return <DataState isLoading />;
   if (overview.error && !overview.data)
@@ -45,6 +51,7 @@ export function AutoAssignmentOverview() {
       setSyncResult(
         `Sync executado: ${result.created} criados, ${result.skipped} ignorados, ${result.already_assigned} ja atribuidos.`,
       );
+      syncConfirmation.close();
       await overview.reload();
     } catch (error) {
       setSyncResult(
@@ -65,6 +72,7 @@ export function AutoAssignmentOverview() {
         title="Observabilidade da autoatribuicao em produção."
         description="Mostra disponibilidade, capacidade, balanceamento, horarios, calendarios especiais e historico de transferencias com auditoria completa."
       />
+      <DegradedNotice services={data.degradedServices} />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 xl:grid-cols-4">
         <MetricCard
@@ -109,10 +117,12 @@ export function AutoAssignmentOverview() {
                 Sincronizar tickets em NOVO
               </Card.Title>
             </Card.Header>
-            <Button isPending={isSyncing} onPress={() => void syncNovo()}>
-              <RefreshCcw className="size-4" />
-              Sync NOVO
-            </Button>
+            {canSync ? (
+              <Button isPending={isSyncing} onPress={syncConfirmation.open}>
+                <RefreshCcw className="size-4" />
+                Sync NOVO
+              </Button>
+            ) : null}
           </div>
           <Card.Description className="text-sm leading-relaxed">
             Acao administrativa real exposta pela API. Backfill dos tickets em
@@ -285,6 +295,34 @@ export function AutoAssignmentOverview() {
           </div>
         </Card>
       </div>
+
+      <Modal state={syncConfirmation}>
+        <Modal.Backdrop>
+          <Modal.Container size="md" placement="center">
+            <Modal.Dialog>
+              <Modal.Header>
+                <Modal.Heading>Confirmar sincronizacao de NOVO</Modal.Heading>
+              </Modal.Header>
+              <Modal.Body className="space-y-3 text-sm">
+                <p><strong>Alvo:</strong> tickets atualmente no estágio NOVO do Helpdesk.</p>
+                <p><strong>Efeito:</strong> busca os tickets e os encaminha ao fluxo normal de processamento e atribuicao.</p>
+                <p><strong>Motivo auditado:</strong> sincronizacao administrativa manual (`manual_sync_novo`).</p>
+                <Alert status="warning">
+                  <Alert.Indicator />
+                  <Alert.Content>
+                    <Alert.Title>Acao externa sensivel</Alert.Title>
+                    <Alert.Description>Nao feche a pagina ate o resultado ser conhecido. A operacao nao sera repetida automaticamente.</Alert.Description>
+                  </Alert.Content>
+                </Alert>
+              </Modal.Body>
+              <Modal.Footer className="flex justify-end gap-2">
+                <Button variant="tertiary" onPress={syncConfirmation.close}>Cancelar</Button>
+                <Button isPending={isSyncing} onPress={() => void syncNovo()}>Confirmar sync</Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
     </section>
   );
 }

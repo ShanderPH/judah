@@ -15,7 +15,10 @@ import { useCallback, useMemo, useState } from "react";
 import { AgentForm } from "@/src/features/agents/agent-form";
 import { useApiQuery } from "@/src/hooks/use-api-query";
 import { ApiClientError, judahApi } from "@/src/lib/api/client";
+import { CAPABILITIES, hasCapability } from "@/src/lib/auth/access-policy";
+import { useSession } from "@/src/lib/auth/session-context";
 import { loadAgentsAdminOverview } from "@/src/lib/api/overview";
+import type { AgentsAdminOverviewData } from "@/src/lib/api/overview-loaders";
 import {
   formatDateTime,
   formatInteger,
@@ -24,7 +27,7 @@ import {
   formatSeconds,
 } from "@/src/lib/utils/format";
 import { cn } from "@/src/lib/utils/misc";
-import { DataState } from "@/src/components/ui/data-state";
+import { DataState, DegradedNotice } from "@/src/components/ui/data-state";
 import { MetricCard } from "@/src/components/ui/metric-card";
 import { PageIntro } from "@/src/components/ui/page-intro";
 import type {
@@ -67,10 +70,14 @@ function statusBadge(status: string) {
   );
 }
 
-export function AgentsOverview() {
-  const overview = useApiQuery(loadAgentsAdminOverview);
+export function AgentsOverview({ initialData }: { initialData: AgentsAdminOverviewData }) {
+  const { user } = useSession();
+  const canManageAgents = hasCapability(user, CAPABILITIES.agentsManage);
+  const overview = useApiQuery(loadAgentsAdminOverview, initialData);
   const editorState = useOverlayState();
+  const toggleConfirmation = useOverlayState();
   const [editing, setEditing] = useState<Agent | null>(null);
+  const [toggleTarget, setToggleTarget] = useState<Agent | null>(null);
   const [tab, setTab] = useState("agents");
   const [actionPending, setActionPending] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
@@ -138,6 +145,7 @@ export function AgentsOverview() {
           setFeedback({ tone: "success", message: `${agent.name} inativado.` });
         }
         await overview.reload();
+        toggleConfirmation.close();
       } catch (error) {
         setFeedback({
           tone: "danger",
@@ -152,7 +160,7 @@ export function AgentsOverview() {
         setActionPending(null);
       }
     },
-    [overview],
+    [overview, toggleConfirmation],
   );
 
   const summary = overview.data?.agentMetricsSummary;
@@ -177,6 +185,7 @@ export function AgentsOverview() {
         title="Cadastro completo da equipe N1, capacidade e regras."
         description="Cria, edita, reativa ou inativa agentes do helpdesk e ajusta a capacidade simultanea sem precisar tocar no banco. Todas as alteracoes sao auditadas no log de assignments."
       />
+      <DegradedNotice services={overview.data.degradedServices} />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 xl:grid-cols-4">
         <MetricCard
@@ -262,10 +271,12 @@ export function AgentsOverview() {
                   <RefreshCw className="size-4" />
                   Atualizar
                 </Button>
-                <Button size="sm" onPress={openCreate}>
-                  <Plus className="size-4" />
-                  Novo agente
-                </Button>
+                {canManageAgents ? (
+                  <Button size="sm" onPress={openCreate}>
+                    <Plus className="size-4" />
+                    Novo agente
+                  </Button>
+                ) : null}
               </div>
             </div>
             <div className="hidden gap-4 border-b border-[var(--border)] bg-[var(--surface-tertiary)]/40 px-5 py-3 text-[10px] uppercase tracking-[0.22em] text-[var(--muted)] md:grid md:grid-cols-[1.4fr_0.7fr_0.7fr_0.7fr_0.6fr_0.6fr]">
@@ -339,7 +350,7 @@ export function AgentsOverview() {
                     <p className="text-xs text-[var(--muted)]">
                       {formatDateTime(agent.last_assignment_at)}
                     </p>
-                    <div className="flex flex-wrap justify-end gap-2">
+                    {canManageAgents ? <div className="flex flex-wrap justify-end gap-2">
                       <Button
                         size="sm"
                         variant="tertiary"
@@ -352,12 +363,15 @@ export function AgentsOverview() {
                         size="sm"
                         variant={isActive ? "secondary" : "primary"}
                         isPending={actionPending === agent.id}
-                        onPress={() => void handleToggle(agent)}
+                        onPress={() => {
+                          setToggleTarget(agent);
+                          toggleConfirmation.open();
+                        }}
                       >
                         <Power className="size-3.5" />
                         {isActive ? "Inativar" : "Reativar"}
                       </Button>
-                    </div>
+                    </div> : null}
                   </div>
                 );
               })}
@@ -448,6 +462,35 @@ export function AgentsOverview() {
                   onSubmit={handleSubmit}
                 />
               </Modal.Body>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Modal state={toggleConfirmation}>
+        <Modal.Backdrop>
+          <Modal.Container size="md" placement="center">
+            <Modal.Dialog>
+              <Modal.Header>
+                <Modal.Heading>
+                  {toggleTarget?.is_active === false ? "Confirmar reativacao" : "Confirmar inativacao"}
+                </Modal.Heading>
+              </Modal.Header>
+              <Modal.Body className="space-y-3 text-sm">
+                <p><strong>Alvo:</strong> {toggleTarget?.name ?? "agente selecionado"}.</p>
+                <p><strong>Efeito:</strong> {toggleTarget?.is_active === false ? "volta a permitir o uso administrativo do agente, sujeito às regras de elegibilidade." : "remove o agente das operacoes ativas e impede novas atribuicoes."}</p>
+                <p><strong>Motivo:</strong> alteracao administrativa explicita de disponibilidade.</p>
+              </Modal.Body>
+              <Modal.Footer className="flex justify-end gap-2">
+                <Button variant="tertiary" onPress={toggleConfirmation.close}>Cancelar</Button>
+                <Button
+                  variant={toggleTarget?.is_active === false ? "primary" : "danger"}
+                  isPending={toggleTarget ? actionPending === toggleTarget.id : false}
+                  onPress={() => toggleTarget ? void handleToggle(toggleTarget) : undefined}
+                >
+                  Confirmar
+                </Button>
+              </Modal.Footer>
             </Modal.Dialog>
           </Modal.Container>
         </Modal.Backdrop>

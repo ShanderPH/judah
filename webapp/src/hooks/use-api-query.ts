@@ -4,6 +4,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -16,18 +17,25 @@ interface QueryState<T> {
   isRefreshing: boolean;
 }
 
-export function useApiQuery<T>(fetcher: () => Promise<T>): QueryState<T> & {
+export function useApiQuery<T>(
+  fetcher: (signal: AbortSignal) => Promise<T>,
+  initialData: T | null = null,
+): QueryState<T> & {
   reload: () => Promise<void>;
 } {
   const [state, setState] = useState<QueryState<T>>({
-    data: null,
+    data: initialData,
     error: null,
-    isLoading: true,
+    isLoading: initialData === null,
     isRefreshing: false,
   });
-  const [reloadTick, setReloadTick] = useState(0);
+  const controllerRef = useRef<AbortController | null>(null);
+  const hasInitialData = useRef(initialData !== null);
 
   const run = useCallback(async (isRefresh: boolean) => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
     startTransition(() => {
       setState((current) => ({
         ...current,
@@ -38,7 +46,8 @@ export function useApiQuery<T>(fetcher: () => Promise<T>): QueryState<T> & {
     });
 
     try {
-      const data = await fetcher();
+      const data = await fetcher(controller.signal);
+      if (controller.signal.aborted) return;
       startTransition(() => {
         setState({
           data,
@@ -48,6 +57,7 @@ export function useApiQuery<T>(fetcher: () => Promise<T>): QueryState<T> & {
         });
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (error instanceof ApiClientError && error.status === 401 && typeof window !== "undefined") {
         window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
         return;
@@ -65,13 +75,16 @@ export function useApiQuery<T>(fetcher: () => Promise<T>): QueryState<T> & {
   }, [fetcher]);
 
   useEffect(() => {
-    void run(reloadTick > 0);
-  }, [reloadTick, run]);
+    if (hasInitialData.current) {
+      hasInitialData.current = false;
+      return () => controllerRef.current?.abort();
+    }
+    void run(false);
+    return () => controllerRef.current?.abort();
+  }, [run]);
 
   return {
     ...state,
-    reload: async () => {
-      setReloadTick((current) => current + 1);
-    },
+    reload: () => run(true),
   };
 }

@@ -187,7 +187,7 @@ export function SandboxChat({ portalId, user }: SandboxChatProps) {
           Sessão Judah autenticada como {user.email}. As mensagens desta página são enviadas somente ao chatflow
           configurado na sandbox HubSpot.
         </p>
-        <p className="mt-5 text-xs font-medium text-[var(--accent-foreground)]" role="status">
+        <p className="mt-5 text-xs font-medium text-[var(--accent)]" role="status">
           {status}
         </p>
         {error ? (

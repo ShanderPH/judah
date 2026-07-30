@@ -99,7 +99,9 @@ _database_url = config("DATABASE_URL", default="")
 if _database_url:
     import dj_database_url  # type: ignore[import-untyped]
 
-    DATABASES["default"] = dj_database_url.parse(_database_url, conn_max_age=60)
+    # Uvicorn serves the API through ASGI. Django recommends disabling
+    # persistent connections under ASGI and using a pool outside Django.
+    DATABASES["default"] = dj_database_url.parse(_database_url, conn_max_age=0)
 
 # --- Auth ---
 

@@ -37,7 +37,8 @@ def _inspect_settings(environment: str) -> subprocess.CompletedProcess[str]:
         "print(settings.CELERY_WORKER_REDIRECT_STDOUTS); "
         "print(settings.CELERY_WORKER_REDIRECT_STDOUTS_LEVEL); "
         "print(settings.CELERY_WORKER_LOG_COLOR); "
-        "print(settings.CACHES['default']['OPTIONS']['pool_class'])"
+        "print(settings.CACHES['default']['OPTIONS']['pool_class']); "
+        "print(settings.DATABASES['default']['CONN_MAX_AGE'])"
     )
     return subprocess.run(
         [sys.executable, "-c", script],
@@ -70,6 +71,7 @@ def test_staging_is_production_safe_with_diagnostic_logging() -> None:
         "INFO",
         "False",
         "redis.BlockingConnectionPool",
+        "0",
     ]
 
 
@@ -94,6 +96,7 @@ def test_production_keeps_stricter_root_logging() -> None:
         "INFO",
         "False",
         "redis.BlockingConnectionPool",
+        "0",
     ]
 
 

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from ninja import Router
 
 from apps.support.admin_api import router as admin_router
+from apps.support.admin_audit import execute_audited_action
 from apps.support.schemas import (
     AssignedConversationResponse,
     BusinessHoursResponse,
@@ -24,6 +25,7 @@ from apps.support.schemas import (
 )
 from apps.support.services import create_ticket, get_ticket, list_tickets, update_ticket
 from common.pagination import StandardPagination, paginate
+from common.permissions import require_manager_or_admin
 
 if TYPE_CHECKING:
     from apps.support.models import AssignedConversation, NewConversation, QueuePerformanceMetrics, Ticket
@@ -34,6 +36,7 @@ router.add_router("", admin_router)
 
 @router.get("/tickets/", response=list[TicketListResponse], summary="List tickets")
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_tickets_endpoint(
     request,
     status: str | None = None,
@@ -45,18 +48,21 @@ def list_tickets_endpoint(
 
 
 @router.post("/tickets/", response={201: TicketResponse}, summary="Create ticket")
+@require_manager_or_admin
 def create_ticket_endpoint(request, payload: CreateTicketRequest) -> tuple[int, Ticket]:
     """Create a new support ticket."""
     return 201, create_ticket(payload)
 
 
 @router.get("/tickets/{ticket_id}", response=TicketResponse, summary="Get ticket")
+@require_manager_or_admin
 def get_ticket_endpoint(request, ticket_id: str) -> Ticket:
     """Return a single ticket by primary key (UUID) or external ``ticket_id``."""
     return get_ticket(ticket_id)
 
 
 @router.patch("/tickets/{ticket_id}", response=TicketResponse, summary="Update ticket")
+@require_manager_or_admin
 def update_ticket_endpoint(request, ticket_id: str, payload: UpdateTicketRequest) -> Ticket:
     """Partially update a ticket."""
     return update_ticket(ticket_id, payload)
@@ -68,6 +74,7 @@ def update_ticket_endpoint(request, ticket_id: str, payload: UpdateTicketRequest
 
 
 @router.get("/queue/status/", response=QueueStatusResponse, summary="Queue status snapshot")
+@require_manager_or_admin
 def get_queue_status(request) -> dict:
     """Return the current assignment queue status (online agents, eligibility, queue depth)."""
     from apps.support.queue_service import get_queue_status
@@ -81,6 +88,7 @@ def get_queue_status(request) -> dict:
     summary="List pending (unassigned) conversations",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_pending_conversations(request) -> list[NewConversation]:
     """Return tickets currently waiting in the assignment queue."""
     from apps.support.models import NewConversation
@@ -94,6 +102,7 @@ def list_pending_conversations(request) -> list[NewConversation]:
     summary="List assigned conversations",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_assigned_conversations(
     request,
     agent_owner_id: int | None = None,
@@ -122,6 +131,7 @@ def list_assigned_conversations(
     response=QueueHealthResponse,
     summary="Auto-assignment system health check",
 )
+@require_manager_or_admin
 def get_queue_health(request) -> dict:
     """Return a full diagnostic snapshot of the auto-assignment system.
 
@@ -244,8 +254,8 @@ def get_queue_health(request) -> dict:
     "/queue/sync-novo/",
     response={202: SyncNovoResponse},
     summary="Sync NOVO-stage tickets from HubSpot into the internal queue",
-    auth=None,
 )
+@require_manager_or_admin
 def sync_novo_tickets(request) -> tuple[int, dict]:
     """Fetch all tickets currently in the configured NOVO stage from HubSpot
     and enqueue any that are not yet tracked in ``new_conversations``.
@@ -258,11 +268,21 @@ def sync_novo_tickets(request) -> tuple[int, dict]:
     """
     from apps.support.auto_assign_service import sync_novo_stage_tickets
 
-    sync_result = sync_novo_stage_tickets()
-    return 202, {
-        **sync_result,
-        "queued_for_assignment": sync_result["created"] > 0,
-    }
+    def _sync() -> tuple[int, dict]:
+        sync_result = sync_novo_stage_tickets()
+        return 202, {
+            **sync_result,
+            "queued_for_assignment": sync_result["created"] > 0,
+        }
+
+    return execute_audited_action(
+        request,
+        action="support.queue.sync_novo",
+        target_type="support_queue",
+        reason="manual_sync_novo",
+        fingerprint_payload={"operation": "sync_novo"},
+        operation=_sync,
+    )
 
 
 @router.get(
@@ -299,7 +319,6 @@ def list_queue_metrics(
     "/business-hours/",
     response=BusinessHoursResponse,
     summary="Get current business hours configuration",
-    auth=None,
 )
 def get_business_hours(request) -> dict:
     """Return the current business hours configuration, including whether
@@ -350,7 +369,6 @@ def get_business_hours(request) -> dict:
     "/special-schedules/",
     response=list[SpecialScheduleResponse],
     summary="List special schedule overrides",
-    auth=None,
 )
 def list_special_schedules(request) -> list:
     """Return all special schedule overrides (holidays, custom hours)."""
@@ -374,8 +392,8 @@ def list_special_schedules(request) -> list:
     "/special-schedules/",
     response={201: SpecialScheduleResponse},
     summary="Create a special schedule override",
-    auth=None,
 )
+@require_manager_or_admin
 def create_special_schedule(request, payload: CreateSpecialScheduleRequest) -> tuple[int, dict]:
     """Create a special schedule override for a specific date.
 
@@ -385,34 +403,62 @@ def create_special_schedule(request, payload: CreateSpecialScheduleRequest) -> t
     """
     from apps.support.models import SpecialSchedule
 
-    schedule, _ = SpecialSchedule.objects.update_or_create(
-        date=payload.date,
-        defaults={
+    def _upsert_schedule() -> tuple[int, dict]:
+        schedule, _ = SpecialSchedule.objects.update_or_create(
+            date=payload.date,
+            defaults={
+                "schedule_type": payload.schedule_type,
+                "start_hour": payload.start_hour,
+                "end_hour": payload.end_hour,
+                "reason": payload.reason,
+            },
+        )
+        return 201, {
+            "id": schedule.id,
+            "date": str(schedule.date),
+            "schedule_type": schedule.schedule_type,
+            "start_hour": schedule.start_hour,
+            "end_hour": schedule.end_hour,
+            "reason": schedule.reason,
+        }
+
+    return execute_audited_action(
+        request,
+        action="support.special_schedule.upsert",
+        target_type="special_schedule",
+        target_id=str(payload.date),
+        reason=payload.reason or "special_schedule_upsert",
+        fingerprint_payload={
+            "date": payload.date,
             "schedule_type": payload.schedule_type,
             "start_hour": payload.start_hour,
             "end_hour": payload.end_hour,
             "reason": payload.reason,
         },
+        operation=_upsert_schedule,
     )
-    return 201, {
-        "id": schedule.id,
-        "date": str(schedule.date),
-        "schedule_type": schedule.schedule_type,
-        "start_hour": schedule.start_hour,
-        "end_hour": schedule.end_hour,
-        "reason": schedule.reason,
-    }
 
 
 @router.delete(
     "/special-schedules/{schedule_id}",
     response={204: None},
     summary="Delete a special schedule override",
-    auth=None,
 )
+@require_manager_or_admin
 def delete_special_schedule(request, schedule_id: str) -> tuple[int, None]:
     """Remove a special schedule override."""
     from apps.support.models import SpecialSchedule
 
-    SpecialSchedule.objects.filter(id=schedule_id).delete()
-    return 204, None
+    def _delete_schedule() -> tuple[int, None]:
+        SpecialSchedule.objects.filter(id=schedule_id).delete()
+        return 204, None
+
+    return execute_audited_action(
+        request,
+        action="support.special_schedule.delete",
+        target_type="special_schedule",
+        target_id=schedule_id,
+        reason="special_schedule_delete",
+        fingerprint_payload={"schedule_id": schedule_id},
+        operation=_delete_schedule,
+    )

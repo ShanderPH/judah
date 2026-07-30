@@ -1,0 +1,16 @@
+{
+  "url": "http://127.0.0.1:3000/dashboard",
+  "rsc": [
+    "http://127.0.0.1:3000/dashboard?_rsc=IOe_mmh6jQxP6_Ru"
+  ],
+  "rscNormalizedCounts": {
+    "http://127.0.0.1:3000/dashboard": 1
+  },
+  "duplicates": [],
+  "api": [
+    "http://127.0.0.1:3000/api/backend/health",
+    "http://127.0.0.1:3000/api/backend/support/queue/status",
+    "http://127.0.0.1:3000/api/backend/support/business-hours"
+  ],
+  "apiDuplicates": []
+}
