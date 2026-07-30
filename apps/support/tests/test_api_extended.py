@@ -128,15 +128,16 @@ def test_queue_health_builds_diagnostics() -> None:
 
 @pytest.mark.django_db
 def test_business_hours_config_and_default() -> None:
+    request = _request()
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=True):
-        default = api.get_business_hours(None)
+        default = _call(api.get_business_hours, request)
     assert default["name"] == "default (hardcoded)"
     assert default["monday"] == "09:00-17:50"
     assert default["is_currently_business_hours"] is True
 
     BusinessHoursConfig.objects.create(name="custom", monday_start=8, monday_end=17)
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=False):
-        configured = api.get_business_hours(None)
+        configured = _call(api.get_business_hours, request)
     assert configured["name"] == "custom"
     assert configured["monday"] == "08:00-17:00"
     assert configured["is_currently_business_hours"] is False
@@ -153,7 +154,7 @@ def test_special_schedule_create_list_update_and_delete() -> None:
     status, created = api.create_special_schedule(request, payload)
     assert status == 201
     assert created["date"] == "2026-12-25"
-    assert api.list_special_schedules(None)[0]["reason"] == "Natal"
+    assert _call(api.list_special_schedules, request)[0]["reason"] == "Natal"
 
     updated_payload = CreateSpecialScheduleRequest(
         date=date(2026, 12, 25),
