@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,12 +17,28 @@ from common.permissions import (
     require_role,
 )
 
+if TYPE_CHECKING:
+
+    class MissingReturnType:
+        """Return-only annotation intentionally unavailable at runtime."""
+
 
 def _make_request(user: object | None) -> SimpleNamespace:
     return SimpleNamespace(auth=user)
 
 
 class TestRequireRole:
+    def test_resolves_postponed_parameter_annotations(self) -> None:
+        @require_role("admin")
+        def endpoint(request: object, item_id: int) -> MissingReturnType:
+            raise NotImplementedError
+
+        endpoint_signature = inspect.signature(endpoint)
+
+        assert endpoint_signature.parameters["request"].annotation is object
+        assert endpoint_signature.parameters["item_id"].annotation is int
+        assert endpoint_signature.return_annotation is inspect.Signature.empty
+
     def test_raises_unauthorized_when_no_user(self) -> None:
         @require_role("admin")
         def endpoint(request):

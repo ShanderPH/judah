@@ -2,7 +2,7 @@
 
 import functools
 import inspect
-from typing import Any
+from typing import Any, get_type_hints
 
 from ninja.security import HttpBearer
 
@@ -12,12 +12,27 @@ from common.exceptions import ForbiddenError, UnauthorizedError
 def _endpoint_signature(func: Any) -> inspect.Signature:
     """Resolve runtime parameter schemas without evaluating return-only types."""
     signature = inspect.signature(func, eval_str=False)
+
+    def parameter_annotations() -> None:
+        """Provide a temporary target containing parameter annotations only."""
+
+    parameter_annotations.__annotations__ = {
+        parameter.name: parameter.annotation
+        for parameter in signature.parameters.values()
+        if parameter.annotation is not inspect.Signature.empty
+    }
+    type_hints = get_type_hints(
+        parameter_annotations,
+        globalns=func.__globals__,
+        include_extras=True,
+    )
     parameters = []
     for parameter in signature.parameters.values():
-        annotation = parameter.annotation
-        if isinstance(annotation, str):
-            annotation = eval(annotation, func.__globals__)
-        parameters.append(parameter.replace(annotation=annotation))
+        parameters.append(
+            parameter.replace(
+                annotation=type_hints.get(parameter.name, parameter.annotation),
+            )
+        )
     return signature.replace(
         parameters=parameters,
         return_annotation=inspect.Signature.empty,
