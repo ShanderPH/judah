@@ -265,6 +265,30 @@ def test_build_salomao_prompt_groups_consecutive_customer_messages() -> None:
     assert prompt.index("1. Tenho interesse") < prompt.index("3. para minha igreja")
 
 
+def test_build_salomao_prompt_marks_reopened_context_for_retriage() -> None:
+    context = {
+        "ticket_id": "123",
+        "subject": "Evento",
+        "lifecycle_context": {
+            "is_reopened": True,
+            "attendance_sequence": 2,
+            "reopened_from_state": "CLOSED",
+        },
+        "conversation_history": [
+            {"direction": "OUTGOING", "text": "O caso anterior foi concluido.", "id": "m1"},
+            {"direction": "INCOMING", "text": "Voltei com outro problema.", "id": "m2"},
+        ],
+    }
+
+    prompt = build_salomao_prompt_from_hubspot_context(context)
+
+    assert prompt is not None
+    assert "CONVERSA REABERTA" in prompt
+    assert "Ciclo de atendimento: 2" in prompt
+    assert "Estado anterior: CLOSED" in prompt
+    assert "retomou o assunto anterior" in prompt
+
+
 def test_build_salomao_prompt_skips_when_no_incoming_message() -> None:
     context = {
         "ticket_id": "123",
@@ -411,6 +435,15 @@ def test_build_conversation_context_from_hubspot_context() -> None:
         "church_id": "35120",
         "thread_ids": ["thread-1"],
         "contact_ids": ["contact-1"],
+        "lifecycle_context": {
+            "service_cycle_id": "cycle-2",
+            "service_cycle_idempotency_key": "cycle-key-2",
+            "attendance_sequence": 2,
+            "is_reopened": True,
+            "reopen_count": 1,
+            "reopened_from_state": "CLOSED",
+            "reopen_reason": "Customer returned after closure.",
+        },
         "conversation_history": [
             {"direction": "OUTGOING", "text": "Como posso ajudar?", "sender": "agent-1", "id": "m1"},
             {"direction": "INCOMING", "text": "Meu evento nao aparece.", "sender": "visitor-1", "id": "m2"},
@@ -430,6 +463,12 @@ def test_build_conversation_context_from_hubspot_context() -> None:
     assert conversation_context.contact_id == "contact-1"
     assert conversation_context.church_id == "35120"
     assert conversation_context.is_off_hours is True
+    assert conversation_context.service_cycle_id == "cycle-2"
+    assert conversation_context.service_cycle_idempotency_key == "cycle-key-2"
+    assert conversation_context.attendance_sequence == 2
+    assert conversation_context.is_reopened is True
+    assert conversation_context.reopen_count == 1
+    assert conversation_context.reopened_from_state == "CLOSED"
     assert conversation_context.recent_messages[-1].direction == "INCOMING"
     assert "send_thread_reply" in conversation_context.allowed_actions
     assert conversation_context.missing_context == []

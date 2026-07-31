@@ -15,6 +15,7 @@ from apps.ai_agents.services.hubspot import (
     hydrate_ticket_context,
 )
 from apps.ai_agents.services.instance_identity import find_conversation_instance
+from apps.ai_agents.services.service_cycles import ensure_current_service_cycle
 
 
 async def inspect_ticket_recovery(ticket_id: str) -> dict[str, Any]:
@@ -66,6 +67,7 @@ def execute_ticket_recovery(*, inspection: dict[str, Any], operator: str) -> dic
     turn = dict(inspection["customer_turn"])
     message_id = str(turn["last_message_id"])
     key = f"operational-recovery:v1:{inspection['ticket_id']}:{thread_id}:{message_id}"
+    service_cycle = ensure_current_service_cycle(instance)
 
     with transaction.atomic():
         existing = ToolCallAuditLog.objects.select_for_update().filter(idempotency_key=key).first()
@@ -74,6 +76,7 @@ def execute_ticket_recovery(*, inspection: dict[str, Any], operator: str) -> dic
 
         agent_run = AgentRun.objects.create(
             instance=instance,
+            service_cycle=service_cycle,
             agent_name="OperationalRecovery",
             model_name="deterministic",
             prompt_version="single-ticket-recovery-v1",
@@ -95,6 +98,7 @@ def execute_ticket_recovery(*, inspection: dict[str, Any], operator: str) -> dic
         if existing is None:
             audit = ToolCallAuditLog.objects.create(
                 instance=instance,
+                service_cycle=service_cycle,
                 agent_run=agent_run,
                 tool_name="schedule_operational_recovery",
                 input={"ticket_id": inspection["ticket_id"], "thread_id": thread_id, "operator": operator},
@@ -104,9 +108,10 @@ def execute_ticket_recovery(*, inspection: dict[str, Any], operator: str) -> dic
         else:
             audit = existing
             audit.agent_run = agent_run
+            audit.service_cycle = service_cycle
             audit.status = ToolCallAuditLog.Status.STARTED
             audit.error_message = ""
-            audit.save(update_fields=["agent_run", "status", "error_message"])
+            audit.save(update_fields=["agent_run", "service_cycle", "status", "error_message"])
 
     try:
         from apps.ai_agents.tasks import run_salomao_v1_thread_pipeline_task

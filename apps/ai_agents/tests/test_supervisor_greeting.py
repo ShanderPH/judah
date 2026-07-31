@@ -17,6 +17,18 @@ from apps.ai_agents.contracts import SalomaoChatDraft, TriageDecision
 from apps.ai_agents.models import TokenTrackingLog
 
 
+def test_supervisor_action_identity_changes_between_service_cycles() -> None:
+    first = object.__new__(SalomaoSupervisorAgent)
+    first.session_id = "hubspot-thread-123"
+    first.user_metadata = {"conversation_context": {"service_cycle_idempotency_key": "cycle-1"}}
+    reopened = object.__new__(SalomaoSupervisorAgent)
+    reopened.session_id = "hubspot-thread-123"
+    reopened.user_metadata = {"conversation_context": {"service_cycle_idempotency_key": "cycle-2"}}
+
+    assert first._attendance_idempotency_prefix() == "hubspot-thread-123:cycle-1"
+    assert reopened._attendance_idempotency_prefix() == "hubspot-thread-123:cycle-2"
+
+
 class FakeLogger:
     def info(self, *_args: Any, **_kwargs: Any) -> None:
         pass

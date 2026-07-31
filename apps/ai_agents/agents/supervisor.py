@@ -236,6 +236,9 @@ _SUPERVISOR_INSTRUCTIONS = [
     "paralela com KnowledgeRagAgent ou HelpdeskActionAgent.",
     "O Salomão v1 recebe rota, prioridade, tags, dados_faltantes, sentimento e "
     "contexto da conversa; somente ele decide a resposta e se precisa de humano.",
+    "Quando conversation_context.is_reopened=true, trate o turno como um novo atendimento mensurável: "
+    "leia o histórico anterior, identifique se é continuação ou um novo assunto e faça uma nova triagem "
+    "sem repetir perguntas já respondidas nem assumir que a resolução anterior continua válida.",
     "  • rota == ESCALAR_IMEDIATAMENTE → NÃO tente resolver. Sinalize "
     "transbordo humano imediato incluindo 'requires_human_handoff: true' e "
     "'transbordo para atendimento humano' na resposta final.",
@@ -714,7 +717,7 @@ class SalomaoSupervisorAgent:
                 hubspot_action=HubSpotAction(
                     action_type="assign_ticket_to_human_queue",
                     payload={"reason": reason},
-                    idempotency_key=f"{self.session_id}:human-handoff",
+                    idempotency_key=f"{self._attendance_idempotency_prefix()}:human-handoff",
                 ),
                 trace_summary=agent_trace,
                 risk_flags=self._risk_flags(triage),
@@ -753,7 +756,7 @@ class SalomaoSupervisorAgent:
                 hubspot_action=HubSpotAction(
                     action_type="assign_ticket_to_human_queue",
                     payload={"reason": reason},
-                    idempotency_key=f"{self.session_id}:salomao-v1-unavailable",
+                    idempotency_key=f"{self._attendance_idempotency_prefix()}:salomao-v1-unavailable",
                 ),
                 trace_summary=agent_trace,
                 risk_flags=[*self._risk_flags(triage), "salomao_v1_unavailable"],
@@ -788,7 +791,7 @@ class SalomaoSupervisorAgent:
                 hubspot_action=HubSpotAction(
                     action_type="send_thread_reply",
                     payload={"missing_data": ["descricao_da_solicitacao"]},
-                    idempotency_key=f"{self.session_id}:greeting-clarification",
+                    idempotency_key=f"{self._attendance_idempotency_prefix()}:greeting-clarification",
                 ),
                 trace_summary=agent_trace,
                 missing_data=["descricao_da_solicitacao"],
@@ -852,7 +855,7 @@ class SalomaoSupervisorAgent:
                 hubspot_action=HubSpotAction(
                     action_type="send_thread_reply",
                     payload={"missing_data": fields},
-                    idempotency_key=f"{self.session_id}:missing-data:{first_field}",
+                    idempotency_key=f"{self._attendance_idempotency_prefix()}:missing-data:{first_field}",
                 ),
                 trace_summary=agent_trace,
                 missing_data=fields,
@@ -862,7 +865,7 @@ class SalomaoSupervisorAgent:
 
     def _build_conversation_context(self, message: str) -> ConversationContext:
         """Build provider-neutral context for agent handoffs."""
-        raw_context = self.user_metadata.get("conversation_context")
+        raw_context = getattr(self, "user_metadata", {}).get("conversation_context")
         if isinstance(raw_context, ConversationContext):
             return raw_context
         if isinstance(raw_context, dict):
@@ -893,6 +896,17 @@ class SalomaoSupervisorAgent:
                 "add_internal_note",
             ],
         )
+
+    def _attendance_idempotency_prefix(self) -> str:
+        """Scope agent action identity to one measurable attendance cycle."""
+        raw_context = getattr(self, "user_metadata", {}).get("conversation_context")
+        if isinstance(raw_context, ConversationContext):
+            cycle_key = raw_context.service_cycle_idempotency_key
+        elif isinstance(raw_context, dict):
+            cycle_key = raw_context.get("service_cycle_idempotency_key")
+        else:
+            cycle_key = None
+        return f"{self.session_id}:{cycle_key or 'legacy-cycle'}"
 
     def _extract_triage_decision(self, response: Any) -> TriageDecision | None:
         """Normalize Heimdall output into the shared triage contract."""
@@ -966,7 +980,7 @@ class SalomaoSupervisorAgent:
                     payload={
                         "recommended_actions": [action.model_dump(mode="json") for action in draft.recommended_actions]
                     },
-                    idempotency_key=f"{self.session_id}:supervisor:{outcome}",
+                    idempotency_key=f"{self._attendance_idempotency_prefix()}:supervisor:{outcome}",
                 ),
                 trace_summary=agent_trace,
                 risk_flags=self._risk_flags(effective_triage),

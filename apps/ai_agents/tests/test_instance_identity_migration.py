@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
@@ -10,6 +12,17 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 MIGRATE_FROM = ("ai_agents", "0005_agent_run_versions")
 MIGRATE_TO = ("ai_agents", "0006_remove_unique_conversation_instance_ticket")
+
+
+@pytest.fixture(autouse=True)
+def restore_migrations() -> Iterator[None]:
+    """Restore the complete graph after historical identity assertions."""
+    try:
+        yield
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
 
 def _migrate(target: tuple[str, str]) -> MigrationExecutor:

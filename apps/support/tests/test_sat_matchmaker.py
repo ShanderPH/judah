@@ -555,8 +555,12 @@ def test_matchmaker_assignment_updates_each_queued_conversation_instance() -> No
     waiting.refresh_from_db()
     assert first.state == second.state == ConversationInstance.State.HUMAN_ASSIGNED
     assert first.assigned_agent_id == second.assigned_agent_id == "123"
+    assert first.attendants.get().agent_id == agent.pk
+    assert second.attendants.get().agent_id == agent.pk
+    assert first.attendants.get().source == "automatic_assignment"
     assert waiting.state == ConversationInstance.State.WAITING_FOR_CUSTOMER
     assert waiting.assigned_agent_id is None
+    assert waiting.attendants.count() == 0
 
 
 # ---------------------------------------------------------------------------

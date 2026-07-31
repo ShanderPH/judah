@@ -91,6 +91,24 @@ def _conversation_context() -> ConversationContext:
     )
 
 
+def test_reopened_cycle_uses_a_distinct_action_idempotency_key() -> None:
+    first_context = _conversation_context().model_copy(update={"service_cycle_idempotency_key": "cycle-1"})
+    reopened_context = _conversation_context().model_copy(update={"service_cycle_idempotency_key": "cycle-2"})
+    result = SalomaoV1ChatResult(
+        response="Siga as orientacoes.",
+        session_id="hubspot-thread-123",
+    )
+
+    first_draft = salomao_v1_result_to_draft(result, conversation_context=first_context)
+    reopened_draft = salomao_v1_result_to_draft(result, conversation_context=reopened_context)
+
+    first_key = first_draft.recommended_actions[0].idempotency_key
+    reopened_key = reopened_draft.recommended_actions[0].idempotency_key
+    assert first_key != reopened_key
+    assert "cycle-1" in str(first_key)
+    assert "cycle-2" in str(reopened_key)
+
+
 def test_salomao_chat_prompt_extracts_grouped_customer_turn() -> None:
     prompt = build_salomao_chat_prompt(
         message=(

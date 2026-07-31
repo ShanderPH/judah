@@ -443,6 +443,7 @@ def _do_handle_owner_change(
         AssignedConversation,
         AssignmentAttempt,
         AssignmentLog,
+        ConversationInstanceAttendant,
         ConversationReassignment,
         NewConversation,
         SupportConversationCycle,
@@ -546,6 +547,15 @@ def _do_handle_owner_change(
                     "task_owner_change_queued_converged",
                     cycle_id=str(assigned_conv.cycle_id) if assigned_conv.cycle_id else None,
                 )
+                if to_agent:
+                    from apps.support.conversation_attendant_service import record_ticket_attendant
+
+                    record_ticket_attendant(
+                        ticket_id=hubspot_ticket_id,
+                        agent=to_agent,
+                        source=ConversationInstanceAttendant.Source.OWNER_CHANGE,
+                        metadata={"support_cycle_id": str(assigned_conv.cycle_id or "")},
+                    )
                 return
         if assigned_conv is None or assigned_conv.hubspot_owner_id != prev_owner_int:
             logger.info(
@@ -589,6 +599,16 @@ def _do_handle_owner_change(
             reassigned_at=now,
             time_with_previous_agent_seconds=time_with_prev_seconds,
             reassignment_source="hubspot_webhook",
+        )
+
+    if to_agent:
+        from apps.support.conversation_attendant_service import record_ticket_attendant
+
+        record_ticket_attendant(
+            ticket_id=hubspot_ticket_id,
+            agent=to_agent,
+            source=ConversationInstanceAttendant.Source.OWNER_CHANGE,
+            metadata={"support_cycle_id": str(assigned_conv.cycle_id or "")},
         )
 
     logger.info(

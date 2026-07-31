@@ -30,6 +30,7 @@ from apps.ai_agents.services.instance_identity import (
     promote_or_get_thread_instance,
 )
 from apps.ai_agents.services.lifecycle import LifecycleEngine
+from apps.ai_agents.services.service_cycles import ensure_current_service_cycle
 from apps.ai_agents.services.tool_permissions import is_tool_allowed
 
 logger = structlog.get_logger(__name__)
@@ -164,6 +165,7 @@ def _prepare_tool_call(
     input_payload: dict[str, Any],
     agent_run: AgentRun | None,
 ) -> PreparedToolCall:
+    service_cycle = ensure_current_service_cycle(instance)
     audit = ToolCallAuditLog.objects.filter(idempotency_key=idempotency_key).first()
     if audit is not None and audit.status == ToolCallAuditLog.Status.SUCCEEDED:
         return PreparedToolCall(
@@ -178,6 +180,7 @@ def _prepare_tool_call(
     if audit is None:
         audit = ToolCallAuditLog.objects.create(
             instance=instance,
+            service_cycle=service_cycle,
             agent_run=agent_run,
             tool_name=tool_name,
             input=input_payload,
@@ -186,6 +189,7 @@ def _prepare_tool_call(
         )
     else:
         audit.instance = instance
+        audit.service_cycle = service_cycle
         audit.agent_run = agent_run
         audit.tool_name = tool_name
         audit.input = input_payload
@@ -195,6 +199,7 @@ def _prepare_tool_call(
         audit.save(
             update_fields=[
                 "instance",
+                "service_cycle",
                 "agent_run",
                 "tool_name",
                 "input",
@@ -354,11 +359,13 @@ def schedule_stale_turn_followup(
         return False
 
     idempotency_key = f"stale-turn-followup:v1:{instance.hubspot_ticket_id or 'no-ticket'}:{thread_id}:{message_id}"
+    service_cycle = ensure_current_service_cycle(instance)
     with transaction.atomic():
         audit, created = ToolCallAuditLog.objects.get_or_create(
             idempotency_key=idempotency_key,
             defaults={
                 "instance": instance,
+                "service_cycle": service_cycle,
                 "agent_run": agent_run,
                 "tool_name": "schedule_stale_turn_followup",
                 "input": {

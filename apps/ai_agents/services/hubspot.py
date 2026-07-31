@@ -1087,11 +1087,22 @@ def build_salomao_prompt_from_hubspot_context(context: dict[str, Any]) -> str | 
     current_turn = current_incoming_turn_text(context)
     ticket_id = context.get("ticket_id") or "(sem ticket associado)"
     subject = context.get("subject") or "(sem assunto)"
+    lifecycle_context = context.get("lifecycle_context") if isinstance(context.get("lifecycle_context"), dict) else {}
+    reopen_block = ""
+    if lifecycle_context.get("is_reopened"):
+        reopen_block = (
+            "\nContexto operacional: CONVERSA REABERTA\n"
+            f"Ciclo de atendimento: {lifecycle_context.get('attendance_sequence')}\n"
+            f"Estado anterior: {lifecycle_context.get('reopened_from_state') or 'terminal'}\n"
+            "Analise o historico anterior e o turno atual para decidir se o cliente retomou o assunto anterior "
+            "ou iniciou uma nova solicitacao. Nao presuma que a solucao anterior ainda se aplica.\n"
+        )
 
     return (
         f"Atendimento HubSpot\n"
         f"Ticket: {ticket_id}\n"
-        f"Assunto: {subject}\n\n"
+        f"Assunto: {subject}\n"
+        f"{reopen_block}\n"
         f"Historico recente:\n{history_block}\n\n"
         f"{CURRENT_CUSTOMER_TURN_MARKER}\n{current_turn}"
     )
@@ -1124,6 +1135,7 @@ def build_conversation_context_from_hubspot_context(
     thread_ids = context.get("thread_ids") or []
     contact_ids = context.get("contact_ids") or []
     raw_channel = context.get("originating_channel") or context.get("channel") or channel
+    lifecycle_context = context.get("lifecycle_context") if isinstance(context.get("lifecycle_context"), dict) else {}
     can_send_reply = can_send_automated_reply(str(raw_channel))
     allowed_actions = ["mark_ai_resolution_attempt"]
     if thread_ids and can_send_reply:
@@ -1149,6 +1161,13 @@ def build_conversation_context_from_hubspot_context(
         pipeline_id=context.get("pipeline") or None,
         pipeline_stage=context.get("pipeline_stage") or None,
         owner_id=context.get("owner_id") or None,
+        service_cycle_id=lifecycle_context.get("service_cycle_id") or None,
+        service_cycle_idempotency_key=lifecycle_context.get("service_cycle_idempotency_key") or None,
+        attendance_sequence=int(lifecycle_context.get("attendance_sequence") or 1),
+        is_reopened=bool(lifecycle_context.get("is_reopened", False)),
+        reopen_count=int(lifecycle_context.get("reopen_count") or 0),
+        reopened_from_state=lifecycle_context.get("reopened_from_state") or None,
+        reopen_reason=lifecycle_context.get("reopen_reason") or None,
         is_off_hours=is_off_hours,
         can_send_reply=can_send_reply,
         recent_messages=messages[-20:],

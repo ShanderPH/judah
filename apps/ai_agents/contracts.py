@@ -61,6 +61,13 @@ class ConversationContext(BaseModel):
     pipeline_id: str | None = None
     pipeline_stage: str | None = None
     owner_id: str | None = None
+    service_cycle_id: str | None = None
+    service_cycle_idempotency_key: str | None = None
+    attendance_sequence: int = Field(default=1, ge=1)
+    is_reopened: bool = False
+    reopen_count: int = Field(default=0, ge=0)
+    reopened_from_state: str | None = None
+    reopen_reason: str | None = None
     is_off_hours: bool = False
     can_send_reply: bool = True
     recent_messages: list[ConversationMessage] = Field(default_factory=list)
