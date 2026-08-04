@@ -4,11 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.test import override_settings
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse
 from apps.ai_agents.api import webhooks
 from apps.ai_agents.models import ConversationInstance, TokenTrackingLog, ToolCallAuditLog
+from apps.ai_agents.services.service_cycles import ensure_current_service_cycle
 
 
 def _response() -> SalomaoResponse:
@@ -59,6 +61,11 @@ def test_signature_helpers_extract_ticket_and_build_messages() -> None:
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_token_tracking_success_and_best_effort_failure() -> None:
+    instance = await ConversationInstance.objects.acreate(
+        idempotency_key="conversation:thread:token-cycle",
+        hubspot_thread_id="token-cycle",
+    )
+    cycle = await sync_to_async(ensure_current_service_cycle)(instance)
     await webhooks._persist_token_tracking(
         session_id="session",
         ticket_id="ticket",
@@ -66,8 +73,13 @@ async def test_token_tracking_success_and_best_effort_failure() -> None:
         prompt_tokens=10,
         completion_tokens=5,
         cost_usd=0.01,
+        service_cycle_id=str(cycle.pk),
     )
-    assert await TokenTrackingLog.objects.filter(session_id="session", model_name="unknown").aexists()
+    assert await TokenTrackingLog.objects.filter(
+        session_id="session",
+        model_name="unknown",
+        service_cycle=cycle,
+    ).aexists()
 
     with patch("apps.ai_agents.api.webhooks._persist_token_tracking", new=AsyncMock()) as persist:
         await webhooks._record_usage("ticket", "session", _response())

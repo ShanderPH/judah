@@ -877,6 +877,56 @@ class SpecialSchedule(models.Model):
         return f"SpecialSchedule {self.date} — {self.start_hour}h-{self.end_hour}h ({self.reason})"
 
 
+class ConversationInstanceAttendant(models.Model):
+    """Historical record of a human agent who attended one service cycle."""
+
+    class Source(models.TextChoices):
+        AUTOMATIC_ASSIGNMENT = "automatic_assignment", "Automatic assignment"
+        MANUAL_ASSIGNMENT = "manual_assignment", "Manual assignment"
+        OWNER_CHANGE = "owner_change", "Owner change"
+        FORCED_REASSIGNMENT = "forced_reassignment", "Forced reassignment"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instance = models.ForeignKey(
+        "ai_agents.ConversationInstance",
+        on_delete=models.CASCADE,
+        related_name="attendants",
+    )
+    service_cycle = models.ForeignKey(
+        "ai_agents.ConversationServiceCycle",
+        on_delete=models.PROTECT,
+        related_name="attendants",
+    )
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.PROTECT,
+        related_name="conversation_instance_attendances",
+    )
+    hubspot_owner_id = models.BigIntegerField(db_index=True)
+    agent_name = models.TextField()
+    source = models.CharField(max_length=32, choices=Source.choices)
+    first_seen_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "conversation_instance_attendants"
+        ordering = ["instance_id", "service_cycle_id", "first_seen_at"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["service_cycle", "agent"],
+                name="uniq_conv_cycle_attendant",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["instance", "first_seen_at"], name="idx_conv_attendant_instance"),
+            models.Index(fields=["agent", "first_seen_at"], name="idx_conv_attendant_agent"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.instance_id} / {self.agent_name} / {self.service_cycle_id}"
+
+
 class AdministrativeActionAudit(models.Model):
     """Append-only audit record for human administrative support actions."""
 

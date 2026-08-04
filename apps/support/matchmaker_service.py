@@ -41,6 +41,8 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
     try:
         from apps.ai_agents.models import ConversationInstance
         from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
+        from apps.support.conversation_attendant_service import record_instance_attendant
+        from apps.support.models import ConversationInstanceAttendant
 
         engine = LifecycleEngine()
         instances = list(
@@ -60,6 +62,22 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
                     actor_type="matchmaker",
                     actor_id=str(agent.hubspot_owner_id),
                 )
+                try:
+                    record_instance_attendant(
+                        instance=instance,
+                        agent=agent,
+                        source=ConversationInstanceAttendant.Source.AUTOMATIC_ASSIGNMENT,
+                        metadata={"ticket_id": str(hubspot_ticket_id)},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "matchmaker_attendant_history_failed",
+                        ticket_id=hubspot_ticket_id,
+                        conversation_instance_id=str(instance.pk),
+                        agent_id=str(agent.pk),
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
             except InvalidStateTransitionError as exc:
                 logger.info(
                     "matchmaker_lifecycle_transition_skipped",

@@ -25,6 +25,11 @@ from apps.ai_agents.services.instance_identity import (
     find_conversation_instance,
     promote_or_get_thread_instance,
 )
+from apps.ai_agents.services.service_cycles import (
+    close_current_service_cycle,
+    ensure_current_service_cycle,
+    reopen_service_cycle,
+)
 from common.idempotency import canonical_event_key
 
 logger = structlog.get_logger(__name__)
@@ -560,6 +565,11 @@ class LifecycleEngine:
                         primary_instance_id=instance.pk,
                         source_event_id=event.source_event_id,
                     )
+                if event_created:
+                    effective_cycle = ensure_current_service_cycle(instance)
+                    if lifecycle_event.service_cycle_id != effective_cycle.pk:
+                        lifecycle_event.service_cycle = effective_cycle
+                        lifecycle_event.save(update_fields=["service_cycle"])
         return LifecycleRecordResult(
             instance=instance,
             event=lifecycle_event,
@@ -641,41 +651,69 @@ class LifecycleEngine:
         allow_authoritative_queue_entry: bool = False,
         allow_authoritative_ai_entry: bool = False,
     ) -> ConversationInstance:
-        if instance.state == to_state:
-            return instance
-        self._validate_transition(
-            instance.state,
-            to_state,
-            allow_terminal_reopen=allow_terminal_reopen,
-            allow_authoritative_queue_entry=allow_authoritative_queue_entry,
-            allow_authoritative_ai_entry=allow_authoritative_ai_entry,
-        )
-        now = timezone.now()
-        from_state = instance.state
-        instance.state = to_state
-        instance.state_version += 1
-        instance.last_activity_at = now
-        if to_state == ConversationInstance.State.CLOSED and instance.closed_at is None:
-            instance.closed_at = now
-        elif (allow_terminal_reopen or allow_authoritative_ai_entry) and to_state not in TERMINAL_STATES:
-            instance.closed_at = None
-        update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
-        if allow_authoritative_ai_entry:
-            instance.assigned_agent_id = None
-            update_fields.append("assigned_agent_id")
-        instance.save(update_fields=update_fields)
-        ConversationStateTransition.objects.create(
-            instance=instance,
-            from_state=from_state,
-            to_state=to_state,
-            reason=reason,
-            actor_type=actor_type,
-            actor_id=actor_id,
-            source_event_id=source_event_id,
-        )
+        with transaction.atomic():
+            locked = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
+            if locked.state == to_state:
+                instance.refresh_from_db()
+                return instance
+            self._validate_transition(
+                locked.state,
+                to_state,
+                allow_terminal_reopen=allow_terminal_reopen,
+                allow_authoritative_queue_entry=allow_authoritative_queue_entry,
+                allow_authoritative_ai_entry=allow_authoritative_ai_entry,
+            )
+            now = timezone.now()
+            from_state = locked.state
+            is_terminal_reopen = (
+                allow_terminal_reopen and from_state in TERMINAL_STATES and to_state not in TERMINAL_STATES
+            )
+            if is_terminal_reopen:
+                service_cycle = reopen_service_cycle(
+                    locked,
+                    from_state=from_state,
+                    reason=reason,
+                    source_event_id=source_event_id,
+                )
+            else:
+                service_cycle = ensure_current_service_cycle(locked)
+
+            locked.state = to_state
+            locked.state_version += 1
+            locked.last_activity_at = now
+            if to_state == ConversationInstance.State.CLOSED and locked.closed_at is None:
+                locked.closed_at = now
+            elif (is_terminal_reopen or allow_authoritative_ai_entry) and to_state not in TERMINAL_STATES:
+                locked.closed_at = None
+            update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
+            if is_terminal_reopen or allow_authoritative_ai_entry:
+                locked.assigned_agent_id = None
+                update_fields.append("assigned_agent_id")
+            locked.save(update_fields=update_fields)
+            ConversationStateTransition.objects.create(
+                instance=locked,
+                service_cycle=service_cycle,
+                from_state=from_state,
+                to_state=to_state,
+                reason=reason,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                source_event_id=source_event_id,
+            )
+            if to_state in TERMINAL_STATES:
+                service_cycle = close_current_service_cycle(locked, reason=reason)
+
+            instance.state = locked.state
+            instance.state_version = locked.state_version
+            instance.last_activity_at = locked.last_activity_at
+            instance.closed_at = locked.closed_at
+            instance.assigned_agent_id = locked.assigned_agent_id
         logger.info(
             "conversation_state_transitioned",
             conversation_instance_id=str(instance.pk),
+            service_cycle_id=str(service_cycle.pk),
+            service_cycle_idempotency_key=str(service_cycle.idempotency_key),
+            service_cycle_sequence=service_cycle.sequence,
             from_state=from_state,
             to_state=to_state,
             reason=reason,
@@ -712,8 +750,10 @@ class LifecycleEngine:
         status: str = AgentRun.Status.SUCCEEDED,
         error_message: str = "",
     ) -> AgentRun:
+        service_cycle = ensure_current_service_cycle(instance) if instance is not None else None
         return AgentRun.objects.create(
             instance=instance,
+            service_cycle=service_cycle,
             agent_name=agent_name,
             model_name=model_name,
             prompt_version=prompt_version,
@@ -739,10 +779,12 @@ class LifecycleEngine:
         external_object_type: str = "",
         external_object_id: str = "",
     ) -> ToolCallAuditLog:
+        service_cycle = ensure_current_service_cycle(instance)
         log, _created = ToolCallAuditLog.objects.get_or_create(
             idempotency_key=idempotency_key,
             defaults={
                 "instance": instance,
+                "service_cycle": service_cycle,
                 "agent_run": agent_run,
                 "tool_name": tool_name,
                 "input": input_payload,

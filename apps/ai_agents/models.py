@@ -92,6 +92,13 @@ class TokenTrackingLog(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session_id = models.CharField(max_length=255, db_index=True)
     ticket_id = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    service_cycle = models.ForeignKey(
+        "ConversationServiceCycle",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="token_logs",
+    )
     model_name = models.CharField(max_length=100)
     prompt_tokens = models.IntegerField(default=0)
     completion_tokens = models.IntegerField(default=0)
@@ -181,6 +188,61 @@ class ConversationInstance(models.Model):
         return f"{target} [{self.state}]"
 
 
+class ConversationServiceCycle(models.Model):
+    """One independently measurable attendance inside a conversation instance.
+
+    The HubSpot thread remains the canonical conversation identity. A service
+    cycle changes whenever a terminal instance is legitimately reopened, so
+    retries remain idempotent while metrics can distinguish separate
+    attendances on the same thread.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = "OPEN", "Open"
+        CLOSED = "CLOSED", "Closed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instance = models.ForeignKey(
+        ConversationInstance,
+        on_delete=models.CASCADE,
+        related_name="service_cycles",
+    )
+    sequence = models.PositiveIntegerField()
+    idempotency_key = models.UUIDField(unique=True, editable=False)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
+    opened_at = models.DateTimeField(db_index=True)
+    closed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    opened_from_state = models.CharField(max_length=40, blank=True)
+    opened_reason = models.TextField(blank=True)
+    opened_by_event_id = models.CharField(max_length=255, blank=True, db_index=True)
+    closed_reason = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "conversation_service_cycles"
+        ordering = ["instance_id", "sequence"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["instance", "sequence"],
+                name="uniq_conv_service_cycle_sequence",
+            ),
+            models.UniqueConstraint(
+                fields=["instance"],
+                condition=Q(status="OPEN"),
+                name="uniq_open_conv_service_cycle",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["instance", "status"], name="idx_conv_cycle_instance_status"),
+            models.Index(fields=["opened_at", "status"], name="idx_conv_cycle_opened_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.instance_id} / cycle {self.sequence} [{self.status}]"
+
+
 class ConversationEvent(models.Model):
     """Append-only normalized event linked to a conversation instance."""
 
@@ -192,6 +254,13 @@ class ConversationEvent(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     instance = models.ForeignKey(ConversationInstance, on_delete=models.CASCADE, related_name="events")
+    service_cycle = models.ForeignKey(
+        ConversationServiceCycle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="events",
+    )
     source = models.CharField(max_length=50, db_index=True)
     source_event_id = models.CharField(max_length=255, blank=True, db_index=True)
     event_type = models.CharField(max_length=100, db_index=True)
@@ -225,6 +294,13 @@ class ConversationStateTransition(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     instance = models.ForeignKey(ConversationInstance, on_delete=models.CASCADE, related_name="state_transitions")
+    service_cycle = models.ForeignKey(
+        ConversationServiceCycle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="state_transitions",
+    )
     from_state = models.CharField(max_length=40, blank=True)
     to_state = models.CharField(max_length=40, choices=ConversationInstance.State.choices, db_index=True)
     reason = models.TextField()
@@ -253,6 +329,13 @@ class AgentRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     instance = models.ForeignKey(
         ConversationInstance,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="agent_runs",
+    )
+    service_cycle = models.ForeignKey(
+        ConversationServiceCycle,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -292,6 +375,13 @@ class ToolCallAuditLog(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     instance = models.ForeignKey(ConversationInstance, on_delete=models.CASCADE, related_name="tool_call_audits")
+    service_cycle = models.ForeignKey(
+        ConversationServiceCycle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tool_call_audits",
+    )
     agent_run = models.ForeignKey(
         AgentRun,
         on_delete=models.SET_NULL,

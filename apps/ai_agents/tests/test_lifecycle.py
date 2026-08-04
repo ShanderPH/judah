@@ -10,7 +10,12 @@ import pytest
 from django.test import override_settings
 from django.utils import timezone
 
-from apps.ai_agents.models import ConversationEvent, ConversationInstance, ConversationStateTransition
+from apps.ai_agents.models import (
+    ConversationEvent,
+    ConversationInstance,
+    ConversationServiceCycle,
+    ConversationStateTransition,
+)
 from apps.ai_agents.services.lifecycle import (
     EventNormalizer,
     InvalidStateTransitionError,
@@ -470,6 +475,12 @@ def test_ticket_entered_n1_reopens_terminal_lifecycle(terminal_state: str) -> No
         from_state=terminal_state,
         to_state=ConversationInstance.State.QUEUE_PENDING,
     ).exists()
+    cycles = list(instance.service_cycles.order_by("sequence"))
+    assert [cycle.status for cycle in cycles] == [
+        ConversationServiceCycle.Status.CLOSED,
+        ConversationServiceCycle.Status.OPEN,
+    ]
+    assert result.event.service_cycle_id == cycles[1].pk
 
 
 @pytest.mark.django_db
@@ -546,6 +557,17 @@ def test_new_customer_message_reopens_closed_conversation() -> None:
         from_state=ConversationInstance.State.CLOSED,
         to_state=ConversationInstance.State.CONTEXT_HYDRATING,
     ).exists()
+    cycles = list(instance.service_cycles.order_by("sequence"))
+    assert len(cycles) == 2
+    assert cycles[1].sequence == 2
+    assert cycles[1].idempotency_key != cycles[0].idempotency_key
+    assert result.event.service_cycle_id == cycles[1].pk
+
+    duplicate = record_lifecycle_for_webhook_event(
+        _conversation_event(eventId="evt-reopen-message", messageId="msg-reopen")
+    )
+    assert duplicate.event_created is False
+    assert instance.service_cycles.count() == 2
 
 
 @pytest.mark.django_db

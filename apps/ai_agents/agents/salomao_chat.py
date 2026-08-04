@@ -240,11 +240,12 @@ def _protocol(context: ConversationContext | None) -> str | None:
 def _idempotency_key(context: ConversationContext | None) -> str | None:
     if context is None:
         return None
+    cycle_key = context.service_cycle_idempotency_key or "legacy-cycle"
     if context.thread_id:
-        return f"hubspot-thread:{context.thread_id}:salomao-chat"
+        return f"hubspot-thread:{context.thread_id}:{cycle_key}:salomao-chat"
     if context.ticket_id:
-        return f"hubspot-ticket:{context.ticket_id}:salomao-chat"
-    return f"session:{context.session_id}:salomao-chat"
+        return f"hubspot-ticket:{context.ticket_id}:{cycle_key}:salomao-chat"
+    return f"session:{context.session_id}:{cycle_key}:salomao-chat"
 
 
 def _recommended_actions(

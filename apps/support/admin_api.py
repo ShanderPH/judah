@@ -485,6 +485,24 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
     outcome = execute_assignment_attempt(reservation.attempt.pk)
     if outcome != "assigned":
         raise ValidationError(f"HubSpot owner assignment was not confirmed ({outcome}).")
+    try:
+        from apps.support.conversation_attendant_service import record_ticket_attendant
+        from apps.support.models import ConversationInstanceAttendant
+
+        record_ticket_attendant(
+            ticket_id=payload.hubspot_ticket_id,
+            agent=agent,
+            source=ConversationInstanceAttendant.Source.MANUAL_ASSIGNMENT,
+            metadata={"support_cycle_id": str(reservation.attempt.cycle_id or "")},
+        )
+    except Exception as exc:
+        logger.warning(
+            "manual_assign_attendant_history_failed",
+            ticket_id=payload.hubspot_ticket_id,
+            agent_id=str(agent.pk),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
     logger.info(
         "manual_assign_success",
@@ -591,6 +609,25 @@ def _force_reassign_internal(
         if previous_agent:
             decrement_agent_chat_count(previous_agent)
         increment_agent_chat_count(target_agent)
+
+    try:
+        from apps.support.conversation_attendant_service import record_ticket_attendant
+        from apps.support.models import ConversationInstanceAttendant
+
+        record_ticket_attendant(
+            ticket_id=hubspot_ticket_id,
+            agent=target_agent,
+            source=ConversationInstanceAttendant.Source.FORCED_REASSIGNMENT,
+            metadata={"support_cycle_id": str(assigned.cycle_id or "")},
+        )
+    except Exception as exc:
+        logger.warning(
+            "force_reassign_attendant_history_failed",
+            ticket_id=hubspot_ticket_id,
+            agent_id=str(target_agent.pk),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
     logger.info(
         "force_reassign_success",

@@ -58,6 +58,7 @@ from apps.ai_agents.services.lifecycle import (
     is_lifecycle_schema_ready,
 )
 from apps.ai_agents.services.protocol_lookup import handle_protocol_lookup_from_hubspot_context
+from apps.ai_agents.services.service_cycles import service_cycle_context
 from apps.ai_agents.tasks import run_supervisor_pipeline_task
 from apps.ai_agents.utils.business_rules import (
     is_business_hours,
@@ -311,6 +312,7 @@ def _persist_token_tracking(
     prompt_tokens: int,
     completion_tokens: int,
     cost_usd: float,
+    service_cycle_id: str | None = None,
 ) -> None:
     """Grava um registro de TokenTrackingLog.
 
@@ -321,6 +323,7 @@ def _persist_token_tracking(
     TokenTrackingLog.objects.create(
         session_id=session_id,
         ticket_id=ticket_id,
+        service_cycle_id=service_cycle_id,
         model_name=model_name or "unknown",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -328,7 +331,13 @@ def _persist_token_tracking(
     )
 
 
-async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse) -> None:
+async def _record_usage(
+    ticket_id: str,
+    session_id: str,
+    result: SalomaoResponse,
+    *,
+    service_cycle_id: str | None = None,
+) -> None:
     """Calcula custo e persiste o tracking; engole exceções de FinOps.
 
     O tracking é 'best-effort' — se o banco estiver fora, a resposta ao
@@ -348,6 +357,7 @@ async def _record_usage(ticket_id: str, session_id: str, result: SalomaoResponse
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             cost_usd=cost_usd,
+            service_cycle_id=service_cycle_id,
         )
         logger.info(
             "token_tracking_recorded",
@@ -651,6 +661,7 @@ async def _run_supervisor_for_hubspot_context(
         instance,
         allow_verified_route_reopen=verified_ai_route,
     )
+    cycle_context = await sync_to_async(service_cycle_context)(instance)
 
     latest_customer_text = _latest_incoming_customer_text(context)
     if latest_customer_text and await sync_to_async(handle_resolution_confirmation)(instance, latest_customer_text):
@@ -661,7 +672,9 @@ async def _run_supervisor_for_hubspot_context(
         )
         return
 
-    safe_context, content_risk_flags = _sanitize_latest_incoming_customer_text(context)
+    deterministic_context, content_risk_flags = _sanitize_latest_incoming_customer_text(context)
+    safe_context = dict(deterministic_context)
+    safe_context["lifecycle_context"] = cycle_context.as_dict()
     message = build_salomao_prompt_from_hubspot_context(safe_context)
     if not message:
         await sync_to_async(suppress_ai_reply)(instance, reason="no_current_customer_turn")
@@ -722,7 +735,9 @@ async def _run_supervisor_for_hubspot_context(
     # webhook, not conversation.newMessage. The hydrated history is the
     # authoritative signal: when its latest usable item is incoming, run the
     # deterministic case lookup regardless of which webhook woke the worker.
-    commercial_reply = handle_commercial_contact_from_hubspot_context(safe_context) if incoming_prompt else None
+    commercial_reply = (
+        handle_commercial_contact_from_hubspot_context(deterministic_context) if incoming_prompt else None
+    )
     if commercial_reply is not None:
         result = _deterministic_response(
             session_id=session_id,
@@ -744,7 +759,9 @@ async def _run_supervisor_for_hubspot_context(
         )
         return
 
-    protocol_reply = await handle_protocol_lookup_from_hubspot_context(safe_context) if incoming_prompt else None
+    protocol_reply = (
+        await handle_protocol_lookup_from_hubspot_context(deterministic_context) if incoming_prompt else None
+    )
     if protocol_reply is not None:
         result = _deterministic_response(
             session_id=session_id,
@@ -783,7 +800,12 @@ async def _run_supervisor_for_hubspot_context(
     )
 
     result = await supervisor.run_pipeline_async(message)
-    await _record_usage(ticket_id or context.get("ticket_id", ""), session_id, result)
+    await _record_usage(
+        ticket_id or context.get("ticket_id", ""),
+        session_id,
+        result,
+        service_cycle_id=cycle_context.cycle_id,
+    )
     await apply_supervisor_result(
         instance=instance,
         context=safe_context,
