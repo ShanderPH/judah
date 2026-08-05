@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.management import call_command
+from django.db import connection
 from django.utils import timezone
 
+from apps.support.management.commands.railway_predeploy import configure_schema_migration_database
 from apps.support.models import NewConversation
 
 
@@ -16,6 +18,31 @@ def _queue_ticket(ticket_id: str, status: str) -> NewConversation:
         queue_status=status,
         entered_queue_at=timezone.now(),
     )
+
+
+def test_schema_migration_database_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JUDAH_SCHEMA_DATABASE_URL", raising=False)
+    assert configure_schema_migration_database() is False
+
+
+def test_schema_migration_database_replaces_runtime_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = {"ENGINE": "django.db.backends.postgresql", "NAME": "privileged"}
+    original_settings = connection.settings_dict.copy()
+    monkeypatch.setenv("JUDAH_SCHEMA_DATABASE_URL", "postgresql://migration@example/db")
+    try:
+        with (
+            patch("apps.support.management.commands.railway_predeploy.dj_database_url.parse", return_value=parsed),
+            patch("apps.support.management.commands.railway_predeploy.connection.close") as close,
+        ):
+            assert configure_schema_migration_database() is True
+
+        close.assert_called_once_with()
+        assert parsed.items() <= connection.settings_dict.items()
+    finally:
+        connection.settings_dict.clear()
+        connection.settings_dict.update(original_settings)
 
 
 @pytest.mark.django_db
