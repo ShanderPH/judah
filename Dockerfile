@@ -47,9 +47,10 @@ COPY . .
 # during `releaseCommand` (e.g. collectstatic) vanish before the app starts.
 # DJANGO_ENV=development is used at build only because production.py refuses
 # to import without DATABASE_URL — the static manifest is the same either way.
-RUN DJANGO_ENV=development \
+RUN DJANGO_ENV=production \
     DJANGO_SECRET_KEY=build-time-only \
-    python manage.py collectstatic --noinput --clear || mkdir -p /app/staticfiles
+    DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build \
+    python manage.py collectstatic --noinput --clear
 
 RUN chown -R appuser:appgroup /app
 
