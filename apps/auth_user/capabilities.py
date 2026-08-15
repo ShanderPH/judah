@@ -10,6 +10,7 @@ class Capability(StrEnum):
 
     DASHBOARD_READ = "dashboard.read"
     SUPPORT_ADMIN_READ = "support.admin.read"
+    SUPPORT_CALENDAR_MANAGE = "support.calendar.manage"
     AGENTS_MANAGE = "agents.manage"
     ASSIGNMENTS_MANAGE = "assignments.manage"
     QUEUE_SYNC = "queue.sync"
@@ -20,6 +21,7 @@ class Capability(StrEnum):
 _BASE_CAPABILITIES = (Capability.DASHBOARD_READ,)
 _MANAGEMENT_CAPABILITIES = (
     Capability.SUPPORT_ADMIN_READ,
+    Capability.SUPPORT_CALENDAR_MANAGE,
     Capability.AGENTS_MANAGE,
     Capability.ASSIGNMENTS_MANAGE,
     Capability.QUEUE_SYNC,

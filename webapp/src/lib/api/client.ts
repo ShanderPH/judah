@@ -15,6 +15,9 @@ import type {
   DailyReport,
   ForceReassignPayload,
   HealthResponse,
+  CreateHelpdeskCalendarRulePayload,
+  HelpdeskCalendarResponse,
+  HelpdeskCalendarRule,
   ManualAssignPayload,
   PaginatedResponse,
   PendingConversation,
@@ -168,6 +171,22 @@ export const judahApi = {
   getQueueStatus: (options?: RequestOptions) => request<QueueStatusResponse>("/api/backend/support/queue/status", options),
   getQueueHealth: (options?: RequestOptions) => request<QueueHealthResponse>("/api/backend/support/queue/health", options),
   getBusinessHours: (options?: RequestOptions) => request<BusinessHoursResponse>("/api/backend/support/business-hours", options),
+  getHelpdeskCalendar: (params: QueryValue, options?: RequestOptions) =>
+    request<HelpdeskCalendarResponse>("/api/backend/support/helpdesk-calendar", { query: params, ...options }),
+  listHelpdeskCalendarRules: (params?: QueryValue, options?: RequestOptions) =>
+    request<HelpdeskCalendarRule[]>("/api/backend/support/helpdesk-calendar/rules", { query: params, ...options }),
+  createHelpdeskCalendarRule: (payload: CreateHelpdeskCalendarRulePayload) =>
+    request<HelpdeskCalendarRule>("/api/backend/support/helpdesk-calendar/rules", {
+      method: "POST", headers: idempotencyHeaders(), body: JSON.stringify(payload),
+    }),
+  updateHelpdeskCalendarRule: (ruleId: string, payload: Partial<CreateHelpdeskCalendarRulePayload> & { expected_version: number }) =>
+    request<HelpdeskCalendarRule>(`/api/backend/support/helpdesk-calendar/rules/${ruleId}`, {
+      method: "PATCH", headers: idempotencyHeaders(), body: JSON.stringify(payload),
+    }),
+  deleteHelpdeskCalendarRule: (ruleId: string, expectedVersion?: number) =>
+    request<{ ok: true }>(`/api/backend/support/helpdesk-calendar/rules/${ruleId}`, {
+      method: "DELETE", headers: idempotencyHeaders(), query: expectedVersion ? { expected_version: expectedVersion } : undefined,
+    }),
   listSpecialSchedules: (options?: RequestOptions) => request<SpecialSchedule[]>("/api/backend/support/special-schedules", options),
   syncNovo: () =>
     request<SyncNovoResponse>("/api/backend/support/queue/sync-novo", {

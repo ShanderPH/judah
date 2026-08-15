@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
+from itertools import pairwise
 from typing import Any, Literal, Self
 from uuid import UUID
 
 from ninja import Field, Schema
-from pydantic import model_validator
+from pydantic import field_serializer, model_validator
 
 
 class QueueResponse(Schema):
@@ -309,6 +310,104 @@ class CreateSpecialScheduleRequest(Schema):
             if self.start_hour >= self.end_hour:
                 raise ValueError("start_hour must be earlier than end_hour.")
         return self
+
+
+class HelpdeskCalendarIntervalSchema(Schema):
+    """A local half-open interval represented as HH:MM values."""
+
+    start: time
+    end: time
+
+    @field_serializer("start", "end")
+    def serialize_time(self, value: time) -> str:
+        """Keep the WebApp contract compact and stable at minute precision."""
+        return value.strftime("%H:%M")
+
+    @model_validator(mode="after")
+    def validate_order(self) -> Self:
+        if self.start >= self.end:
+            raise ValueError("Interval end must be later than start.")
+        return self
+
+
+class HelpdeskCalendarRuleRequest(Schema):
+    """Create or update payload for a helpdesk calendar rule."""
+
+    name: str = Field(min_length=1, max_length=160)
+    rule_type: Literal["service", "absence"]
+    recurrence: Literal["once", "weekly", "monthly", "yearly"]
+    starts_on: date
+    ends_on: date | None = None
+    weekdays: list[int] = Field(default_factory=list, max_length=7)
+    week_of_month: int | None = Field(default=None, ge=1, le=5)
+    dates: list[date] = Field(default_factory=list, max_length=366)
+    intervals: list[HelpdeskCalendarIntervalSchema] = Field(default_factory=list, max_length=24)
+    message: str | None = Field(default=None, max_length=4000)
+    priority: int = Field(default=50, ge=0, le=10000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_recurrence(self) -> Self:
+        if self.ends_on is not None and self.ends_on < self.starts_on:
+            raise ValueError("ends_on must not precede starts_on.")
+        if any(day < 0 or day > 6 for day in self.weekdays):
+            raise ValueError("weekdays must use values from 0 to 6.")
+        if len(set(self.weekdays)) != len(self.weekdays):
+            raise ValueError("weekdays must not contain duplicates.")
+        if len(set(self.dates)) != len(self.dates):
+            raise ValueError("dates must not contain duplicates.")
+        if self.recurrence == "once" and not self.dates:
+            raise ValueError("once rules require at least one date.")
+        if self.recurrence == "weekly" and not self.weekdays:
+            raise ValueError("weekly rules require weekdays.")
+        if self.recurrence == "monthly" and not self.weekdays and self.week_of_month is None:
+            raise ValueError("monthly rules require weekdays or week_of_month.")
+        if self.rule_type == "service" and not self.intervals:
+            raise ValueError("service rules require at least one interval.")
+        if self.rule_type == "absence" and self.intervals:
+            raise ValueError("absence rules cannot contain service intervals.")
+        ordered_intervals = sorted(self.intervals, key=lambda item: item.start)
+        if any(current.start < previous.end for previous, current in pairwise(ordered_intervals)):
+            raise ValueError("service intervals must not overlap.")
+        if self.message and ("<" in self.message or ">" in self.message):
+            raise ValueError("absence messages accept limited Markdown, not raw HTML.")
+        return self
+
+
+class HelpdeskCalendarRuleResponse(Schema):
+    id: UUID
+    name: str
+    rule_type: Literal["service", "absence"]
+    recurrence: Literal["once", "weekly", "monthly", "yearly"]
+    starts_on: date
+    ends_on: date | None = None
+    weekdays: list[int]
+    week_of_month: int | None = None
+    dates: list[date]
+    intervals: list[HelpdeskCalendarIntervalSchema]
+    message: str | None = None
+    priority: int
+    is_active: bool
+    version: int
+
+
+class HelpdeskCalendarOccurrenceSchema(Schema):
+    date: date
+    state: Literal["OPEN", "CLOSED", "ABSENCE"]
+    intervals: list[HelpdeskCalendarIntervalSchema]
+    reason: str | None = None
+    message: str | None = None
+    source_rule_id: UUID | None = None
+    source_rule_name: str | None = None
+    priority: int | None = None
+
+
+class HelpdeskCalendarResponse(Schema):
+    timezone: str
+    version: int
+    degraded: bool
+    occurrences: list[HelpdeskCalendarOccurrenceSchema]
+    rules: list[HelpdeskCalendarRuleResponse]
 
 
 # ---------------------------------------------------------------------------

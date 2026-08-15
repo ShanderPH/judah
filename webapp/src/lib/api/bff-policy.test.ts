@@ -10,6 +10,22 @@ describe("versioned BFF policy", () => {
     expect(evaluateBffRoute("/support//queue/status/", "GET")).toEqual({ ok: false, status: 404 });
   });
 
+  it("allows calendar management and keeps DELETE bodyless", () => {
+    const rulePath = "/support/helpdesk-calendar/rules/550e8400-e29b-41d4-a716-446655440000/";
+    expect(evaluateBffRoute("/support/helpdesk-calendar/", "GET")).toMatchObject({
+      ok: true,
+      requiresJson: false,
+    });
+    expect(evaluateBffRoute(rulePath, "PATCH")).toMatchObject({
+      ok: true,
+      requiresJson: true,
+    });
+    expect(evaluateBffRoute(rulePath, "DELETE")).toMatchObject({
+      ok: true,
+      requiresJson: false,
+    });
+  });
+
   it("requires an exact same-origin mutation context", () => {
     const trusted = new Request("https://judah.example/api/backend/support/queue/sync-novo/", {
       method: "POST",

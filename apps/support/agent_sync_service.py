@@ -96,11 +96,25 @@ def _get_business_hours_for_today(now: datetime | None = None) -> tuple[time, ti
 def is_business_hours(now: datetime | None = None) -> bool:
     """Check if current time is within business hours.
 
-    Considers special schedules, database-configured hours, and default hours.
+    The published helpdesk calendar is authoritative. The legacy lookup remains
+    as a rollout fallback while migration 0028 is being applied.
 
     Returns:
         True if within business hours, False otherwise.
     """
+    try:
+        from apps.support.helpdesk_calendar.service import resolve_now
+
+        # Preserve the public function's injectable-clock contract. Tests and
+        # scheduled jobs may patch Django's local clock without supplying now.
+        local_now = timezone.localtime(now)
+        return bool(resolve_now(local_now)["is_open_now"])
+    except Exception as exc:
+        logger.warning(
+            "helpdesk_calendar_runtime_fallback",
+            error_type=type(exc).__name__,
+        )
+
     local_now = timezone.localtime(now)
     hours = _get_business_hours_for_today(local_now)
 

@@ -3,6 +3,7 @@ import type { User } from "@/src/types/api";
 export const CAPABILITIES = {
   dashboardRead: "dashboard.read",
   supportAdminRead: "support.admin.read",
+  supportCalendarManage: "support.calendar.manage",
   agentsManage: "agents.manage",
   assignmentsManage: "assignments.manage",
   queueSync: "queue.sync",
@@ -18,6 +19,7 @@ const routeCapabilities: ReadonlyArray<readonly [string, Capability]> = [
   ["/agents", CAPABILITIES.supportAdminRead],
   ["/metrics", CAPABILITIES.metricsRead],
   ["/queue", CAPABILITIES.supportAdminRead],
+  ["/calendar", CAPABILITIES.supportAdminRead],
   ["/dashboard", CAPABILITIES.dashboardRead],
 ];
 

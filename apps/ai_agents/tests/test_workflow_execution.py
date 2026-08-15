@@ -10,11 +10,15 @@ from asgiref.sync import sync_to_async
 from django.test import override_settings
 
 from apps.ai_agents.agents.supervisor import SalomaoResponse
-from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
+from apps.ai_agents.contracts import (
+    ConversationContext,
+    ScheduleResolution,
+    SupervisorDecision,
+    TriageDecision,
+)
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
 from apps.ai_agents.services.execution import (
     HUMAN_HANDOFF_CONFIRMATION,
-    HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION,
     apply_supervisor_result,
     complete_ai_resolution,
     handle_resolution_confirmation,
@@ -701,7 +705,7 @@ async def test_observation_failure_never_cancels_novo_handoff() -> None:
     HUBSPOT_OFF_HOURS_PIPELINE_ID="off-hours-pipeline",
     HUBSPOT_OFF_HOURS_STAGE_ID="off-hours-stage",
 )
-async def test_off_hours_handoff_warns_customer_and_uses_configured_route() -> None:
+async def test_absence_handoff_uses_calendar_message_and_configured_route() -> None:
     instance = await sync_to_async(_instance)()
     result = SalomaoResponse(
         session_id="hubspot-ticket-ticket-1",
@@ -721,6 +725,16 @@ async def test_off_hours_handoff_warns_customer_and_uses_configured_route() -> N
     )
     send_reply = AsyncMock(return_value={"sent": True, "message_id": "out-off-hours"})
     route_handoff = AsyncMock(return_value={"updated": True})
+    absence_message = "Estamos **ausentes** hoje. Voltamos amanhã às 9h. 😊"
+    schedule = ScheduleResolution(
+        state="ABSENCE",
+        is_open_now=False,
+        reason="absence:team_event",
+        message=absence_message,
+        source_rule_id="rule-1",
+        source_rule_name="Team event",
+        priority=300,
+    )
 
     with (
         patch(
@@ -731,16 +745,20 @@ async def test_off_hours_handoff_warns_customer_and_uses_configured_route() -> N
             "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
             new=route_handoff,
         ),
+        patch(
+            "apps.support.helpdesk_calendar.service.resolve_now",
+            return_value=schedule.model_dump(mode="json"),
+        ),
     ):
         await apply_supervisor_result(
             instance=instance,
             context={"thread_ids": ["thread-1"]},
-            conversation_context=_context().model_copy(update={"is_off_hours": True}),
+            conversation_context=_context().model_copy(update={"is_off_hours": True, "schedule_resolution": schedule}),
             message="Quero falar com uma pessoa",
             result=result,
         )
 
-    assert send_reply.await_args.args[1] == HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
+    assert send_reply.await_args.args[1] == absence_message
     route_handoff.assert_awaited_once_with(
         "ticket-1",
         "off-hours-stage",

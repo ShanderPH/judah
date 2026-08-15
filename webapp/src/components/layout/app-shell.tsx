@@ -4,6 +4,7 @@ import { Button, Card } from "@heroui/react";
 import {
   Activity,
   BarChart3,
+  CalendarDays,
   Gauge,
   Menu,
   Orbit,
@@ -30,6 +31,7 @@ const navigation: ReadonlyArray<{ href: string; icon: typeof Gauge; label: strin
   { href: "/auto-assignment", icon: Activity, label: "Autoatribuicao", hint: "Distribuicao", capability: CAPABILITIES.supportAdminRead },
   { href: "/agents", icon: Users, label: "Agentes", hint: "Gestao da equipe", capability: CAPABILITIES.supportAdminRead },
   { href: "/metrics", icon: BarChart3, label: "Metricas", hint: "Analytics", capability: CAPABILITIES.metricsRead },
+  { href: "/calendar", icon: CalendarDays, label: "Calendario", hint: "Horario helpdesk", capability: CAPABILITIES.supportAdminRead },
 ];
 
 function Sidebar({
@@ -257,6 +259,8 @@ function TopBar({
 }
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
+  const pathname = usePathname();
+  const showStatusRail = pathname === "/dashboard";
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeMobile = useCallback(() => {
@@ -267,7 +271,12 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
 
   return (
     <div className="relative z-10 min-h-svh px-3 pb-6 pt-3 md:px-4 md:pb-8 md:pt-4">
-      <div className="mx-auto grid w-full max-w-[1680px] gap-3 md:gap-4 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_320px]">
+      <div
+        className={cn(
+          "mx-auto grid w-full max-w-[1680px] gap-3 md:gap-4 lg:grid-cols-[280px_minmax(0,1fr)]",
+          showStatusRail && "xl:grid-cols-[280px_minmax(0,1fr)_320px]",
+        )}
+      >
         <Sidebar
           isMobileOpen={isMobileOpen}
           onClose={closeMobile}
@@ -280,7 +289,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
           </PageTransition>
         </main>
 
-        <StatusRail />
+        {showStatusRail ? <StatusRail /> : null}
       </div>
     </div>
   );

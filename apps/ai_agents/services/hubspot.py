@@ -31,7 +31,12 @@ import structlog
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from apps.ai_agents.contracts import ConversationContext, ConversationMessage, CustomerIdentity
+from apps.ai_agents.contracts import (
+    ConversationContext,
+    ConversationMessage,
+    CustomerIdentity,
+    ScheduleResolution,
+)
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
 from apps.ai_agents.services.conversation_turn import (
     CURRENT_CUSTOMER_TURN_MARKER,
@@ -1212,7 +1217,8 @@ def build_conversation_context_from_hubspot_context(
     *,
     channel: str = "hubspot",
     session_id: str,
-    is_off_hours: bool = False,
+    is_off_hours: bool | None = None,
+    schedule_resolution: ScheduleResolution | dict[str, object] | None = None,
 ) -> ConversationContext:
     """Normalize hydrated HubSpot context into the internal ConversationContext contract."""
     history = context.get("conversation_history") or []
@@ -1258,6 +1264,20 @@ def build_conversation_context_from_hubspot_context(
     if not messages:
         missing_context.append("recent_messages")
 
+    if schedule_resolution is None:
+        if is_off_hours is not None:
+            schedule_resolution = ScheduleResolution(
+                state="CLOSED" if is_off_hours else "OPEN",
+                is_open_now=not is_off_hours,
+                reason="off_hours" if is_off_hours else None,
+            )
+        else:
+            from apps.support.helpdesk_calendar.service import resolve_now
+
+            schedule_resolution = resolve_now()
+    schedule = ScheduleResolution.from_runtime(schedule_resolution)
+    effective_is_off_hours = not schedule.is_open_now if is_off_hours is None else is_off_hours
+
     return ConversationContext(
         channel=cast("ConversationChannel", channel),
         session_id=session_id,
@@ -1281,7 +1301,8 @@ def build_conversation_context_from_hubspot_context(
         reopen_count=int(lifecycle_context.get("reopen_count") or 0),
         reopened_from_state=lifecycle_context.get("reopened_from_state") or None,
         reopen_reason=lifecycle_context.get("reopen_reason") or None,
-        is_off_hours=is_off_hours,
+        is_off_hours=effective_is_off_hours,
+        schedule_resolution=schedule,
         can_send_reply=can_send_reply,
         recent_messages=messages[-20:],
         allowed_actions=allowed_actions,
@@ -1405,6 +1426,21 @@ def markdown_to_hubspot_rich_text(markdown: str) -> str:
     return "".join(rendered)
 
 
+def markdown_to_plain_text(markdown: str) -> str:
+    """Return a readable HubSpot `text` fallback for the supported Markdown subset."""
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r"\1 (\2)", normalized)
+    normalized = re.sub(r"^#{1,6}\s+", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"^>\s?", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"^[-*]\s+", "• ", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"^\d+[.)]\s+", "• ", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"`([^`]+)`", r"\1", normalized)
+    normalized = re.sub(r"\*\*(.+?)\*\*", r"\1", normalized)
+    normalized = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", normalized)
+    normalized = re.sub(r"<[^>]+>", "", normalized)
+    return "\n".join(line.rstrip() for line in normalized.split("\n")).strip()
+
+
 async def send_salomao_reply_to_hubspot_thread(
     context: dict[str, Any],
     text: str,
@@ -1509,7 +1545,7 @@ async def send_salomao_reply_to_hubspot_thread(
         "channelId": channel_id,
         "recipients": recipients,
         "senderActorId": sender_actor_id,
-        "text": text,
+        "text": markdown_to_plain_text(text),
         "type": "MESSAGE",
         "richText": markdown_to_hubspot_rich_text(text),
     }
@@ -1605,6 +1641,7 @@ __all__ = [
     "hydrate_thread_context",
     "hydrate_ticket_context",
     "markdown_to_hubspot_rich_text",
+    "markdown_to_plain_text",
     "refresh_salomao_reply_context",
     "send_salomao_reply_to_hubspot_thread",
     "update_hubspot_ticket_route",

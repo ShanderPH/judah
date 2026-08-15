@@ -187,6 +187,66 @@ export interface SpecialSchedule {
   reason: string;
 }
 
+export type HelpdeskRuleType = "service" | "absence";
+export type HelpdeskRecurrence = "once" | "weekly" | "monthly" | "yearly";
+export type HelpdeskOccurrenceState = "OPEN" | "CLOSED" | "ABSENCE";
+
+export interface HelpdeskCalendarInterval {
+  start: string;
+  end: string;
+}
+
+export interface HelpdeskCalendarOccurrence {
+  date: string;
+  state: HelpdeskOccurrenceState;
+  intervals: HelpdeskCalendarInterval[];
+  reason: string | null;
+  message: string | null;
+  source_rule_id: string | null;
+  source_rule_name: string | null;
+  priority: number | null;
+}
+
+export interface HelpdeskCalendarRule {
+  id: string;
+  name: string;
+  rule_type: HelpdeskRuleType;
+  recurrence: HelpdeskRecurrence;
+  starts_on: string;
+  ends_on: string | null;
+  weekdays: number[];
+  week_of_month: number | null;
+  dates: string[];
+  intervals: HelpdeskCalendarInterval[];
+  message: string | null;
+  priority: number;
+  is_active: boolean;
+  version: number;
+}
+
+export interface HelpdeskCalendarResponse {
+  timezone: string;
+  version: number;
+  degraded: boolean;
+  occurrences: HelpdeskCalendarOccurrence[];
+  rules: HelpdeskCalendarRule[];
+}
+
+export interface CreateHelpdeskCalendarRulePayload {
+  name: string;
+  rule_type: HelpdeskRuleType;
+  recurrence: HelpdeskRecurrence;
+  starts_on: string;
+  ends_on?: string | null;
+  weekdays?: number[];
+  week_of_month?: number | null;
+  dates?: string[];
+  intervals: HelpdeskCalendarInterval[];
+  message?: string | null;
+  priority?: number;
+  expected_version?: number;
+}
+
 export interface SyncNovoResponse {
   created: number;
   skipped: number;

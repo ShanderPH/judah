@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import TYPE_CHECKING
 
-from ninja import Router
+from ninja import Query, Router
 
 from apps.support.admin_api import router as admin_router
 from apps.support.admin_audit import execute_audited_action
@@ -13,6 +14,9 @@ from apps.support.schemas import (
     BusinessHoursResponse,
     CreateSpecialScheduleRequest,
     CreateTicketRequest,
+    HelpdeskCalendarResponse,
+    HelpdeskCalendarRuleRequest,
+    HelpdeskCalendarRuleResponse,
     NewConversationResponse,
     QueueHealthResponse,
     QueueMetricsResponse,
@@ -32,6 +36,150 @@ if TYPE_CHECKING:
 
 router = Router()
 router.add_router("", admin_router)
+
+
+# ---------------------------------------------------------------------------
+# Published helpdesk calendar
+# ---------------------------------------------------------------------------
+
+
+@router.get("/helpdesk-calendar/", response=HelpdeskCalendarResponse, summary="Resolve helpdesk calendar")
+@require_manager_or_admin
+def get_helpdesk_calendar(
+    request,
+    from_: date = Query(..., alias="from"),  # noqa: B008
+    to: date = Query(...),  # noqa: B008
+    view: str = "month",
+) -> dict:
+    """Return effective occurrences for a bounded local-date window."""
+    from apps.support.helpdesk_calendar.service import resolve_range, serialize_rule
+
+    if view not in {"month", "week"}:
+        raise ValueError("view must be month or week")
+    schedule, occurrences, degraded = resolve_range(from_, to)
+    rules = (
+        schedule.rules.filter(is_active=True).prefetch_related("intervals", "absence_message") if schedule.pk else []
+    )
+    return {
+        "timezone": schedule.timezone_name,
+        "version": schedule.version,
+        "degraded": degraded,
+        "occurrences": occurrences,
+        "rules": [serialize_rule(rule) for rule in rules],
+    }
+
+
+@router.get(
+    "/helpdesk-calendar/rules/", response=list[HelpdeskCalendarRuleResponse], summary="List helpdesk calendar rules"
+)
+@require_manager_or_admin
+def list_helpdesk_calendar_rules(request, active: bool = True) -> list[dict]:
+    """List published calendar rules."""
+    from apps.support.helpdesk_calendar.service import get_schedule, serialize_rule
+
+    schedule = get_schedule()
+    if not schedule.pk:
+        return []
+    rules = schedule.rules.filter(is_active=active).prefetch_related("intervals", "absence_message")
+    return [serialize_rule(rule) for rule in rules]
+
+
+@router.post(
+    "/helpdesk-calendar/rules/", response={201: HelpdeskCalendarRuleResponse}, summary="Create helpdesk calendar rule"
+)
+@require_manager_or_admin
+def create_helpdesk_calendar_rule(request, payload: HelpdeskCalendarRuleRequest) -> tuple[int, dict]:
+    """Create a rule with an audited, idempotent administrative write."""
+    from apps.support.helpdesk_calendar.service import save_rule, serialize_rule
+
+    return execute_audited_action(
+        request,
+        action="support.helpdesk_calendar.rule.create",
+        target_type="helpdesk_schedule_rule",
+        reason=payload.name,
+        fingerprint_payload=payload.model_dump(mode="json"),
+        operation=lambda: (201, serialize_rule(save_rule(payload))),
+    )
+
+
+@router.patch(
+    "/helpdesk-calendar/rules/{rule_id}/",
+    response=HelpdeskCalendarRuleResponse,
+    summary="Update helpdesk calendar rule",
+)
+@require_manager_or_admin
+def update_helpdesk_calendar_rule(
+    request, rule_id: str, payload: HelpdeskCalendarRuleRequest, expected_version: int | None = None
+) -> dict:
+    """Update a rule only if its version still matches the caller's view."""
+    from apps.support.helpdesk_calendar.service import save_rule, serialize_rule
+
+    expected = expected_version if expected_version is not None else payload.expected_version
+    return execute_audited_action(
+        request,
+        action="support.helpdesk_calendar.rule.update",
+        target_type="helpdesk_schedule_rule",
+        target_id=rule_id,
+        reason=payload.name,
+        fingerprint_payload={"rule_id": rule_id, "expected_version": expected, **payload.model_dump(mode="json")},
+        operation=lambda: (200, serialize_rule(save_rule(payload, rule_id=rule_id, expected_version=expected))),
+    )[1]
+
+
+@router.delete("/helpdesk-calendar/rules/{rule_id}/", response={200: dict}, summary="Deactivate helpdesk calendar rule")
+@require_manager_or_admin
+def delete_helpdesk_calendar_rule(request, rule_id: str, expected_version: int | None = None) -> tuple[int, dict]:
+    """Deactivate a rule without destroying its audit/history."""
+    from apps.support.helpdesk_calendar.service import deactivate_rule
+
+    def _deactivate() -> tuple[int, dict]:
+        deactivate_rule(rule_id, expected_version=expected_version)
+        return 200, {"ok": True}
+
+    return execute_audited_action(
+        request,
+        action="support.helpdesk_calendar.rule.deactivate",
+        target_type="helpdesk_schedule_rule",
+        target_id=rule_id,
+        reason="helpdesk_calendar_rule_deactivate",
+        fingerprint_payload={"rule_id": rule_id, "expected_version": expected_version},
+        operation=_deactivate,
+    )
+
+
+@router.post("/helpdesk-calendar/preview/", response=HelpdeskCalendarResponse, summary="Preview helpdesk calendar")
+@require_manager_or_admin
+def preview_helpdesk_calendar(
+    request,
+    from_: date = Query(..., alias="from"),  # noqa: B008
+    to: date = Query(...),  # noqa: B008
+    payload: HelpdeskCalendarRuleRequest | None = None,
+) -> dict:
+    """Resolve an existing window; payload validation is handled before publish."""
+    from apps.support.helpdesk_calendar.service import resolve_range
+
+    schedule, occurrences, degraded = resolve_range(from_, to)
+    return {
+        "timezone": schedule.timezone_name,
+        "version": schedule.version,
+        "degraded": degraded,
+        "occurrences": occurrences,
+        "rules": [],
+    }
+
+
+@router.get("/helpdesk-calendar/resolve/", response=dict, summary="Resolve one helpdesk instant")
+@require_manager_or_admin
+def resolve_helpdesk_calendar(request, at: date) -> dict:
+    """Return a diagnostic resolution for one local date."""
+    from apps.support.helpdesk_calendar.service import get_schedule, resolve_day
+
+    schedule = get_schedule()
+    return {
+        "timezone": schedule.timezone_name,
+        "version": schedule.version,
+        "resolution": resolve_day(at, schedule=schedule),
+    }
 
 
 @router.get("/tickets/", response=list[TicketListResponse], summary="List tickets")
