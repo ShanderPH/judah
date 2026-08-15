@@ -1,7 +1,7 @@
 """HelpdeskActionAgent — Executor de ações externas via MCP e APIs diretas.
 
 Decisão arquitetural: este agente recebe ferramentas **dinamicamente** de
-servidores FastMCP (HubSpot, Jira, n8n), eliminando o acoplamento estático
+servidores FastMCP (HubSpot, Jira e Central de Ajuda), eliminando o acoplamento estático
 entre o código do agente e as APIs externas. Cada servidor MCP expõe suas
 ferramentas via o protocolo Model Context Protocol; o Agno as descobre em
 runtime e as injecta no contexto do LLM.
@@ -86,13 +86,6 @@ DEFAULT_MCP_SERVERS: list[MCPServerConfig] = [
         transport="sse",
         enabled=False,
     ),
-    MCPServerConfig(
-        name="n8n_webhook_mcp",
-        # Ex: url="https://n8n.inchurch.com.br/mcp/sse"
-        url=None,
-        transport="sse",
-        enabled=False,
-    ),
     # Central de Ajuda InChurch — endpoint próprio para publicação/atualização
     # de artigos e consulta a tickets internos. Placeholder: será ativado
     # quando o servidor MCP da Central estiver provisionado.
@@ -170,29 +163,6 @@ def connect_jira_mcp(url: str, *, timeout_seconds: int = 30) -> MCPTools:
     )
 
 
-def connect_n8n_mcp(url: str, *, timeout_seconds: int = 45) -> MCPTools:
-    """Cria um cliente MCP conectado ao servidor FastMCP do n8n.
-
-    Expõe workflows n8n como ferramentas (ex: `trigger_onboarding_workflow`,
-    `send_whatsapp_notification`, `create_support_task`).
-
-    Args:
-        url: URL do servidor SSE FastMCP do n8n.
-        timeout_seconds: Timeout de conexão (maior porque workflows n8n podem
-            demorar para responder).
-
-    Returns:
-        MCPTools configurado para o servidor n8n.
-    """
-    logger.info("mcp_connect_n8n", url=url)
-    return MCPTools(
-        url=url,
-        transport="sse",
-        timeout_seconds=timeout_seconds,
-        tool_name_prefix="n8n",
-    )
-
-
 def build_mcp_tools_from_config(
     configs: list[MCPServerConfig] | None = None,
 ) -> list[MCPTools]:
@@ -238,8 +208,8 @@ _ACTION_INSTRUCTIONS = [
     "Você é o HelpdeskAction — agente de ações do helpdesk InChurch.",
     "Você é acionado pelo Supervisor Salomão quando a rota do Heimdall "
     "requer uma AÇÃO concreta no HubSpot (tickets/contatos/negócios), "
-    "na Central de Ajuda InChurch (tickets internos/artigos), no Jira "
-    "(issues) ou em workflows n8n.",
+    "na Central de Ajuda InChurch (tickets internos/artigos) ou no Jira "
+    "(issues).",
     "Use o contexto estruturado do Heimdall (rota, prioridade, tags, "
     "dados_faltantes) para decidir quais ferramentas MCP acionar.",
     "Se `dados_faltantes` não estiver vazio, peça ao Supervisor para "

@@ -184,7 +184,6 @@ app_name/
 | **OpenAI**           | REST API              | Modelos GPT-4o e GPT-4o-mini para agentes de IA           |
 | **Anthropic**        | REST API              | Modelo fallback para resiliência                          |
 | **Sentry**           | SDK                   | Monitoramento de erros, traces e performance              |
-| **n8n**              | Webhooks              | Automação de workflows externos                           |
 
 ### Fluxo de Dados Principal
 

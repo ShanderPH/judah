@@ -174,6 +174,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.CONTACT_COLLECTING: {
         ConversationInstance.State.CONTACT_ASSOCIATING,
+        ConversationInstance.State.CONTEXT_HYDRATING,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
@@ -200,6 +201,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.AI_SERVICE_RUNNING: {
+        ConversationInstance.State.CONTACT_REQUIRED,
         ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,

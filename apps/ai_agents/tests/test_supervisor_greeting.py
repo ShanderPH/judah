@@ -13,7 +13,7 @@ from apps.ai_agents.agents.supervisor import (
     _deterministic_handoff_trigger,
     _is_greeting_only,
 )
-from apps.ai_agents.contracts import SalomaoChatDraft, TriageDecision
+from apps.ai_agents.contracts import ConversationContext, CustomerIdentity, SalomaoChatDraft, TriageDecision
 from apps.ai_agents.models import TokenTrackingLog
 
 
@@ -471,7 +471,7 @@ def test_integrated_chain_uses_salomao_v1_for_customer_frustration() -> None:
     assert "knowledge_rag: failed" not in response.agent_trace
 
 
-def test_integrated_chain_passes_missing_data_to_salomao_v1() -> None:
+def test_integrated_chain_collects_missing_data_before_salomao_v1() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -494,11 +494,9 @@ def test_integrated_chain_passes_missing_data_to_salomao_v1() -> None:
     assert response is not None
     assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
-    assert response.message == "Informe o ID da igreja para eu continuar."
-    assert response.decision is not None
-    assert "candidate_resolution_requires_customer_input" in response.decision.risk_flags
-    assert len(salomao.calls) == 1
-    assert salomao.calls[0]["triage_decision"].dados_faltantes == ["id_da_igreja"]
+    assert "ID da igreja" in response.message
+    assert response.missing_data == ["id_da_igreja"]
+    assert salomao.calls == []
 
 
 def test_greeting_only_messages_are_detected_without_swallowing_requests() -> None:
@@ -619,7 +617,7 @@ def test_integrated_chain_never_generates_an_alternative_answer_when_v1_is_unava
 
 
 @override_settings(HEIMDALL_MIN_CONFIDENCE=0.65)
-def test_integrated_chain_uses_salomao_v1_for_low_confidence_triage() -> None:
+def test_integrated_chain_hands_off_low_confidence_triage() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -638,12 +636,135 @@ def test_integrated_chain_uses_salomao_v1_for_low_confidence_triage() -> None:
     response = supervisor._run_integrated_chain("Não sei explicar o que aconteceu")
 
     assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.requires_human_handoff is True
+    assert "safe routing threshold" in (response.handoff_reason or "")
+    assert salomao.calls == []
+
+
+def test_integrated_chain_collects_unknown_identity_before_service() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-identity"
+    supervisor.user_metadata = {
+        "conversation_context": ConversationContext(
+            channel="hubspot",
+            session_id="session-identity",
+            customer_identity=CustomerIdentity(status="UNKNOWN", missing_fields=["registered_email"]),
+        ).model_dump(mode="json")
+    }
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="SUPORTE_TECNICO_N1",
+            prioridade="MEDIA",
+            sentimento="neutro",
+            confidence=0.9,
+        )
+    )
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
+
+    response = supervisor._run_integrated_chain("O aplicativo não abre")
+
+    assert response is not None
     assert response.outcome == "waiting_customer"
-    assert response.requires_human_handoff is False
-    assert response.decision is not None
-    assert "candidate_resolution_lacks_positive_evidence" in response.decision.risk_flags
-    assert len(salomao.calls) == 1
-    assert salomao.calls[0]["triage_decision"].confidence == 0.4
+    assert "e-mail cadastrado" in response.message
+    assert "identity_required" in response.risk_flags
+    assert salomao.calls == []
+
+
+def test_integrated_chain_blocks_sensitive_route_for_probable_identity() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-sensitive"
+    supervisor.user_metadata = {
+        "conversation_context": ConversationContext(
+            channel="hubspot",
+            session_id="session-sensitive",
+            customer_identity=CustomerIdentity(
+                status="PROBABLE",
+                contact_id="contact-1",
+                confidence=0.82,
+                matched_by="customer_stated_email",
+            ),
+        ).model_dump(mode="json")
+    }
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="FINANCEIRO",
+            prioridade="MEDIA",
+            sentimento="neutro",
+            confidence=0.92,
+        )
+    )
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
+
+    response = supervisor._run_integrated_chain("Quero contestar uma cobrança")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert "verified customer identity" in (response.handoff_reason or "")
+    assert salomao.calls == []
+
+
+@override_settings(HEIMDALL_MIN_CONFIDENCE=0.65, HEIMDALL_AUTO_ROUTE_CONFIDENCE=0.80)
+def test_integrated_chain_clarifies_intermediate_confidence() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-clarify"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="SUPORTE_TECNICO_N1",
+            prioridade="MEDIA",
+            sentimento="neutro",
+            confidence=0.72,
+        )
+    )
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
+
+    response = supervisor._run_integrated_chain("Está dando problema")
+
+    assert response is not None
+    assert response.outcome == "waiting_customer"
+    assert response.missing_data == ["mais_detalhes_do_problema"]
+    assert salomao.calls == []
+
+
+def test_integrated_chain_hands_off_after_identity_attempt_limit() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-identity-limit"
+    supervisor.user_metadata = {
+        "conversation_context": ConversationContext(
+            channel="hubspot",
+            session_id="session-identity-limit",
+            customer_identity=CustomerIdentity(
+                status="UNKNOWN",
+                missing_fields=["registered_email"],
+                collection_attempts=2,
+            ),
+        ).model_dump(mode="json")
+    }
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FakeTriageRunner(
+        TriageDecision(
+            rota="SUPORTE_TECNICO_N1",
+            prioridade="MEDIA",
+            sentimento="neutro",
+            confidence=0.9,
+        )
+    )
+    salomao = RecordingSalomaoChat()
+    supervisor._salomao_chat = salomao
+
+    response = supervisor._run_integrated_chain("Não sei o e-mail")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert "two collection attempts" in (response.handoff_reason or "")
+    assert salomao.calls == []
 
 
 def test_salomao_draft_tokens_are_propagated_to_response() -> None:

@@ -60,7 +60,7 @@ Serviço de atribuição automática que consome a fila `new_conversations` e se
 
 ### MCP (Model Context Protocol)
 
-Protocolo para conectar agentes de IA a ferramentas externas (HubSpot, Jira, n8n). O JUDAH implementa um servidor FastMCP para HubSpot.
+Protocolo para conectar agentes de IA a ferramentas externas (HubSpot, Jira e Central de Ajuda). O JUDAH implementa um servidor FastMCP para HubSpot.
 
 ### NewConversation
 

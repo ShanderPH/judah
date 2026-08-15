@@ -12,11 +12,11 @@ O módulo é opcional e controlado pela feature flag `AI_ROUTING_ENABLED`. Quand
 
 - Orquestrar o Supervisor multi-agente.
 - Classificar mensagens (Heimdall).
-- Delegar todas as respostas ao Salomão v1 após a triagem.
+- Executar a triagem Heimdall nativamente e delegar respostas ao Salomão v1 quando o adapter estiver configurado.
 - Executar ações no HubSpot/Jira via MCP.
 - Persistir sessões, memórias, traces e custos.
 - Receber webhooks do HubSpot e executar pipeline assíncrono.
-- Usar o Salomão v1 externo no fluxo determinístico sempre que `SALOMAO_V1_BASE_URL` estiver configurado.
+- Usar o Salomão v1 externo como especialista opcional quando `SALOMAO_V1_BASE_URL` estiver configurado; sua ausência nunca impede a triagem nativa.
 
 Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes, agent runs e auditoria de tools. O backend controla estado e idempotencia; agentes retornam saidas estruturadas, mas nao alteram lifecycle diretamente.
 
@@ -39,7 +39,7 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 ### `HelpdeskActionAgent`
 
 - Modelo: `DEFAULT_MODEL`.
-- Ferramentas MCP dinâmicas (HubSpot, Jira, n8n placeholders).
+- Ferramentas MCP dinâmicas (HubSpot, Jira e Central de Ajuda).
 - Fallback estático com `GetTicketInfo`, `SearchJiraIssues`, `InChurchDiagnosticsTool`.
 - Deve fechar loop atualizando ticket no HubSpot.
 
@@ -70,6 +70,7 @@ Tambem persiste o lifecycle deterministico de conversas com eventos, transicoes,
 - `TriageDecision`: rota, prioridade, tags, dados faltantes, sentimento,
   confiança, evidências e versão da política.
 - `ConversationContext` / `ConversationMessage`: contexto neutro de provedor (canal, ticket, thread, mensagens recentes).
+- `CustomerIdentity`: identidade operacional sem PII bruta, com status, confiança, método e evidências determinísticas.
 - `SalomaoChatDraft`: resposta normalizada produzida pelo adapter Salomao v1.
 - `SupervisorDecision`: decisão final estruturada que o backend valida e aplica.
 - `ActionIntent` / `HubSpotAction`: ações recomendadas e escritas no HubSpot.
@@ -114,6 +115,7 @@ Custo e consumo de tokens por execução.
 - `channel_capabilities`: aplica bloqueios configuráveis por canal; WhatsApp é sempre permitido para evitar que configurações legadas interrompam o atendimento.
 - `tool_permissions`: aplica allowlist de tools por estado do lifecycle.
 - `build_handoff_package`: monta contexto minimo para transferencia humana.
+- `identity.resolve_customer_identity`: compara associação, participante da thread, identificadores de entrega e dados fornecidos pelo cliente sem usar LLM.
 - `execution.apply_supervisor_result`: aplica respostas e handoffs com
   permissão por estado, idempotência e auditoria.
 - `content_safety.assess_customer_content`: sanitiza conteúdo e bloqueia
@@ -170,6 +172,11 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 ## Regras de negócio
 
 - Heimdall sempre responde primeiro.
+- O webhook e o Heimdall são nativos do JUDAH; o fluxo não possui dependência de execução no n8n.
+- Identidade segue `VERIFIED`, `PROBABLE`, `AMBIGUOUS`, `UNKNOWN` ou `CONFLICT`; nunca seleciona o primeiro contato associado por ordem.
+- Identidade desconhecida/ambígua solicita um único dado por turno, com no máximo duas tentativas antes do handoff.
+- `BOLETO`, `FINANCEIRO` e `MEIOS_DE_PAGAMENTO` exigem identidade `VERIFIED`; caso contrário, o atendimento passa para humano.
+- Confiança abaixo de `HEIMDALL_MIN_CONFIDENCE` faz handoff; entre esse limite e `HEIMDALL_AUTO_ROUTE_CONFIDENCE`, o backend solicita clarificação.
 - Roteamento por `rota`:
   - `DUVIDAS_PLATAFORMA` / `ATENDIMENTO_IA` → RAG.
   - `BOLETO`, `MEIOS_DE_PAGAMENTO`, `FINANCEIRO`, `SUPORTE_TECNICO_N1`, `EVENTOS`, `CUSTOMER_SUCCESS` → Action.
@@ -196,6 +203,7 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
   arquivo, documento, imagem, dado ou outra ação futura do cliente.
 - Uma nova mensagem `INCOMING` reabre o lifecycle fechado da mesma conversa
   para que uma nova dúvida nunca seja perdida.
+- Coleta de identidade usa `CONTACT_REQUIRED` e `CONTACT_COLLECTING`, retomando a hidratação na próxima mensagem.
 - Tools externas exigem estado permitido, chave de idempotência e
   `ToolCallAuditLog`.
 - `TokenTrackingLog` mede custo e uso; consumo acumulado nunca bloqueia uma
@@ -238,6 +246,7 @@ Base: `/api/v1/ai/` (quando `AI_ROUTING_ENABLED=true`)
 - [`apps/ai_agents/api/webhooks.py`](../../apps/ai_agents/api/webhooks.py)
 - [`apps/ai_agents/tasks.py`](../../apps/ai_agents/tasks.py)
 - [`apps/ai_agents/services/hubspot.py`](../../apps/ai_agents/services/hubspot.py)
+- [`apps/ai_agents/services/identity.py`](../../apps/ai_agents/services/identity.py)
 - [`apps/integrations/salomao_v1/client.py`](../../apps/integrations/salomao_v1/client.py)
 - [`apps/ai_agents/utils/pricing.py`](../../apps/ai_agents/utils/pricing.py)
 - [`apps/ai_agents/mcp_servers/hubspot_server.py`](../../apps/ai_agents/mcp_servers/hubspot_server.py)

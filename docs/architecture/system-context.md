@@ -30,7 +30,6 @@ O JUDAH atua como hub central entre canais de atendimento (HubSpot, Jira), infra
 | Anthropic | REST API | Fallback de LLM | [`apps/ai_agents/agents/base.py`](../../apps/ai_agents/agents/base.py) |
 | Sentry | SDK | Erros, traces e performance | [`core/settings/base.py`](../../core/settings/base.py) |
 | InRadar (InChurch) | REST API | Diagnóstico de eventos | [`apps/ai_agents/tools/inchurch_tools.py`](../../apps/ai_agents/tools/inchurch_tools.py) |
-| n8n | Webhooks (MCP SSE placeholder) | Workflows externos | [`apps/ai_agents/agents/action.py`](../../apps/ai_agents/agents/action.py) |
 
 ## Fronteiras
 
@@ -70,7 +69,7 @@ O JUDAH atua como hub central entre canais de atendimento (HubSpot, Jira), infra
 
 - A assinatura de webhooks do HubSpot é verificada via HMAC v1 ou v3. Em `DEBUG` sem `HUBSPOT_APP_SECRET`, a verificação é bypassada (risco documentado em [`security/risks.md`](../security/risks.md)).
 - A integração InRadar depende de `INRADAR_AUTH_TOKEN`, cuja origem/renovação não está clara no código (TODO: confirmar).
-- Servidores MCP adicionais (Jira, n8n, Central de Ajuda) estão configurados como placeholders desabilitados.
+- Servidores MCP adicionais (Jira e Central de Ajuda) estão configurados como placeholders desabilitados.
 
 ## Recomendações
 

@@ -722,6 +722,11 @@ async def test_hydrate_ticket_context_success(monkeypatch) -> None:
     with (
         patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
         patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)),
+        patch.object(
+            hubspot,
+            "_fetch_contact",
+            new=AsyncMock(return_value={"id": "contact-1", "properties": {"firstname": "Maria"}}),
+        ),
         patch.object(hubspot, "_fetch_thread", new=AsyncMock(side_effect=[{"id": "thread-2"}, {"id": "thread-1"}])),
         patch.object(
             hubspot,
@@ -780,6 +785,11 @@ async def test_hydrate_ticket_context_keeps_partial_thread_failure(monkeypatch) 
     with (
         patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
         patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)),
+        patch.object(
+            hubspot,
+            "_fetch_contact",
+            new=AsyncMock(return_value={"id": "contact-1", "properties": {"firstname": "Maria"}}),
+        ),
         patch.object(
             hubspot, "_fetch_thread", new=AsyncMock(side_effect=httpx.ConnectError("offline", request=request))
         ),
@@ -859,6 +869,11 @@ async def test_hydrate_thread_context_success_and_mock(monkeypatch) -> None:
         patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)),
         patch.object(
             hubspot,
+            "_fetch_contact",
+            new=AsyncMock(return_value={"id": "contact-1", "properties": {"firstname": "Maria"}}),
+        ),
+        patch.object(
+            hubspot,
             "_fetch_conversation_history",
             new=AsyncMock(return_value=[{"id": "m1", "direction": "INCOMING", "text": "Oi"}]),
         ),
@@ -922,6 +937,11 @@ async def test_hydrate_thread_context_uses_caller_ticket_when_thread_association
         patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)) as fetch_ticket,
         patch.object(
             hubspot,
+            "_fetch_contact",
+            new=AsyncMock(return_value={"id": "contact-1", "properties": {}}),
+        ),
+        patch.object(
+            hubspot,
             "_fetch_conversation_history",
             new=AsyncMock(return_value=[{"id": "m1", "direction": "INCOMING", "text": "Oi"}]),
         ),
@@ -966,6 +986,11 @@ async def test_hydrate_thread_context_recovers_ticket_from_canonical_instance(mo
         patch.object(hubspot.httpx, "AsyncClient", return_value=_async_client_context(client)),
         patch.object(hubspot, "_fetch_thread", new=AsyncMock(return_value=thread)),
         patch.object(hubspot, "_fetch_ticket", new=AsyncMock(return_value=ticket)) as fetch_ticket,
+        patch.object(
+            hubspot,
+            "_fetch_contact",
+            new=AsyncMock(return_value={"id": "contact-1", "properties": {}}),
+        ),
         patch.object(
             hubspot,
             "_fetch_conversation_history",

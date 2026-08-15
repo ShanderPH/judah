@@ -32,6 +32,7 @@ def test_customer_message_scheduler_waits_for_quiet_window_and_caps_burst() -> N
     client.get.return_value = b"100.000000"
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=False),
         patch("apps.ai_agents.tasks.time.time", return_value=101.0),
         patch("apps.ai_agents.tasks.uuid.uuid4", return_value=SimpleNamespace(hex="newest-token")),
         patch("apps.ai_agents.tasks.run_salomao_v1_thread_pipeline_task.apply_async") as enqueue,
@@ -150,7 +151,7 @@ def test_newest_message_batch_claim_runs_pipeline() -> None:
     ):
         run_salomao_v1_thread_pipeline_task.run("thread-1", message_batch_token="newest-token")
 
-    pipeline.assert_awaited_once_with("thread-1", context=context)
+    pipeline.assert_awaited_once_with("thread-1", context=context, is_off_hours=False)
 
 
 def test_supervisor_task_success_duplicate_and_lock_failure() -> None:
@@ -160,7 +161,7 @@ def test_supervisor_task_success_duplicate_and_lock_failure() -> None:
     pipeline = Mock(return_value="coroutine")
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
-        patch("apps.ai_agents.tasks.off_hours_reason", return_value="off_hours"),
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=True),
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=pipeline),
         patch("apps.ai_agents.tasks.asyncio.run") as run,
     ):
@@ -200,7 +201,7 @@ def test_supervisor_task_accepts_staging_dispatch_contract_and_queues_followup()
 
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
-        patch("apps.ai_agents.tasks.off_hours_reason", return_value=None),
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=False),
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=pipeline),
         patch("apps.ai_agents.tasks.asyncio.run"),
         patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as followup,
@@ -256,6 +257,7 @@ def test_supervisor_task_retries_and_tolerates_lock_release_failure() -> None:
     client.delete.side_effect = redis.RedisError("delete failed")
     with (
         patch("apps.ai_agents.tasks._redis_client", return_value=client),
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=False),
         patch("apps.ai_agents.api.webhooks._run_supervisor_pipeline", new=Mock(return_value="coroutine")),
         patch("apps.ai_agents.tasks.asyncio.run", side_effect=RuntimeError("pipeline failed")),
         patch.object(run_supervisor_pipeline_task, "retry", side_effect=RuntimeError("retried")) as retry,
@@ -291,7 +293,7 @@ def test_thread_task_success_duplicate_retry_and_lock_release_failure() -> None:
         ) as pipeline,
     ):
         run_salomao_v1_thread_pipeline_task.run("thread-1")
-    pipeline.assert_awaited_once_with("thread-1", context=context)
+    pipeline.assert_awaited_once_with("thread-1", context=context, is_off_hours=False)
 
     client.set.return_value = False
     with (

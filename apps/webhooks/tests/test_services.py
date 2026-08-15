@@ -221,6 +221,7 @@ class TestProcessWebhookEvent:
         )
 
         with (
+            patch("apps.support.availability_runtime.may_ingest_queue", return_value=True),
             patch("apps.support.tasks.task_matchmaker_assign_single.delay") as mock_assign,
             patch(
                 "apps.webhooks.handlers.hubspot_handler.transaction.on_commit", side_effect=lambda callback: callback()

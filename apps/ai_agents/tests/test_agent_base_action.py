@@ -98,11 +98,9 @@ def test_mcp_connectors_and_config_builder() -> None:
     with patch("apps.ai_agents.agents.action.MCPTools", side_effect=lambda **kwargs: kwargs):
         hubspot = cast(dict[str, Any], action.connect_hubspot_mcp("https://hub"))
         jira = cast(dict[str, Any], action.connect_jira_mcp("https://jira"))
-        n8n = cast(dict[str, Any], action.connect_n8n_mcp("https://n8n"))
         helpdesk = cast(dict[str, Any], action.connect_helpdesk_api_mcp("https://help"))
         assert hubspot["tool_name_prefix"] == "hubspot"
         assert jira["tool_name_prefix"] == "jira"
-        assert n8n["timeout_seconds"] == 45
         assert helpdesk["tool_name_prefix"] == "helpdesk"
         tools = cast(
             list[dict[str, Any]],

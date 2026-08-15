@@ -436,6 +436,60 @@ def schedule_stale_turn_followup(
     return True
 
 
+async def update_waiting_stage_with_audit(
+    *,
+    instance: ConversationInstance,
+    context: dict[str, Any],
+    agent_run: AgentRun | None,
+    turn_id: str,
+) -> dict[str, Any]:
+    """Move an answered AI ticket to its waiting stage exactly once."""
+    ticket_id = str(instance.hubspot_ticket_id or "").strip()
+    stage_id = str(getattr(settings, "HUBSPOT_AI_WAITING_STAGE_ID", "")).strip()
+    pipeline_id = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "")).strip()
+    if not ticket_id or not stage_id:
+        return {"updated": False, "reason": "missing_ticket_or_waiting_stage"}
+    current_pipeline = str(context.get("pipeline") or "").strip()
+    if not current_pipeline:
+        return {"updated": False, "reason": "pipeline_not_hydrated"}
+    if pipeline_id and current_pipeline != pipeline_id:
+        return {"updated": False, "reason": "ticket_outside_ai_pipeline"}
+
+    prepared = await sync_to_async(_prepare_tool_call)(
+        instance=instance,
+        tool_name="update_ticket_stage",
+        idempotency_key=f"waiting-stage:v1:{instance.pk}:{turn_id}",
+        input_payload={"ticket_id": ticket_id, "stage_id": stage_id, "pipeline_id": pipeline_id},
+        agent_run=agent_run,
+    )
+    if not prepared.should_execute:
+        return prepared.cached_output
+
+    from apps.ai_agents.services.hubspot import update_hubspot_ticket_route
+
+    try:
+        output = await update_hubspot_ticket_route(
+            ticket_id,
+            stage_id,
+            pipeline_id=pipeline_id or None,
+        )
+    except Exception as exc:
+        await sync_to_async(_finish_tool_call)(
+            prepared.audit_id,
+            output={},
+            succeeded=False,
+            error_message=str(exc),
+        )
+        raise
+    await sync_to_async(_finish_tool_call)(
+        prepared.audit_id,
+        output=output,
+        succeeded=bool(output.get("updated")),
+        error_message="" if output.get("updated") else str(output.get("reason") or "stage_update_failed"),
+    )
+    return output
+
+
 def publish_handoff_observation(
     *,
     instance: ConversationInstance,
@@ -964,6 +1018,28 @@ def _set_waiting_state(
 ) -> None:
     """Persist the waiting state and deterministic resume metadata."""
     engine = LifecycleEngine()
+    if "identity_required" in decision.risk_flags:
+        engine.transition(
+            instance,
+            ConversationInstance.State.CONTACT_REQUIRED,
+            reason="Customer identity evidence is missing or ambiguous.",
+            actor_type="supervisor",
+        )
+        engine.transition(
+            instance,
+            ConversationInstance.State.CONTACT_COLLECTING,
+            reason="Identity collection question sent; waiting for customer data.",
+            actor_type="supervisor",
+        )
+        attempts = max(0, int((instance.metadata or {}).get("identity_collection_attempts") or 0)) + 1
+        engine.update_metadata(
+            instance,
+            awaiting_resolution_confirmation=False,
+            waiting_for_fields=decision.missing_data,
+            identity_collection_attempts=attempts,
+            last_supervisor_decision=decision.model_dump(mode="json"),
+        )
+        return
     engine.transition(
         instance,
         ConversationInstance.State.WAITING_FOR_CUSTOMER,
@@ -1147,6 +1223,26 @@ async def apply_supervisor_result(
             await sync_to_async(mark_retryable_failure)(instance, exc)
             raise
         return
+
+    if reply_sent:
+        stage_result = await update_waiting_stage_with_audit(
+            instance=instance,
+            context=context,
+            agent_run=agent_run,
+            turn_id=instance.last_message_id or instance.last_event_id,
+        )
+        skipped_stage_reasons = {
+            "missing_ticket_or_waiting_stage",
+            "pipeline_not_hydrated",
+            "ticket_outside_ai_pipeline",
+        }
+        stage_reason = stage_result.get("reason")
+        if not stage_result.get("updated") and stage_reason not in skipped_stage_reasons:
+            await sync_to_async(mark_retryable_failure)(
+                instance,
+                stage_reason or "HubSpot waiting-stage update failed.",
+            )
+            raise RuntimeError(stage_reason or "HubSpot waiting-stage update failed.")
 
     await sync_to_async(_set_waiting_state)(instance, decision=decision)
 
