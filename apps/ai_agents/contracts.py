@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Literal, Self
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -68,6 +69,38 @@ class CustomerIdentity(BaseModel):
         return self.status == "VERIFIED"
 
 
+class ScheduleResolution(BaseModel):
+    """Provider-neutral snapshot of the effective helpdesk schedule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["UNKNOWN", "OPEN", "CLOSED", "ABSENCE"] = "UNKNOWN"
+    is_open_now: bool = False
+    reason: str | None = None
+    message: str | None = None
+    source_rule_id: str | None = None
+    source_rule_name: str | None = None
+    priority: int | None = None
+
+    @classmethod
+    def from_runtime(cls, value: Self | Mapping[str, object]) -> Self:
+        """Normalize the richer resolver payload into the conversation contract."""
+        if isinstance(value, cls):
+            return value
+        source_rule_id = value.get("source_rule_id")
+        return cls.model_validate(
+            {
+                "state": value.get("state", "UNKNOWN"),
+                "is_open_now": value.get("is_open_now", False),
+                "reason": value.get("reason"),
+                "message": value.get("message"),
+                "source_rule_id": str(source_rule_id) if source_rule_id else None,
+                "source_rule_name": value.get("source_rule_name"),
+                "priority": value.get("priority"),
+            }
+        )
+
+
 class ConversationContext(BaseModel):
     """Provider-neutral context passed into agent handoffs."""
 
@@ -90,6 +123,7 @@ class ConversationContext(BaseModel):
     reopened_from_state: str | None = None
     reopen_reason: str | None = None
     is_off_hours: bool = False
+    schedule_resolution: ScheduleResolution = Field(default_factory=ScheduleResolution)
     can_send_reply: bool = True
     recent_messages: list[ConversationMessage] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
@@ -202,6 +236,7 @@ __all__ = [
     "HandoffPackage",
     "HubSpotAction",
     "SalomaoChatDraft",
+    "ScheduleResolution",
     "SupervisorDecision",
     "TriageDecision",
 ]

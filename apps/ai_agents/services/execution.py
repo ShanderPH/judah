@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from apps.ai_agents.agents.base import DEFAULT_MINI_MODEL_ID
 from apps.ai_agents.agents.supervisor import SalomaoResponse
-from apps.ai_agents.contracts import ConversationContext, SupervisorDecision, TriageDecision
+from apps.ai_agents.contracts import ConversationContext, ScheduleResolution, SupervisorDecision, TriageDecision
 from apps.ai_agents.models import AgentRun, ConversationInstance, ToolCallAuditLog
 from apps.ai_agents.services.conversation_turn import (
     current_incoming_turn_audit,
@@ -1104,9 +1104,38 @@ async def apply_supervisor_result(
     )
 
     if decision.outcome == "escalate_human":
+        # Only refresh contexts that entered the workflow with an authoritative
+        # calendar snapshot. Legacy/API callers may omit it and must retain
+        # their explicit is_off_hours contract.
+        if conversation_context.schedule_resolution.state != "UNKNOWN":
+            from apps.support.helpdesk_calendar.service import resolve_now
+
+            try:
+                fresh_schedule = ScheduleResolution.from_runtime(await sync_to_async(resolve_now)())
+            except Exception as exc:
+                logger.warning(
+                    "supervisor_handoff_schedule_refresh_failed",
+                    conversation_instance_id=str(instance.pk),
+                    error_type=type(exc).__name__,
+                )
+                fresh_schedule = conversation_context.schedule_resolution
+            if fresh_schedule != conversation_context.schedule_resolution:
+                logger.info(
+                    "supervisor_handoff_schedule_refreshed",
+                    conversation_instance_id=str(instance.pk),
+                    previous_state=conversation_context.schedule_resolution.state,
+                    current_state=fresh_schedule.state,
+                    current_reason=fresh_schedule.reason,
+                )
+                conversation_context = conversation_context.model_copy(
+                    update={
+                        "is_off_hours": not fresh_schedule.is_open_now,
+                        "schedule_resolution": fresh_schedule,
+                    }
+                )
         if can_reply and reply_tool_allowed:
             handoff_confirmation = (
-                HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
+                conversation_context.schedule_resolution.message or HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION
                 if conversation_context.is_off_hours
                 else HUMAN_HANDOFF_CONFIRMATION
             )

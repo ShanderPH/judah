@@ -1,7 +1,7 @@
 """Direct coverage for support API helper endpoints."""
 
 import inspect
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +9,7 @@ import pytest
 from django.utils import timezone
 
 from apps.support import api
+from apps.support.helpdesk_calendar.service import save_rule
 from apps.support.models import (
     Agent,
     AssignedConversation,
@@ -18,7 +19,13 @@ from apps.support.models import (
     QueuePerformanceMetrics,
     SpecialSchedule,
 )
-from apps.support.schemas import CreateSpecialScheduleRequest, CreateTicketRequest, UpdateTicketRequest
+from apps.support.schemas import (
+    CreateSpecialScheduleRequest,
+    CreateTicketRequest,
+    HelpdeskCalendarIntervalSchema,
+    HelpdeskCalendarRuleRequest,
+    UpdateTicketRequest,
+)
 
 
 def _call(function, *args, **kwargs):
@@ -141,6 +148,53 @@ def test_business_hours_config_and_default() -> None:
     assert configured["name"] == "custom"
     assert configured["monday"] == "08:00-17:00"
     assert configured["is_currently_business_hours"] is False
+
+
+@pytest.mark.django_db
+def test_helpdesk_calendar_read_endpoints_return_stable_contracts() -> None:
+    request = _request()
+    target = date(2026, 8, 24)
+    save_rule(
+        HelpdeskCalendarRuleRequest(
+            name="API coverage",
+            rule_type="service",
+            recurrence="once",
+            starts_on=target,
+            dates=[target],
+            intervals=[HelpdeskCalendarIntervalSchema(start=time(10), end=time(12))],
+            priority=500,
+        )
+    )
+
+    calendar = _call(
+        api.get_helpdesk_calendar,
+        request,
+        from_=target,
+        to=target,
+        view="week",
+    )
+    rules = _call(api.list_helpdesk_calendar_rules, request, active=True)
+    preview = _call(
+        api.preview_helpdesk_calendar,
+        request,
+        from_=target,
+        to=target,
+    )
+    resolved = _call(api.resolve_helpdesk_calendar, request, at=target)
+
+    assert calendar["occurrences"][0]["intervals"] == [{"start": "10:00", "end": "12:00"}]
+    assert rules[0]["name"] == "API coverage"
+    assert preview["rules"] == []
+    assert resolved["resolution"]["source_rule_name"] == "API coverage"
+
+    with pytest.raises(ValueError, match="month or week"):
+        _call(
+            api.get_helpdesk_calendar,
+            request,
+            from_=target,
+            to=target,
+            view="quarter",
+        )
 
 
 @pytest.mark.django_db

@@ -727,10 +727,23 @@ async def _run_supervisor_for_hubspot_context(
 
     agent_context = deepcopy(safe_context)
     agent_context["customer_identity"] = identity.model_dump(mode="json")
+
+    from apps.support.helpdesk_calendar.service import resolve_now
+
+    schedule_resolution = await sync_to_async(resolve_now)()
+    resolved_is_off_hours = not bool(schedule_resolution["is_open_now"])
+    if resolved_is_off_hours != is_off_hours:
+        logger.info(
+            "supervisor_context_schedule_refreshed",
+            ticket_id=ticket_id,
+            dispatched_is_off_hours=is_off_hours,
+            current_is_off_hours=resolved_is_off_hours,
+            schedule_reason=schedule_resolution.get("reason"),
+        )
     conversation_context = build_conversation_context_from_hubspot_context(
         agent_context,
         session_id=session_id,
-        is_off_hours=is_off_hours,
+        schedule_resolution=schedule_resolution,
     )
     if "prompt_injection_attempt" in content_risk_flags:
         await sync_to_async(request_human_handoff)(

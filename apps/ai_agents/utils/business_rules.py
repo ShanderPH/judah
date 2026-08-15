@@ -86,6 +86,15 @@ def is_business_hours(now: datetime | None = None) -> bool:
     'Quinta Fire' (quinta 12h-13h), já que o time está indisponível nesses
     períodos.
     """
+    try:
+        from apps.support.helpdesk_calendar.service import resolve_now
+
+        return bool(resolve_now(now)["is_open_now"])
+    except Exception:
+        # Calendar storage is intentionally fail-closed; preserve the legacy
+        # deterministic behavior if the new tables are unavailable during rollout.
+        pass
+
     local = _resolve(now)
 
     if is_holiday(local):
@@ -117,10 +126,24 @@ def off_hours_reason(now: datetime | None = None) -> str | None:
     """
     local = _resolve(now)
 
+    # Keep these stable reason codes for downstream logs and HubSpot routing,
+    # even when the editable calendar materializes the same legacy closures.
     if is_holiday(local):
         return f"holiday:{holiday_name(local)}"
     if is_quinta_fire(local):
         return "quinta_fire"
+
+    try:
+        from apps.support.helpdesk_calendar.service import resolve_now
+
+        resolution = resolve_now(local)
+        if resolution["is_open_now"]:
+            return None
+        if resolution["state"] == "ABSENCE":
+            return str(resolution["reason"] or "off_hours")
+        return "off_hours"
+    except Exception:
+        pass
     if is_business_hours(local):
         return None
     return "off_hours"

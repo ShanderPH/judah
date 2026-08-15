@@ -516,6 +516,42 @@ def test_build_conversation_context_always_allows_reply_action_for_whatsapp(sett
     assert "send_thread_reply" in conversation_context.allowed_actions
 
 
+def test_build_conversation_context_keeps_identity_and_schedule_snapshot() -> None:
+    context = {
+        "ticket_id": "123",
+        "originating_channel": "webchat",
+        "thread_ids": ["thread-1"],
+        "conversation_history": [{"direction": "INCOMING", "text": "Oi", "id": "m1"}],
+        "customer_identity": {
+            "status": "VERIFIED",
+            "contact_id": "contact-7",
+            "confidence": 1.0,
+            "matched_by": "delivery_identifier",
+        },
+    }
+
+    conversation_context = build_conversation_context_from_hubspot_context(
+        context,
+        session_id="hubspot-ticket-123",
+        schedule_resolution={
+            "state": "ABSENCE",
+            "is_open_now": False,
+            "reason": "absence:team_event",
+            "message": "Estamos **ausentes** hoje. 😊",
+            "source_rule_id": "rule-1",
+            "source_rule_name": "Team event",
+            "priority": 300,
+        },
+    )
+
+    assert conversation_context.customer_identity is not None
+    assert conversation_context.customer_identity.status == "VERIFIED"
+    assert conversation_context.contact_id == "contact-7"
+    assert conversation_context.is_off_hours is True
+    assert conversation_context.schedule_resolution.state == "ABSENCE"
+    assert conversation_context.schedule_resolution.message == "Estamos **ausentes** hoje. 😊"
+
+
 def test_auth_headers_and_image_helpers(monkeypatch) -> None:
     monkeypatch.delenv("HUBSPOT_ACCESS_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="não configurado"):
@@ -1090,7 +1126,7 @@ async def test_send_reply_preconditions_and_success(monkeypatch) -> None:
     assert result["message_id"] == "reply-1"
     response.raise_for_status.assert_called_once()
     payload = client.post.await_args.kwargs["json"]
-    assert payload["text"] == reply
+    assert payload["text"] == hubspot.markdown_to_plain_text(reply)
     assert "<h4>Como fazer</h4>" in payload["richText"]
     assert "<ol><li>Acesse <strong>Financeiro</strong>.</li>" in payload["richText"]
     assert "<ul><li>O estorno depende do gateway.</li></ul>" in payload["richText"]
@@ -1269,6 +1305,13 @@ def test_markdown_to_hubspot_rich_text_renders_safe_links() -> None:
     ) in rendered
     unsafe = hubspot.markdown_to_hubspot_rich_text("[Clique](javascript:alert(1))")
     assert "<a " not in unsafe
+
+
+def test_markdown_to_plain_text_preserves_emoji_and_removes_formatting() -> None:
+    rendered = hubspot.markdown_to_plain_text("Estamos **ausentes** hoje. 😊\n[Status](https://status.example.com)")
+
+    assert rendered == "Estamos ausentes hoje. 😊\nStatus (https://status.example.com)"
+    assert "<" not in hubspot.markdown_to_plain_text("<script>alert('x')</script>Seguro")
 
 
 @pytest.mark.asyncio

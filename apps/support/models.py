@@ -877,6 +877,119 @@ class SpecialSchedule(models.Model):
         return f"SpecialSchedule {self.date} — {self.start_hour}h-{self.end_hour}h ({self.reason})"
 
 
+class HelpdeskSchedule(models.Model):
+    """Published helpdesk calendar configuration and optimistic version."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    timezone_name = models.CharField(max_length=64, default="America/Sao_Paulo")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PUBLISHED)
+    version = models.PositiveBigIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "helpdesk_schedules"
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["status"],
+                condition=models.Q(status="published"),
+                name="helpdesk_schedule_one_published",
+            ),
+        ]
+
+
+class HelpdeskScheduleRule(models.Model):
+    """A recurring service or absence rule in the published calendar."""
+
+    class RuleType(models.TextChoices):
+        SERVICE = "service", "Service"
+        ABSENCE = "absence", "Absence"
+
+    class Recurrence(models.TextChoices):
+        ONCE = "once", "Once"
+        WEEKLY = "weekly", "Weekly"
+        MONTHLY = "monthly", "Monthly"
+        YEARLY = "yearly", "Yearly"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    schedule = models.ForeignKey(HelpdeskSchedule, on_delete=models.CASCADE, related_name="rules")
+    name = models.CharField(max_length=160)
+    rule_type = models.CharField(max_length=16, choices=RuleType.choices)
+    recurrence = models.CharField(max_length=16, choices=Recurrence.choices)
+    starts_on = models.DateField()
+    ends_on = models.DateField(null=True, blank=True)
+    weekdays = models.JSONField(default=list, blank=True)
+    week_of_month = models.SmallIntegerField(null=True, blank=True)
+    dates = models.JSONField(default=list, blank=True)
+    priority = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveBigIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "helpdesk_schedule_rules"
+        ordering = ["-priority", "name"]  # noqa: RUF012
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["schedule", "is_active", "starts_on"], name="helpdesk_rule_active_idx"),
+            models.Index(fields=["rule_type", "recurrence", "priority"], name="helpdesk_rule_match_idx"),
+        ]
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(ends_on__isnull=True) | models.Q(ends_on__gte=models.F("starts_on")),
+                name="helpdesk_rule_valid_date_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(week_of_month__isnull=True) | models.Q(week_of_month__gte=1, week_of_month__lte=5),
+                name="helpdesk_rule_valid_week",
+            ),
+            models.CheckConstraint(condition=models.Q(priority__gte=0), name="helpdesk_rule_priority_nonnegative"),
+        ]
+
+
+class HelpdeskScheduleInterval(models.Model):
+    """Half-open local-time interval attached to a calendar rule."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rule = models.ForeignKey(HelpdeskScheduleRule, on_delete=models.CASCADE, related_name="intervals")
+    weekday = models.SmallIntegerField(null=True, blank=True)
+    date = models.DateField(null=True, blank=True)
+    start = models.TimeField()
+    end = models.TimeField()
+
+    class Meta:
+        db_table = "helpdesk_schedule_intervals"
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(condition=models.Q(end__gt=models.F("start")), name="helpdesk_interval_increasing"),
+            models.CheckConstraint(
+                condition=models.Q(weekday__isnull=True) | models.Q(weekday__gte=0, weekday__lte=6),
+                name="helpdesk_interval_valid_weekday",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["rule", "date", "weekday"], name="helpdesk_interval_lookup_idx"),
+        ]
+
+
+class HelpdeskAbsenceMessage(models.Model):
+    """Sanitized absence copy and plain-text provider fallback."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rule = models.OneToOneField(HelpdeskScheduleRule, on_delete=models.CASCADE, related_name="absence_message")
+    rich_text = models.TextField(blank=True, default="")
+    plain_text = models.TextField(blank=True, default="")
+    version = models.PositiveBigIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "helpdesk_absence_messages"
+
+
 class ConversationInstanceAttendant(models.Model):
     """Historical record of a human agent who attended one service cycle."""
 

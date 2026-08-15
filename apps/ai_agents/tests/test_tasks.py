@@ -148,6 +148,7 @@ def test_newest_message_batch_claim_runs_pipeline() -> None:
             "apps.ai_agents.api.webhooks._run_salomao_v1_thread_pipeline",
             new=AsyncMock(),
         ) as pipeline,
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=False),
     ):
         run_salomao_v1_thread_pipeline_task.run("thread-1", message_batch_token="newest-token")
 
@@ -291,6 +292,7 @@ def test_thread_task_success_duplicate_retry_and_lock_release_failure() -> None:
             "apps.ai_agents.api.webhooks._run_salomao_v1_thread_pipeline",
             new=AsyncMock(),
         ) as pipeline,
+        patch("apps.ai_agents.tasks._is_currently_off_hours", return_value=False),
     ):
         run_salomao_v1_thread_pipeline_task.run("thread-1")
     pipeline.assert_awaited_once_with("thread-1", context=context, is_off_hours=False)
