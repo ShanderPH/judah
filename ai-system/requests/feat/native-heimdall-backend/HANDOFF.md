@@ -33,7 +33,7 @@ is not part of the runtime path.
 
 ## Verification
 
-- Full test suite: `913 passed, 10 skipped`.
+- Full test suite on the current `main`: `1063 passed, 12 skipped`.
 - Ruff: all selected application files passed.
 - Mypy: no issues in the 10 changed runtime source files.
 - Django system check: no issues.
