@@ -43,6 +43,7 @@ def _async_client_context(client: MagicMock) -> MagicMock:
 @override_settings(
     HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
     HUBSPOT_N1_NEW_STAGE_ID="ai-active",
+    HUBSPOT_AI_WAITING_STAGE_ID="waiting",
     HUBSPOT_SALOMAO_SENDER_ACTOR_ID="A-salomao",
 )
 @pytest.mark.parametrize(
@@ -75,8 +76,8 @@ def _async_client_context(client: MagicMock) -> MagicMock:
                 "owner_id": "",
                 "conversation_history": [],
             },
-            False,
-            "ticket_left_ai_stage",
+            True,
+            "eligible",
         ),
         (
             {
