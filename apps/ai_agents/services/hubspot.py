@@ -31,7 +31,7 @@ import structlog
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from apps.ai_agents.contracts import ConversationContext, ConversationMessage
+from apps.ai_agents.contracts import ConversationContext, ConversationMessage, CustomerIdentity
 from apps.ai_agents.services.channel_capabilities import can_send_automated_reply
 from apps.ai_agents.services.conversation_turn import (
     CURRENT_CUSTOMER_TURN_MARKER,
@@ -65,6 +65,18 @@ DEFAULT_TICKET_CHURCH_PROPERTY = "codigo_de_igreja_local___ticket"
 TICKET_CHURCH_PROPERTY = (
     str(getattr(settings, "HUBSPOT_TICKET_CHURCH_PROPERTY", "")).strip() or DEFAULT_TICKET_CHURCH_PROPERTY
 )
+CONTACT_IDENTITY_PROPERTIES = (
+    "email",
+    "firstname",
+    "lastname",
+    "phone",
+    "mobilephone",
+    "hs_whatsapp_phone_number",
+    "lifecyclestage",
+    "nome_da_igreja",
+    "hs_lead_status",
+)
+MAX_IDENTITY_CONTACTS = 5
 
 # QA/dev switch: quando True, `hydrate_ticket_context` devolve um payload
 # sintético sem tocar na API do HubSpot. Usado pelo simulador local de
@@ -91,6 +103,16 @@ def _mock_ticket_context(ticket_id: str) -> dict[str, Any]:
         "priority": "high",
         "church_id": "1573",
         "contact_ids": ["mock-contact-001"],
+        "associated_contact_id": "mock-contact-001",
+        "contact_profiles": [
+            {
+                "id": "mock-contact-001",
+                "properties": {
+                    "firstname": "Cliente",
+                    "email": "cliente@example.test",
+                },
+            }
+        ],
         "thread_ids": ["mock-thread-001"],
         "conversation_history": [
             {
@@ -152,6 +174,75 @@ async def _fetch_ticket(client: httpx.AsyncClient, ticket_id: str) -> dict[str, 
     )
     response.raise_for_status()
     return response.json()
+
+
+async def _fetch_contact(client: httpx.AsyncClient, contact_id: str) -> dict[str, Any]:
+    """Fetch only the bounded contact fields used for identity resolution."""
+    response = await client.get(
+        f"{HUBSPOT_API_BASE}/crm/v3/objects/contacts/{contact_id}",
+        params={"properties": ",".join(CONTACT_IDENTITY_PROPERTIES), "archived": "false"},
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def _hydrate_contact_profiles(client: httpx.AsyncClient, context: dict[str, Any]) -> None:
+    """Hydrate a bounded set of associated contacts without failing the ticket."""
+    contact_ids = list(
+        dict.fromkeys(
+            str(value)
+            for value in [context.get("associated_contact_id"), *(context.get("contact_ids") or [])]
+            if str(value or "").strip()
+        )
+    )[:MAX_IDENTITY_CONTACTS]
+    profiles: list[dict[str, Any]] = []
+    for contact_id in contact_ids:
+        try:
+            profiles.append(await _fetch_contact(client, contact_id))
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "hubspot_identity_contact_fetch_failed",
+                status=exc.response.status_code,
+            )
+            context["errors"].append(f"contact_fetch:{exc.response.status_code}")
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "hubspot_identity_contact_fetch_error",
+                error_type=exc.__class__.__name__,
+            )
+            context["errors"].append(f"contact_fetch:{exc.__class__.__name__}")
+    context["contact_profiles"] = profiles
+
+
+async def search_hubspot_contacts_by_email(
+    email: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Return exact HubSpot email matches for an identity collection turn."""
+    if USE_MOCK_HUBSPOT or not email.strip():
+        return []
+    headers = _auth_headers()
+    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
+    payload = {
+        "filterGroups": [
+            {
+                "filters": [
+                    {
+                        "propertyName": "email",
+                        "operator": "EQ",
+                        "value": email.strip(),
+                    }
+                ]
+            }
+        ],
+        "properties": list(CONTACT_IDENTITY_PROPERTIES),
+        "limit": 2,
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as client:
+        response = await client.post(f"{HUBSPOT_API_BASE}/crm/v3/objects/contacts/search", json=payload)
+        response.raise_for_status()
+        return list(response.json().get("results") or [])
 
 
 def _apply_ticket_context(context: dict[str, Any], ticket: dict[str, Any]) -> None:
@@ -672,6 +763,8 @@ async def hydrate_ticket_context(
         "priority": "",
         "church_id": "",
         "contact_ids": [],
+        "associated_contact_id": "",
+        "contact_profiles": [],
         "thread_ids": [],
         "threads": [],
         "conversation_history": [],
@@ -753,7 +846,9 @@ async def hydrate_ticket_context(
             )
             context["thread_ids"] = [selected_thread_id]
             context["threads"] = [selected_thread]
+            context["associated_contact_id"] = str(selected_thread.get("associatedContactId") or "")
             context["conversation_history"] = normalize_conversation_history(selected_history)
+        await _hydrate_contact_profiles(client, context)
         await _hydrate_latest_incoming_image(client, context)
 
     logger.info(
@@ -804,6 +899,8 @@ async def hydrate_thread_context(
         "priority": "",
         "church_id": "",
         "contact_ids": [],
+        "associated_contact_id": "",
+        "contact_profiles": [],
         "thread_ids": [str(thread_id)],
         "threads": [],
         "conversation_history": [],
@@ -849,6 +946,7 @@ async def hydrate_thread_context(
                         action="fetch_ticket_using_persisted_canonical_identity",
                     )
             contact_id = thread.get("associatedContactId")
+            context["associated_contact_id"] = str(contact_id or "")
             context["contact_ids"] = [str(contact_id)] if contact_id else []
             context["originating_channel"] = thread.get("originalChannelId") or ""
             if context["ticket_id"]:
@@ -874,6 +972,7 @@ async def hydrate_thread_context(
             context["conversation_history"] = normalize_conversation_history(
                 await _fetch_conversation_history(client, thread_id, limit=limit)
             )
+            await _hydrate_contact_profiles(client, context)
             await _hydrate_latest_incoming_image(client, context)
         except httpx.HTTPStatusError as exc:
             logger.error(
@@ -1134,6 +1233,14 @@ def build_conversation_context_from_hubspot_context(
 
     thread_ids = context.get("thread_ids") or []
     contact_ids = context.get("contact_ids") or []
+    raw_identity = context.get("customer_identity")
+    customer_identity = (
+        raw_identity
+        if isinstance(raw_identity, CustomerIdentity)
+        else CustomerIdentity.model_validate(raw_identity)
+        if isinstance(raw_identity, dict)
+        else None
+    )
     raw_channel = context.get("originating_channel") or context.get("channel") or channel
     lifecycle_context = context.get("lifecycle_context") if isinstance(context.get("lifecycle_context"), dict) else {}
     can_send_reply = can_send_automated_reply(str(raw_channel))
@@ -1156,8 +1263,14 @@ def build_conversation_context_from_hubspot_context(
         session_id=session_id,
         ticket_id=context.get("ticket_id") or None,
         thread_id=str(thread_ids[0]) if thread_ids else None,
-        contact_id=str(contact_ids[0]) if contact_ids else None,
-        church_id=context.get("church_id") or None,
+        contact_id=(
+            customer_identity.contact_id
+            if customer_identity and customer_identity.contact_id
+            else str(contact_ids[0])
+            if contact_ids
+            else None
+        ),
+        church_id=(customer_identity.church_id if customer_identity else context.get("church_id") or None),
         pipeline_id=context.get("pipeline") or None,
         pipeline_stage=context.get("pipeline_stage") or None,
         owner_id=context.get("owner_id") or None,
@@ -1173,6 +1286,7 @@ def build_conversation_context_from_hubspot_context(
         recent_messages=messages[-20:],
         allowed_actions=allowed_actions,
         missing_context=missing_context,
+        customer_identity=customer_identity,
     )
 
 

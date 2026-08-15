@@ -55,6 +55,7 @@ O JUDAH não persiste resultados Celery porque nenhum fluxo consome `AsyncResult
 | `SALOMAO_WAITING_RECONCILIATION_LIMIT` | `apps/ai_agents/tasks.py` | Lote do safety net que compara o último `message_id` do HubSpot nas conversas aguardando cliente (padrão: `50`, limite interno: `200`). É opcional; `conversation.newMessage` permanece o gatilho imediato. |
 | `SALOMAO_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima do draft do Salomão antes de transbordar para humano (padrão: `0.65`). |
 | `HEIMDALL_MIN_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima da triagem Heimdall antes de transbordar para humano (padrão: `0.65`). |
+| `HEIMDALL_AUTO_ROUTE_CONFIDENCE` | `apps/ai_agents/agents/supervisor.py` | Confiança mínima para roteamento automático; entre o mínimo e este limite o Supervisor pede clarificação (padrão: `0.80`). |
 
 ## Variáveis de HubSpot
 

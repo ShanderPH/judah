@@ -34,9 +34,15 @@ def _mock_hubspot_internal_observation() -> Iterator[AsyncMock]:
             "message_id": "comment-1",
         }
     )
-    with patch(
-        "apps.ai_agents.services.hubspot.create_hubspot_thread_comment",
-        new=observation,
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.create_hubspot_thread_comment",
+            new=observation,
+        ),
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(return_value={"updated": True, "ticket_id": "ticket-1"}),
+        ),
     ):
         yield observation
 
@@ -334,6 +340,97 @@ async def test_each_customer_message_has_one_independent_reply() -> None:
         f"reply:{instance.pk}:message-1",
         f"reply:{instance.pk}:message-2",
     ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_identity_question_enters_contact_collection_state() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Informe o e-mail cadastrado na inChurch.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=["heimdall: OK", "supervisor: identity_required"],
+        tokens_used=1,
+        model_name="heimdall_identity_policy",
+        latency_ms=1,
+        triage_decision=_triage(),
+        decision=SupervisorDecision(
+            outcome="waiting_customer",
+            final_response="Informe o e-mail cadastrado na inChurch.",
+            risk_flags=["identity_required", "identity_unknown"],
+            missing_data=["registered_email"],
+            confidence=0.0,
+        ),
+    )
+
+    with patch(
+        "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+        new=AsyncMock(return_value={"sent": True, "message_id": "identity-out-1"}),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"]},
+            conversation_context=_context(),
+            message="Preciso de ajuda",
+            result=result,
+        )
+
+    await sync_to_async(instance.refresh_from_db)()
+    assert instance.state == ConversationInstance.State.CONTACT_COLLECTING
+    assert instance.metadata["identity_collection_attempts"] == 1
+    assert instance.metadata["waiting_for_fields"] == ["registered_email"]
+
+
+@override_settings(
+    HUBSPOT_AI_TRIAGE_PIPELINE_ID="ai-pipeline",
+    HUBSPOT_AI_WAITING_STAGE_ID="ai-waiting",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_answer_moves_ai_ticket_to_waiting_stage_once() -> None:
+    instance = await sync_to_async(_instance)()
+    result = SalomaoResponse(
+        session_id="hubspot-ticket-ticket-1",
+        message="Orientação enviada.",
+        sources=[],
+        requires_human_handoff=False,
+        handoff_reason=None,
+        agent_trace=[],
+        tokens_used=1,
+        model_name="test-model",
+        latency_ms=1,
+        decision=SupervisorDecision(
+            outcome="waiting_customer",
+            final_response="Orientação enviada.",
+            confidence=0.9,
+        ),
+    )
+    updater = AsyncMock(return_value={"updated": True, "ticket_id": "ticket-1"})
+
+    with (
+        patch(
+            "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
+            new=AsyncMock(return_value={"sent": True, "message_id": "out-1"}),
+        ),
+        patch("apps.ai_agents.services.hubspot.update_hubspot_ticket_route", new=updater),
+    ):
+        await apply_supervisor_result(
+            instance=instance,
+            context={"thread_ids": ["thread-1"], "pipeline": "ai-pipeline"},
+            conversation_context=_context(),
+            message="Como configuro isso?",
+            result=result,
+        )
+
+    updater.assert_awaited_once_with("ticket-1", "ai-waiting", pipeline_id="ai-pipeline")
+    assert await ToolCallAuditLog.objects.filter(
+        instance=instance,
+        tool_name="update_ticket_stage",
+        status=ToolCallAuditLog.Status.SUCCEEDED,
+    ).aexists()
 
 
 @pytest.mark.django_db(transaction=True)

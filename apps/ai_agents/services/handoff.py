@@ -455,6 +455,9 @@ def format_handoff_observation(package: dict[str, Any]) -> str:
             "BAIXA": "Baixa",
         }.get(priority.upper(), priority)
         lines.extend(["", f"**Prioridade da triagem:** {priority_label}"])
+    identity_status = str(package.get("customer_identity_status") or "UNKNOWN").strip().upper()
+    identity_method = str(package.get("customer_identity_method") or "none").strip()
+    lines.extend(["", f"**Identidade do cliente:** {identity_status} ({identity_method})"])
     missing_data = [str(item).replace("_", " ") for item in package.get("missing_data") or [] if str(item).strip()]
     if missing_data:
         lines.extend(["", f"**Dados ainda necessários:** {', '.join(missing_data[:5])}"])
@@ -518,7 +521,31 @@ def build_handoff_package(
         hubspot_thread_id=instance.hubspot_thread_id,
         hubspot_ticket_id=instance.hubspot_ticket_id,
         hubspot_contact_id=instance.hubspot_contact_id,
-        church_id=module_lookup.get("church_id"),
+        church_id=(
+            module_lookup.get("church_id")
+            or (
+                conversation_context.customer_identity.church_id
+                if conversation_context is not None and conversation_context.customer_identity is not None
+                else conversation_context.church_id
+                if conversation_context is not None
+                else None
+            )
+        ),
+        customer_identity_status=(
+            conversation_context.customer_identity.status
+            if conversation_context is not None and conversation_context.customer_identity is not None
+            else "UNKNOWN"
+        ),
+        customer_identity_confidence=(
+            conversation_context.customer_identity.confidence
+            if conversation_context is not None and conversation_context.customer_identity is not None
+            else 0.0
+        ),
+        customer_identity_method=(
+            conversation_context.customer_identity.matched_by
+            if conversation_context is not None and conversation_context.customer_identity is not None
+            else "none"
+        ),
         source_message_id=instance.last_message_id or instance.last_event_id,
         channel=instance.channel,
         assigned_agent_id=instance.assigned_agent_id,

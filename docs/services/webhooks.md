@@ -73,6 +73,8 @@ X-Hub-Signature = sha256=<HMAC-SHA256(body)>
 - `hs_pipeline_stage=HUBSPOT_N1_NEW_STAGE_ID` dispara o Supervisor com Salomão quando a IA está habilitada.
 - `hs_last_message_from_visitor` retoma o Supervisor para a próxima fala do cliente, mantendo conversas de múltiplos turnos.
 - O worker move o ticket para `HUBSPOT_AI_TRIAGE_STAGE_ID` enquanto processa e para `HUBSPOT_AI_WAITING_STAGE_ID` após enviar a resposta.
+- Antes do Supervisor, o worker resolve a identidade do participante de forma determinística e persiste somente evidências operacionais sem e-mail ou telefone bruto.
+- O Heimdall roda no backend mesmo quando `SALOMAO_V1_BASE_URL` não está configurado; nesse caso, qualquer resposta especializada indisponível falha com handoff humano seguro.
 - Falha de envio, canal sem resposta automática ou transbordo move o ticket para `HUBSPOT_HUMAN_ESCALATION_STAGE_ID`.
 - Estágios não configurados não alteram o status local nem executam tarefas com efeito colateral.
 
@@ -108,6 +110,6 @@ Reativação, desativação ou alteração dessas subscriptions é um gate opera
 
 ## Recomendações
 
-- Consolidar os dois endpoints HubSpot.
+- Manter `/api/v1/webhooks/hubspot/` como endpoint único; o router alternativo permanece desmontado apenas por compatibilidade de código.
 - Implementar processamento real de eventos Jira.
 - Adicionar UI/admin para visualizar `DeadLetterQueue`.

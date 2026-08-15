@@ -151,14 +151,35 @@ class TestHandleHubspotEvent:
         )
 
         with (
-            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
-            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
-            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
             patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
         ):
             handle_hubspot_event(event)
 
         mock_delay.assert_called_once_with("ticket-ai", False, True)
+
+    @override_settings(
+        AI_ROUTING_ENABLED=True,
+        SALOMAO_V1_BASE_URL="",
+        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
+    )
+    def test_native_heimdall_dispatch_does_not_require_external_salomao_url(self) -> None:
+        event = _event(
+            "ticket.propertyChange",
+            {
+                "objectId": "ticket-native",
+                "propertyName": "hs_pipeline_stage",
+                "propertyValue": "ai-new",
+            },
+        )
+
+        with (
+            patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
+            patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
+        ):
+            handle_hubspot_event(event)
+
+        mock_delay.assert_called_once_with("ticket-native", False, True)
 
     @override_settings(
         AI_ROUTING_ENABLED=True,
@@ -176,9 +197,7 @@ class TestHandleHubspotEvent:
         )
 
         with (
-            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
-            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
-            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
             patch("apps.ai_agents.tasks.run_supervisor_pipeline_task.delay") as mock_delay,
         ):
             handle_hubspot_event(event)
@@ -200,9 +219,7 @@ class TestHandleHubspotEvent:
         )
 
         with (
-            patch("apps.ai_agents.utils.business_rules.off_hours_reason", return_value=None),
-            patch("apps.ai_agents.utils.business_rules.is_quinta_fire", return_value=False),
-            patch("apps.ai_agents.utils.business_rules.is_business_hours", return_value=True),
+            patch("apps.support.agent_sync_service.is_business_hours", return_value=True),
             patch("apps.ai_agents.tasks.schedule_supervisor_customer_turn") as mock_schedule,
         ):
             handle_hubspot_event(event)

@@ -49,7 +49,9 @@ from apps.ai_agents.services.hubspot import (
     evaluate_salomao_ticket_eligibility,
     hydrate_thread_context,
     hydrate_ticket_context,
+    search_hubspot_contacts_by_email,
 )
+from apps.ai_agents.services.identity import resolve_customer_identity
 from apps.ai_agents.services.instance_identity import find_conversation_instance
 from apps.ai_agents.services.lifecycle import (
     TERMINAL_STATES,
@@ -513,13 +515,46 @@ def _waiting_turn_already_has_reply(instance: ConversationInstance) -> bool:
 def _resume_waiting_instance_for_customer_message(instance: ConversationInstance) -> None:
     """Start a new AI turn when a customer replies to a waiting conversation."""
     instance.refresh_from_db()
-    if instance.state == ConversationInstance.State.WAITING_FOR_CUSTOMER:
+    if instance.state in {
+        ConversationInstance.State.WAITING_FOR_CUSTOMER,
+        ConversationInstance.State.CONTACT_COLLECTING,
+    }:
         LifecycleEngine().transition(
             instance,
             ConversationInstance.State.CONTEXT_HYDRATING,
             reason="New customer message resumed context hydration.",
             actor_type="supervisor_worker",
         )
+
+
+@sync_to_async
+def _identity_collection_attempts(instance: ConversationInstance) -> int:
+    """Read the bounded identity prompt count from lifecycle metadata."""
+    instance.refresh_from_db()
+    return max(0, int((instance.metadata or {}).get("identity_collection_attempts") or 0))
+
+
+@sync_to_async
+def _previous_customer_identity(instance: ConversationInstance) -> dict[str, Any] | None:
+    """Return the previously resolved identity for this exact conversation."""
+    instance.refresh_from_db()
+    payload = (instance.metadata or {}).get("customer_identity")
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+@sync_to_async
+def _persist_customer_identity(instance: ConversationInstance, identity_payload: dict[str, Any]) -> None:
+    """Persist privacy-safe identity evidence and the resolved contact reference."""
+    instance.refresh_from_db()
+    metadata = dict(instance.metadata or {})
+    metadata["customer_identity"] = identity_payload
+    instance.metadata = metadata
+    update_fields = ["metadata", "updated_at"]
+    contact_id = str(identity_payload.get("contact_id") or "").strip()
+    if contact_id and identity_payload.get("status") in {"VERIFIED", "PROBABLE"}:
+        instance.hubspot_contact_id = contact_id
+        update_fields.append("hubspot_contact_id")
+    instance.save(update_fields=update_fields)
 
 
 @sync_to_async
@@ -681,8 +716,19 @@ async def _run_supervisor_for_hubspot_context(
         logger.info("supervisor_hubspot_no_message", ticket_id=ticket_id, session_id=session_id)
         return
 
+    resolution_context = deepcopy(safe_context)
+    resolution_context["previous_customer_identity"] = await _previous_customer_identity(instance)
+    identity = await resolve_customer_identity(
+        resolution_context,
+        contact_search=search_hubspot_contacts_by_email,
+        collection_attempts=await _identity_collection_attempts(instance),
+    )
+    await _persist_customer_identity(instance, identity.model_dump(mode="json"))
+
+    agent_context = deepcopy(safe_context)
+    agent_context["customer_identity"] = identity.model_dump(mode="json")
     conversation_context = build_conversation_context_from_hubspot_context(
-        safe_context,
+        agent_context,
         session_id=session_id,
         is_off_hours=is_off_hours,
     )
@@ -790,6 +836,9 @@ async def _run_supervisor_for_hubspot_context(
             "hubspot_ticket_id": ticket_id or context.get("ticket_id", ""),
             "hubspot_owner_id": context.get("owner_id", ""),
             "hubspot_contact_ids": safe_context.get("contact_ids", []),
+            "hubspot_contact_id": identity.contact_id or "",
+            "church_id": identity.church_id or "",
+            "customer_identity": identity.model_dump(mode="json"),
             "originating_channel": "hubspot",
             "is_off_hours": is_off_hours,
             "conversation_context": conversation_context.model_dump(mode="json"),
@@ -893,6 +942,7 @@ async def _run_salomao_v1_thread_pipeline(
     thread_id: str,
     *,
     context: dict[str, Any] | None = None,
+    is_off_hours: bool | None = None,
 ) -> None:
     """Run the Supervisor for a HubSpot conversation thread event."""
     try:
@@ -933,7 +983,7 @@ async def _run_salomao_v1_thread_pipeline(
             context,
             session_id=session_id,
             ticket_id=ticket_id,
-            is_off_hours=off_hours_reason() is not None,
+            is_off_hours=off_hours_reason() is not None if is_off_hours is None else is_off_hours,
             verified_ai_route=True,
         )
     except Exception as exc:

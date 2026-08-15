@@ -47,6 +47,27 @@ class ConversationMessage(BaseModel):
     message_id: str | None = None
 
 
+class CustomerIdentity(BaseModel):
+    """Privacy-safe result of resolving the active conversation participant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["VERIFIED", "PROBABLE", "AMBIGUOUS", "UNKNOWN", "CONFLICT"] = "UNKNOWN"
+    contact_id: str | None = None
+    church_id: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    matched_by: str = "none"
+    evidence: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    masked_name: str | None = None
+    collection_attempts: int = Field(default=0, ge=0)
+
+    @property
+    def sensitive_actions_allowed(self) -> bool:
+        """Return whether this identity is strong enough for sensitive actions."""
+        return self.status == "VERIFIED"
+
+
 class ConversationContext(BaseModel):
     """Provider-neutral context passed into agent handoffs."""
 
@@ -73,6 +94,7 @@ class ConversationContext(BaseModel):
     recent_messages: list[ConversationMessage] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
+    customer_identity: CustomerIdentity | None = None
 
 
 class ActionIntent(BaseModel):
@@ -146,6 +168,9 @@ class HandoffPackage(BaseModel):
     hubspot_ticket_id: str | None = None
     hubspot_contact_id: str | None = None
     church_id: str | None = None
+    customer_identity_status: str = "UNKNOWN"
+    customer_identity_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    customer_identity_method: str = "none"
     source_message_id: str = ""
     channel: str = ""
     assigned_agent_id: str | None = None
@@ -173,6 +198,7 @@ __all__ = [
     "ActionIntent",
     "ConversationContext",
     "ConversationMessage",
+    "CustomerIdentity",
     "HandoffPackage",
     "HubSpotAction",
     "SalomaoChatDraft",

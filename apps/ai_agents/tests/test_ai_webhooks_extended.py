@@ -268,6 +268,10 @@ async def test_verified_ai_route_reopens_closed_thread_and_replies() -> None:
             "apps.ai_agents.services.hubspot.send_salomao_reply_to_hubspot_thread",
             new=AsyncMock(return_value={"sent": True, "message_id": "reply-reopened"}),
         ) as send_reply,
+        patch(
+            "apps.ai_agents.services.hubspot.update_hubspot_ticket_route",
+            new=AsyncMock(return_value={"updated": True}),
+        ),
     ):
         await webhooks._run_supervisor_pipeline("ticket-closed-reopen")
 

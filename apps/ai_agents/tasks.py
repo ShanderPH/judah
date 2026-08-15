@@ -22,10 +22,16 @@ import redis
 import structlog
 from django.conf import settings
 
-from apps.ai_agents.utils.business_rules import off_hours_reason
 from celery import shared_task
 
 logger = structlog.get_logger(__name__)
+
+
+def _is_currently_off_hours() -> bool:
+    """Use the database-backed support calendar as the runtime authority."""
+    from apps.support.agent_sync_service import is_business_hours
+
+    return not is_business_hours()
 
 
 # Ten minutes is comfortably longer than the typical supervisor pipeline
@@ -276,7 +282,7 @@ def run_supervisor_pipeline_task(
     from apps.ai_agents.api.webhooks import _run_supervisor_pipeline
 
     succeeded = False
-    current_is_off_hours = off_hours_reason() is not None
+    current_is_off_hours = _is_currently_off_hours()
     if current_is_off_hours != is_off_hours:
         logger.info(
             "supervisor_pipeline_business_hours_refreshed",
@@ -443,7 +449,13 @@ def run_salomao_v1_thread_pipeline_task(
                 succeeded = True
                 return
 
-        asyncio.run(_run_salomao_v1_thread_pipeline(thread_id, context=context))
+        asyncio.run(
+            _run_salomao_v1_thread_pipeline(
+                thread_id,
+                context=context,
+                is_off_hours=_is_currently_off_hours(),
+            )
+        )
         succeeded = True
     except Exception as exc:
         countdown = min(30 * (2**self.request.retries), 300)

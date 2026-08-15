@@ -42,6 +42,7 @@ from apps.ai_agents.agents.triage import HeimdallTriageAgent
 from apps.ai_agents.contracts import (
     ConversationContext,
     ConversationMessage,
+    CustomerIdentity,
     HubSpotAction,
     SalomaoChatDraft,
     SupervisorDecision,
@@ -50,12 +51,20 @@ from apps.ai_agents.contracts import (
 from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
 from apps.ai_agents.services.decision_policy import enforce_resolution_semantics
 from apps.ai_agents.services.guardrails import apply_output_guardrails
+from apps.ai_agents.services.identity import identity_collection_message
 from apps.integrations.salomao_v1 import is_salomao_v1_configured
 
 logger = structlog.get_logger(__name__)
 
 FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, assistente virtual da inChurch."
-GREETING_CLARIFICATION = "Como posso ajudar hoje? Conte brevemente o que você precisa."
+GREETING_CLARIFICATION = (
+    "Como posso ajudar hoje? Conte brevemente o que você precisa ou escolha uma opção:\n\n"
+    "1️⃣ Suporte para a plataforma\n"
+    "2️⃣ Dúvidas sobre a plataforma\n"
+    "3️⃣ 2ª via de boleto\n\n"
+    "Você pode responder com o número ou escrever normalmente."
+)
+_SENSITIVE_IDENTITY_ROUTES = {"BOLETO", "FINANCEIRO", "MEIOS_DE_PAGAMENTO"}
 
 _LEADING_ASSISTANT_GREETING_RE = re.compile(
     r"^\s*(?:(?:ol[áa]|oi|bom\s+dia|boa\s+tarde|boa\s+noite)\s*[!,.?:;\-]*\s*)"
@@ -639,6 +648,60 @@ class SalomaoSupervisorAgent:
             return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
 
         context = self._build_conversation_context(message)
+        identity = context.customer_identity
+        if identity is not None and identity.status in {"UNKNOWN", "AMBIGUOUS", "CONFLICT"}:
+            if identity.collection_attempts >= 2:
+                trace.append("supervisor: identity_attempts_exhausted")
+                return self._mandatory_handoff_response(
+                    triage=triage,
+                    agent_trace=trace,
+                    reason="Customer identity could not be resolved after two collection attempts.",
+                )
+            trace.append("supervisor: identity_required")
+            return self._identity_collection_response(
+                triage=triage,
+                identity=identity,
+                agent_trace=trace,
+            )
+
+        if (
+            identity is not None
+            and triage.rota in _SENSITIVE_IDENTITY_ROUTES
+            and not identity.sensitive_actions_allowed
+        ):
+            trace.append("supervisor: sensitive_route_identity_handoff")
+            return self._mandatory_handoff_response(
+                triage=triage,
+                agent_trace=trace,
+                reason="Sensitive route requires a verified customer identity.",
+            )
+
+        minimum_confidence = min(1.0, max(0.0, float(getattr(settings, "HEIMDALL_MIN_CONFIDENCE", 0.65))))
+        automatic_confidence = min(
+            1.0,
+            max(
+                minimum_confidence,
+                float(getattr(settings, "HEIMDALL_AUTO_ROUTE_CONFIDENCE", 0.8)),
+            ),
+        )
+        if triage.confidence < minimum_confidence:
+            trace.append("supervisor: low_confidence_handoff")
+            return self._mandatory_handoff_response(
+                triage=triage,
+                agent_trace=trace,
+                reason="Heimdall confidence is below the safe routing threshold.",
+            )
+        if triage.confidence < automatic_confidence:
+            trace.append("supervisor: triage_clarification_required")
+            return self._missing_data_response(
+                triage=triage,
+                agent_trace=trace,
+                missing_data=triage.dados_faltantes or ["mais_detalhes_do_problema"],
+            )
+        if triage.dados_faltantes:
+            trace.append("supervisor: triage_missing_data")
+            return self._missing_data_response(triage=triage, agent_trace=trace)
+
         if self._salomao_chat is None:
             trace.append("salomao_chat: unavailable")
             return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
@@ -665,7 +728,7 @@ class SalomaoSupervisorAgent:
         """Return True when the triage contract forbids an automated answer."""
         if triage is None:
             return False
-        return triage.rota == "ESCALAR_IMEDIATAMENTE"
+        return triage.rota == "ESCALAR_IMEDIATAMENTE" or triage.prioridade == "CRITICA"
 
     def _mandatory_handoff_response(
         self,
@@ -863,6 +926,42 @@ class SalomaoSupervisorAgent:
             ),
         )
 
+    def _identity_collection_response(
+        self,
+        *,
+        triage: TriageDecision,
+        identity: CustomerIdentity,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Ask for one identity datum while preserving the classified route."""
+        message = identity_collection_message(identity)
+        missing_fields = identity.missing_fields or ["registered_email"]
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=agent_trace,
+            tokens_used=0,
+            model_name="heimdall_identity_policy",
+            latency_ms=0,
+            triage_decision=triage,
+            decision=SupervisorDecision(
+                outcome="waiting_customer",
+                final_response=message,
+                hubspot_action=HubSpotAction(
+                    action_type="send_thread_reply",
+                    payload={"missing_data": missing_fields},
+                    idempotency_key=f"{self.session_id}:identity:{identity.collection_attempts + 1}",
+                ),
+                trace_summary=agent_trace,
+                risk_flags=["identity_required", f"identity_{identity.status.lower()}"],
+                missing_data=missing_fields,
+                confidence=identity.confidence,
+            ),
+        )
+
     def _build_conversation_context(self, message: str) -> ConversationContext:
         """Build provider-neutral context for agent handoffs."""
         raw_context = getattr(self, "user_metadata", {}).get("conversation_context")
@@ -1046,7 +1145,7 @@ class SalomaoSupervisorAgent:
             flags.append(f"priority_{triage.prioridade.lower()}")
         if triage.sentimento == "negativo":
             flags.append("negative_sentiment")
-        if triage.confidence < 0.6:
+        if triage.confidence < float(getattr(settings, "HEIMDALL_MIN_CONFIDENCE", 0.65)):
             flags.append("low_confidence")
         return flags
 

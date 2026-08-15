@@ -175,6 +175,7 @@ All secrets and environment-specific settings are loaded via `python-decouple`. 
 | `SALOMAO_V1_MAX_ATTEMPTS`       | Salomao v1 adapter | Retries for timeout, HTTP 429, and HTTP 5xx; default `3` |
 | `SALOMAO_MIN_CONFIDENCE`        | AI policy         | Minimum Salomao draft confidence before human handoff; default `0.65` |
 | `HEIMDALL_MIN_CONFIDENCE`       | AI policy         | Minimum Heimdall confidence before human handoff; default `0.65` |
+| `HEIMDALL_AUTO_ROUTE_CONFIDENCE` | AI policy        | Minimum Heimdall confidence for automatic routing; default `0.80` |
 | `HUBSPOT_ACCESS_TOKEN`          | Webhooks / MCP     | Private-app token                                       |
 | `HUBSPOT_APP_SECRET`            | **Production**     | Signs v1+v3 webhooks — **never leave blank in prod**    |
 | `HUBSPOT_SALOMAO_SENDER_ACTOR_ID` | HubSpot chat AI   | HubSpot actor ID used by Salomao to answer conversation threads |

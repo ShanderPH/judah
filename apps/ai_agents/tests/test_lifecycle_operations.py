@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.utils import timezone
 
-from apps.ai_agents.contracts import ConversationContext, ConversationMessage, TriageDecision
+from apps.ai_agents.contracts import ConversationContext, ConversationMessage, CustomerIdentity, TriageDecision
 from apps.ai_agents.models import ConversationEvent, ConversationInstance
 from apps.ai_agents.services.execution import schedule_stale_turn_followup
 from apps.ai_agents.services.handoff import (
@@ -49,6 +49,13 @@ def test_build_handoff_package_includes_operational_context() -> None:
         recent_messages=[
             ConversationMessage(direction="INCOMING", text="Preciso falar com humano", message_id="m1"),
         ],
+        customer_identity=CustomerIdentity(
+            status="VERIFIED",
+            contact_id="contact-1",
+            church_id="T35120",
+            confidence=0.98,
+            matched_by="delivery_identifier",
+        ),
     )
     triage = TriageDecision(
         rota="ESCALAR_IMEDIATAMENTE",
@@ -98,6 +105,8 @@ def test_build_handoff_package_includes_operational_context() -> None:
     assert package["reason"] == "User requested a human."
     assert package["priority"] == "ALTA"
     assert package["tags"] == ["humano"]
+    assert package["customer_identity_status"] == "VERIFIED"
+    assert package["customer_identity_method"] == "delivery_identifier"
     assert package["recent_messages"][0]["text"] == "Preciso falar com humano"
     assert package["church_id"] == "653"
     assert package["obtained_modules"][0]["alias"] == "kids"
