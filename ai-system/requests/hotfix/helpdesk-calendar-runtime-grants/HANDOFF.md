@@ -31,3 +31,11 @@
 - Pytest local isolado: `1082 passed, 12 skipped`; cobertura `90,07%`.
 - `git diff --check`: aprovado.
 - Mypy 2.1.0: bloqueado por erro interno ao construir `NewSemanalDjangoPlugin`, antes da análise dos arquivos.
+
+## Recuperação de produção
+
+- Migration `support.0029_grant_helpdesk_calendar_runtime_access` aplicada com `OK` pela URL dedicada de schema.
+- Consulta com a role runtime leu as quatro tabelas: 1 agenda, 21 regras, 9 intervalos e 0 mensagens.
+- Resolver de sete dias retornou 8 ocorrências com `degraded=False`.
+- Nenhum novo erro de permissão foi encontrado no recorte de logs consultado após a aplicação.
+- PR de rastreabilidade e permanência do hotfix: https://github.com/ShanderPH/judah/pull/107
