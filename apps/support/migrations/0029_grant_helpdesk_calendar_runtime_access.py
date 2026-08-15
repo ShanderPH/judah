@@ -19,7 +19,7 @@ def _existing_runtime_roles(schema_editor) -> set[str]:
     placeholders = ", ".join(["%s"] * len(RUNTIME_ROLES))
     with schema_editor.connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT rolname FROM pg_roles WHERE rolname IN ({placeholders})",
+            f"SELECT rolname FROM pg_roles WHERE rolname IN ({placeholders})",  # nosec B608: placeholder count is fixed by RUNTIME_ROLES.
             list(RUNTIME_ROLES),
         )
         return {str(row[0]) for row in cursor.fetchall() if str(row[0]) in RUNTIME_ROLES}
