@@ -26,7 +26,7 @@ def test_judah_is_the_active_per_message_event_source() -> None:
     assert _new_message_subscription(judah)["active"] is True
 
 
-def test_legacy_boolean_message_trigger_is_disabled_when_present() -> None:
+def test_legacy_boolean_message_trigger_is_an_active_auxiliary_signal() -> None:
     root = Path(__file__).resolve().parents[3]
     config = json.loads(
         (root / "hubspot-app" / "src" / "app" / "webhooks" / "judah-webhooks-hsmeta.json").read_text(encoding="utf-8")
@@ -37,4 +37,4 @@ def test_legacy_boolean_message_trigger_is_disabled_when_present() -> None:
         if item.get("propertyName") == "hs_last_message_from_visitor"
     )
 
-    assert boolean_trigger["active"] is False
+    assert boolean_trigger["active"] is True

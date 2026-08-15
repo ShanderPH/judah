@@ -371,30 +371,26 @@ async def test_explicit_church_id_phrase_lists_protocols() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plain_church_id_lists_protocols() -> None:
+async def test_plain_church_id_without_requested_context_is_not_handled() -> None:
     client = FakeClient()
     handler = ProtocolConversationHandler(client=client)
 
     response = await handler.handle(_context("1573"))
 
-    assert client.church_queries == ["1573"]
-    assert response is not None
-    assert "**T\u00edtulo:** Falha no relat\u00f3rio" in response
-    assert "**Status:** Em atendimento pelo time t\u00e9cnico" in response
-    assert "**Prioridade:** M\u00e9dia" in response
-    assert "**\u00c1rea com erro:** Outros" in response
+    assert client.church_queries == []
+    assert response is None
 
 
 @pytest.mark.asyncio
-async def test_typical_five_digit_local_church_id_lists_church_protocols() -> None:
+async def test_typical_five_digit_local_church_id_without_context_is_not_handled() -> None:
     client = FakeClient()
     handler = ProtocolConversationHandler(client=client)
 
     response = await handler.handle(_context("35120"))
 
-    assert client.church_queries == ["35120"]
+    assert client.church_queries == []
     assert client.ticket_queries == []
-    assert response is not None
+    assert response is None
 
 
 @pytest.mark.asyncio
@@ -457,6 +453,58 @@ async def test_five_digit_followup_after_identifier_question_queries_church() ->
     assert client.church_queries == ["35120"]
     assert response is not None
     assert "igreja 35120" in response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["1", "2", "3"])
+async def test_active_menu_choices_bypass_protocol_lookup(choice: str) -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    history = [
+        {
+            "direction": "OUTGOING",
+            "text": "1️⃣ Suporte para a plataforma\n2️⃣ Dúvidas sobre a plataforma\n3️⃣ 2ª via de boleto",
+        }
+    ]
+
+    response = await handler.handle(_context(choice, history=history))
+
+    assert handler._is_active_menu_choice(choice, history) is True
+    assert response is None
+    assert client.ticket_queries == []
+    assert client.church_queries == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_church_id_conflicting_with_verified_identity_requires_confirmation() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    context = _context("ID da igreja local: 2")
+    context["customer_identity"] = {"church_id": "653"}
+
+    response = await handler.handle(context)
+
+    assert client.church_queries == []
+    assert response == "Seu cadastro está vinculado à igreja 653. Para consultar a igreja 2, responda `CONFIRMO 2`."
+
+
+@pytest.mark.asyncio
+async def test_confirmed_church_override_after_identity_conflict_is_allowed() -> None:
+    client = FakeClient()
+    handler = ProtocolConversationHandler(client=client)
+    history = [
+        {
+            "direction": "OUTGOING",
+            "text": "Seu cadastro está vinculado à igreja 653. Para consultar a igreja 2, responda `CONFIRMO 2`.",
+        }
+    ]
+    context = _context("CONFIRMO 2", history=history)
+    context["customer_identity"] = {"church_id": "653"}
+
+    response = await handler.handle(context)
+
+    assert client.church_queries == ["2"]
+    assert response is not None
 
 
 @pytest.mark.asyncio

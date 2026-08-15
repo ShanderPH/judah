@@ -484,6 +484,11 @@ class ProtocolConversationHandler:
 
         normalized = _normalize(current).strip()
         history = context.get("conversation_history") or []
+        # A bare menu choice belongs to the active Salomao menu.  It must reach
+        # the normal supervisor before generic numeric lookup is considered.
+        if self._is_active_menu_choice(normalized, history):
+            return None
+
         awaiting_identifier = self._awaiting_identifier(history)
         protocol = self._extract_protocol(
             current,
@@ -494,8 +499,18 @@ class ProtocolConversationHandler:
         if protocol and (awaiting_identifier or status_intent or mentions_protocol):
             return await self._ticket_response(protocol)
 
-        church_id = self._extract_church_id(current)
+        church_id = self._extract_church_id(current, allow_numeric=awaiting_identifier)
         if church_id:
+            verified_church_id = self._verified_church_id(context)
+            if (
+                verified_church_id
+                and church_id != verified_church_id
+                and not self._is_confirmed_church_override(church_id, normalized, history)
+            ):
+                return (
+                    f"Seu cadastro está vinculado à igreja {verified_church_id}. "
+                    f"Para consultar a igreja {church_id}, responda `CONFIRMO {church_id}`."
+                )
             return await self._church_response(church_id)
 
         if protocol and self._recent_status_intent(history):
@@ -606,22 +621,62 @@ class ProtocolConversationHandler:
         return match.group(1) if match else None
 
     @staticmethod
-    def _extract_church_id(message: str) -> str | None:
+    def _extract_church_id(message: str, *, allow_numeric: bool = False) -> str | None:
         normalized = _normalize(message).strip()
         prefixed = re.fullmatch(r"t\s*[-#:]?\s*(\d{1,12})", normalized, re.IGNORECASE)
         if prefixed:
             return prefixed.group(1)
 
         explicit = re.search(
-            r"(?:id|codigo)\s+(?:da\s+)?(?:igreja|local)(?:\s+local)?\s*(?:e|eh|:|#|-)?\s*t?\s*(\d{1,12})\b",
+            r"(?:(?:id|codigo)\s+(?:da\s+)?(?:igreja|local)(?:\s+local)?|confirmo)\s*(?:e|eh|:|#|-)?\s*t?\s*(\d{1,12})\b",
             normalized,
             re.IGNORECASE,
         )
         if explicit:
             return explicit.group(1)
 
-        numeric = re.fullmatch(r"\d{1,6}", normalized)
+        numeric = re.fullmatch(r"\d{1,6}", normalized) if allow_numeric else None
         return numeric.group(0) if numeric else None
+
+    @staticmethod
+    def _is_active_menu_choice(normalized: str, history: list[dict[str, Any]]) -> bool:
+        """Keep a numeric choice in the active menu flow, not protocol lookup."""
+        if normalized not in {"1", "2", "3"}:
+            return False
+        outgoing = [
+            _normalize(str(message.get("text") or ""))
+            for message in history[-6:]
+            if str(message.get("direction") or "").upper() == "OUTGOING"
+        ]
+        return any(
+            all(
+                re.search(rf"(?:^|\n)\s*{option}(?:\ufe0f?\u20e3)?\s+\S", message) is not None
+                for option in ("1", "2", "3")
+            )
+            for message in outgoing
+        )
+
+    @staticmethod
+    def _verified_church_id(context: dict[str, Any]) -> str | None:
+        """Return the verified identity church ID, normalized for comparison."""
+        identity = context.get("customer_identity") or {}
+        value = identity.get("church_id") if isinstance(identity, dict) else None
+        if value is None:
+            value = context.get("church_id")
+        match = re.search(r"\d+", str(value or ""))
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _is_confirmed_church_override(church_id: str, normalized: str, history: list[dict[str, Any]]) -> bool:
+        """Require an explicit confirmation after warning about an ID conflict."""
+        if not re.fullmatch(rf"confirmo\s+{re.escape(church_id)}", normalized):
+            return False
+        expected = f"para consultar a igreja {church_id}, responda `confirmo {church_id}`"
+        return any(
+            expected in _normalize(str(message.get("text") or ""))
+            for message in history[-4:]
+            if str(message.get("direction") or "").upper() == "OUTGOING"
+        )
 
 
 async def handle_protocol_lookup_from_hubspot_context(
