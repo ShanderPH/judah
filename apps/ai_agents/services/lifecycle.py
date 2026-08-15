@@ -335,9 +335,16 @@ class EventNormalizer:
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
                 pipeline_stage_id = _STAGE_NOVO_ID
-            elif property_name == _PROP_STAGE_CLOSED:
+            elif property_name in {
+                _PROP_STAGE_CLOSED,
+                f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_CLOSED_STAGE_ID', '')}",
+            }:
                 normalized_type = "ticket_closed"
-                pipeline_stage_id = _STAGE_FECHADO_ID
+                pipeline_stage_id = (
+                    _STAGE_FECHADO_ID
+                    if property_name == _PROP_STAGE_CLOSED
+                    else str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", "") or "")
+                )
             elif property_name == _PROP_OWNER_ID:
                 normalized_type = "owner_changed"
             elif property_name == _PROP_PIPELINE_STAGE:

@@ -12,6 +12,7 @@ from apps.ai_agents.agents.supervisor import (
     SalomaoSupervisorAgent,
     _deterministic_handoff_trigger,
     _is_greeting_only,
+    _menu_selection,
 )
 from apps.ai_agents.contracts import ConversationContext, CustomerIdentity, SalomaoChatDraft, TriageDecision
 from apps.ai_agents.models import TokenTrackingLog
@@ -414,6 +415,50 @@ def test_handoff_policy_does_not_escalate_normal_product_questions_or_mild_frust
         "1. Obrigado\n2. Como criar um evento?"
     )
     assert _deterministic_handoff_trigger(grouped_turn) is None
+
+
+def test_menu_option_one_always_uses_the_human_handoff() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-1"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FailingTriageRunner()
+    supervisor._salomao_chat = RaisingSalomaoChat()
+
+    response = supervisor._run_integrated_chain("1")
+
+    assert response is not None
+    assert response.outcome == "escalate_human"
+    assert response.requires_human_handoff is True
+    assert response.triage_decision.rota == "ESCALAR_IMEDIATAMENTE"
+    assert response.triage_decision.tags == ["menu_option_1"]
+
+
+def test_menu_options_two_and_three_bypass_llm_triage_with_approved_routes() -> None:
+    for selection, route in (("2", "DUVIDAS_PLATAFORMA"), ("3", "BOLETO")):
+        supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+        supervisor.session_id = "session-1"
+        supervisor.user_metadata = {}
+        supervisor._logger = FakeLogger()
+        supervisor._triage = FailingTriageRunner()
+        salomao = RecordingSalomaoChat()
+        supervisor._salomao_chat = salomao
+
+        response = supervisor._run_integrated_chain(selection)
+
+        assert response is not None
+        assert response.triage_decision.rota == route
+        assert response.triage_decision.tags == [f"menu_option_{selection}"]
+        assert salomao.calls[0]["triage_decision"].rota == route
+
+
+def test_menu_selection_uses_only_a_standalone_current_turn() -> None:
+    assert _menu_selection("1") == "1"
+    assert _menu_selection("2.)") is None
+    assert _menu_selection("3 -") == "3"
+    assert _menu_selection("preciso da opção 1") is None
+    grouped_turn = "Historico recente:\n[OUTGOING] 1\n\nTurno atual do cliente:\n1. preciso de boleto"
+    assert _menu_selection(grouped_turn) is None
 
 
 def test_integrated_chain_uses_salomao_v1_for_high_priority() -> None:

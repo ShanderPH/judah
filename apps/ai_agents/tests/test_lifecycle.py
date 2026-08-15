@@ -63,6 +63,29 @@ def test_normalizer_extracts_conversation_message_identifiers() -> None:
 
 
 @pytest.mark.django_db
+@override_settings(HUBSPOT_CLOSED_STAGE_ID="ai-closed")
+def test_normalizer_closes_on_the_calculated_ai_closed_stage_event() -> None:
+    event = SimpleNamespace(
+        event_type="ticket.propertyChange",
+        payload={
+            "eventId": "evt-ai-closed",
+            "objectId": "ticket-ai-closed",
+            "propertyName": "hs_v2_date_entered_ai-closed",
+            "propertyValue": "1",
+        },
+        object_id="ticket-ai-closed",
+        id="db-ai-closed",
+    )
+
+    normalized = EventNormalizer().normalize_webhook_event(event)
+    decision = RoutingPolicyEngine().route(normalized)
+
+    assert normalized.event_type == "ticket_closed"
+    assert normalized.pipeline_stage_id == "ai-closed"
+    assert decision.route == "CLOSE"
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("message_type", ["COMMENT", "WELCOME_MESSAGE"])
 def test_non_customer_conversation_message_is_ignored(message_type: str) -> None:
     event = _conversation_event(messageType=message_type, direction="")

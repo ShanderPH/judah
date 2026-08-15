@@ -166,6 +166,32 @@ def _deterministic_handoff_trigger(message: str) -> Literal["explicit_human_requ
     return None
 
 
+def _menu_selection(message: str) -> Literal["1", "2", "3"] | None:
+    """Return a standalone menu option from the current customer turn only."""
+    current_turn = _current_customer_message(message).strip()
+    matched = re.fullmatch(r"([123])\s*(?:[.)-])?", current_turn)
+    return matched.group(1) if matched else None
+
+
+def _menu_triage(selection: Literal["1", "2", "3"], message: str) -> TriageDecision:
+    """Create the approved, deterministic route for a numeric menu selection."""
+    routes = {
+        "1": "ESCALAR_IMEDIATAMENTE",
+        "2": "DUVIDAS_PLATAFORMA",
+        "3": "BOLETO",
+    }
+    return TriageDecision(
+        rota=routes[selection],
+        prioridade="MEDIA",
+        tags=[f"menu_option_{selection}"],
+        dados_faltantes=[],
+        sentimento="neutro",
+        confidence=1.0,
+        evidence=[_current_customer_message(message)[:160]],
+        policy_version="deterministic-menu-v1",
+    )
+
+
 def _is_greeting_only(message: str) -> bool:
     """Return whether the customer greeted without describing a request."""
     normalized = (
@@ -602,6 +628,14 @@ class SalomaoSupervisorAgent:
         member/tool. Heimdall and the Salomao v1 adapter are therefore called
         explicitly when the adapter is enabled.
         """
+        menu_selection = _menu_selection(message)
+        if menu_selection == "1":
+            return self._mandatory_handoff_response(
+                triage=_menu_triage(menu_selection, message),
+                agent_trace=["menu_policy: option_1_human_handoff"],
+                reason="Customer selected the human assistance menu option.",
+            )
+
         handoff_trigger = _deterministic_handoff_trigger(message)
         if handoff_trigger is not None:
             trace = [f"handoff_policy: {handoff_trigger}"]
@@ -627,14 +661,18 @@ class SalomaoSupervisorAgent:
             )
 
         trace = []
-        try:
-            triage_response = self._triage.run(message)
-            triage = self._extract_triage_decision(triage_response)
-            trace.append("heimdall: OK")
-        except Exception as exc:
-            self._logger.error("heimdall_triage_failed", error=str(exc))
-            triage = None
-            trace.append("heimdall: failed")
+        if menu_selection is not None:
+            triage = _menu_triage(menu_selection, message)
+            trace.append(f"menu_policy: option_{menu_selection}")
+        else:
+            try:
+                triage_response = self._triage.run(message)
+                triage = self._extract_triage_decision(triage_response)
+                trace.append("heimdall: OK")
+            except Exception as exc:
+                self._logger.error("heimdall_triage_failed", error=str(exc))
+                triage = None
+                trace.append("heimdall: failed")
 
         if triage is None:
             return self._failed_triage_response(agent_trace=trace)

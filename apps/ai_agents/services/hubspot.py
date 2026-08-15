@@ -1027,11 +1027,13 @@ def _message_is_from_human_agent(message: dict[str, Any]) -> bool:
 def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, Any]:
     """Fail closed unless this ticket is still in Salomao's exclusive route."""
     expected_pipeline = str(getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "") or "").strip()
-    expected_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "") or "").strip()
+    new_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "") or "").strip()
+    waiting_stage = str(getattr(settings, "HUBSPOT_AI_WAITING_STAGE_ID", "") or "").strip()
+    eligible_stages = {stage for stage in (new_stage, waiting_stage) if stage}
     pipeline = str(context.get("pipeline") or "").strip()
     stage = str(context.get("pipeline_stage") or "").strip()
 
-    if not expected_pipeline or not expected_stage:
+    if not expected_pipeline or not eligible_stages:
         return {
             "eligible": False,
             "reason": "ai_route_not_configured",
@@ -1049,7 +1051,7 @@ def evaluate_salomao_ticket_eligibility(context: dict[str, Any]) -> dict[str, An
             "reason": "ticket_left_ai_pipeline",
             "retryable": False,
         }
-    if stage != expected_stage:
+    if stage not in eligible_stages:
         return {
             "eligible": False,
             "reason": "ticket_left_ai_stage",
