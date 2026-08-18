@@ -59,11 +59,18 @@ logger = structlog.get_logger(__name__)
 FIRST_MESSAGE_GREETING = "Olá! 👋 Eu sou o Salomão, assistente virtual da inChurch."
 GREETING_CLARIFICATION = (
     "Como posso ajudar hoje? Conte brevemente o que você precisa ou escolha uma opção:\n\n"
-    "1️⃣ Suporte para a plataforma\n"
+    "1️⃣ Atendimento humano\n"
     "2️⃣ Dúvidas sobre a plataforma\n"
     "3️⃣ 2ª via de boleto\n\n"
     "Você pode responder com o número ou escrever normalmente."
 )
+FIXED_MENU_RESPONSES = {
+    "2": "Certo — qual é a sua dúvida sobre a plataforma? Pode escrever normalmente.",
+    "3": (
+        "Certo — vou ajudar com a 2ª via. Informe se o boleto é da igreja ou "
+        "de uma inscrição em evento para eu enviar a orientação correta."
+    ),
+}
 _SENSITIVE_IDENTITY_ROUTES = {"BOLETO", "FINANCEIRO", "MEIOS_DE_PAGAMENTO"}
 
 _LEADING_ASSISTANT_GREETING_RE = re.compile(
@@ -263,14 +270,14 @@ class SalomaoResponse(BaseModel):
 
 _SUPERVISOR_INSTRUCTIONS = [
     "Você é Salomão, o assistente virtual de suporte da InChurch.",
-    "FLUXO OBRIGATÓRIO: SEMPRE acione o Heimdall PRIMEIRO para obter a "
-    "classificação estruturada da mensagem (campos rota, prioridade, tags, "
-    "dados_faltantes, sentimento).",
-    "Depois do Heimdall, SEMPRE delegue a geração da resposta ao SalomaoChat, "
-    "que é o adaptador oficial do Salomão v1. Não produza uma resposta "
-    "paralela com KnowledgeRagAgent ou HelpdeskActionAgent.",
-    "O Salomão v1 recebe rota, prioridade, tags, dados_faltantes, sentimento e "
-    "contexto da conversa; somente ele decide a resposta e se precisa de humano.",
+    "Responda dúvidas usando o SalomaoChat e a documentação oficial disponível.",
+    "O Heimdall é somente fallback de classificação quando o atendimento principal "
+    "não consegue responder; a triagem não deve bloquear nem enriquecer a resposta ao cliente.",
+    "Não execute ações em nome do cliente. O único fluxo operacional permitido é a "
+    "consulta somente leitura do status de protocolo, tratada antes deste agente.",
+    "Para pedidos de orientação, inclusive estorno, localize o artigo aplicável e explique "
+    "o procedimento. Não peça identificador de transação, origem do pagamento ou dados "
+    "operacionais que não sejam necessários para explicar o passo a passo.",
     "Quando conversation_context.is_reopened=true, trate o turno como um novo atendimento mensurável: "
     "leia o histórico anterior, identifique se é continuação ou um novo assunto e faça uma nova triagem "
     "sem repetir perguntas já respondidas nem assumir que a resolução anterior continua válida.",
@@ -324,6 +331,8 @@ class SalomaoSupervisorAgent:
         )
         self._rag: KnowledgeRagAgent | None = None
         self._build_rag_agent()
+        # Mantido instanciável para compatibilidade de API, mas deliberadamente
+        # fora do Team de produção. O Salomão orienta; não executa mutações.
         self._action = HelpdeskActionAgent(
             session_id=session_id,
             user_metadata=user_metadata,
@@ -359,15 +368,15 @@ class SalomaoSupervisorAgent:
         else:
             dynamic_routing = [
                 "ATENÇÃO: Este usuário veio pelo HubSpot.",
-                "Faça o transbordo via HelpdeskActionAgent (atualizando o ticket) sempre que o problema não puder ser resolvido pela IA.",
+                "Não execute mutações no HubSpot. Quando a IA não puder orientar com segurança, sinalize transbordo humano.",
             ]
 
         salomao_chat_routing = []
         if team_salomao_chat is not None:
             salomao_chat_routing = [
                 "CAPACIDADE INTERNA: O membro SalomaoChat encapsula o Salomao v1 como adapter agent.",
-                "Depois do Heimdall e antes da resposta final, acione o SalomaoChat para gerar um SalomaoChatDraft quando houver pergunta do cliente.",
-                "Use o SalomaoChatDraft para decidir resposta final, dados faltantes e transbordo; nao trate o Salomao v1 como bypass externo.",
+                "Acione o SalomaoChat para gerar um SalomaoChatDraft quando houver pergunta do cliente.",
+                "Use o SalomaoChatDraft para decidir a resposta final e o transbordo.",
                 "Se o SalomaoChatDraft indicar requires_human_handoff=true, sintetize a resposta final com handoff humano seguro.",
             ]
 
@@ -376,10 +385,8 @@ class SalomaoSupervisorAgent:
             + dynamic_routing
             + salomao_chat_routing
             + [
-                "FLUXO DE TRANSBORDO DO RAG:",
-                "Se a resposta devolvida pelo KnowledgeRagAgent contiver a tag <REQUIRES_ESCALATION>, significa que a Inteligência não pôde sanar a dúvida.",
-                "Neste cenário, ANTES DE RESPONDER AO USUÁRIO, você DEVE delegar a tarefa para o HelpdeskActionAgent com a ordem estrita de atualizar o ticket no HubSpot notificando a necessidade de transbordo da IA para Humanos.",
-                "Somente após a confirmação do HelpdeskActionAgent, formule sua resposta final pedindo desculpas e informando o número do protocolo do ticket formatado.",
+                "Se o KnowledgeRagAgent devolver <REQUIRES_ESCALATION>, informe que a documentação "
+                "não cobre o caso e solicite transbordo humano, sem executar alterações externas.",
             ]
         )
 
@@ -390,7 +397,7 @@ class SalomaoSupervisorAgent:
             model=build_primary_model(),
             fallback_config=_build_fallback_config(),
             db=db or _build_redis_db(session_id),
-            members=[member for member in [self._triage, self._rag, self._action, team_salomao_chat] if member],
+            members=[member for member in [self._triage, self._rag, team_salomao_chat] if member],
             instructions=instructions,
             session_id=session_id,
             # Propaga o histórico do Team para os membros, permitindo
@@ -405,7 +412,7 @@ class SalomaoSupervisorAgent:
 
     def _build_rag_agent(self) -> KnowledgeRagAgent | None:
         """Build the RAG member only when a route actually needs it."""
-        if self._rag is not None:
+        if getattr(self, "_rag", None) is not None:
             return self._rag
 
         try:
@@ -621,12 +628,12 @@ class SalomaoSupervisorAgent:
         return response
 
     def _run_integrated_chain(self, message: str) -> SalomaoResponse | None:
-        """Run the required Heimdall -> SalomaoChat path deterministically.
+        """Run SalomaoChat first and use Heimdall/RAG only as fallback.
 
-        The Agno Team remains available for AgentOS exploration and fallback,
-        but production routing must not depend on the LLM deciding to call a
-        member/tool. Heimdall and the Salomao v1 adapter are therefore called
-        explicitly when the adapter is enabled.
+        Customer guidance must not be blocked by triage metadata. In
+        particular, informational requests such as "como fazer estorno" must
+        reach the knowledge-backed assistant instead of being converted into
+        a transaction-data collection flow.
         """
         menu_selection = _menu_selection(message)
         if menu_selection == "1":
@@ -660,107 +667,105 @@ class SalomaoSupervisorAgent:
                 ),
             )
 
-        trace = []
+        if _is_greeting_only(message):
+            greeting_triage = TriageDecision(
+                rota="ATENDIMENTO_IA",
+                prioridade="BAIXA",
+                tags=["saudacao"],
+                dados_faltantes=[],
+                sentimento="neutro",
+                confidence=1.0,
+                evidence=[_current_customer_message(message)[:160]],
+                policy_version="deterministic-menu-v1",
+            )
+            return self._greeting_clarification_response(
+                triage=greeting_triage,
+                agent_trace=["supervisor: greeting_clarification"],
+            )
+
         if menu_selection is not None:
-            triage = _menu_triage(menu_selection, message)
-            trace.append(f"menu_policy: option_{menu_selection}")
-        else:
+            return self._fixed_menu_selection_response(menu_selection)
+
+        context = self._build_conversation_context(message)
+        trace: list[str] = []
+        if self._salomao_chat is not None:
             try:
-                triage_response = self._triage.run(message)
-                triage = self._extract_triage_decision(triage_response)
-                trace.append("heimdall: OK")
+                trace.append("salomao_chat: call_started")
+                draft = self._salomao_chat.create_chat_draft(
+                    message=message,
+                    triage_decision=None,
+                    conversation_context=context,
+                )
             except Exception as exc:
-                self._logger.error("heimdall_triage_failed", error=str(exc))
-                triage = None
-                trace.append("heimdall: failed")
+                self._logger.error("salomao_chat_failed", error=str(exc))
+                trace.append("salomao_chat: failed")
+            else:
+                adapter_failure = (draft.handoff_reason or "").startswith(
+                    ("SalomaoChatAgent adapter failure", "Salomao v1 returned an empty response")
+                )
+                if not adapter_failure:
+                    trace.append("salomao_chat: OK")
+                    return self._response_from_salomao_draft(draft, trace)
+                trace.append("salomao_chat: unavailable")
+        else:
+            trace.append("salomao_chat: unavailable")
+
+        return self._run_heimdall_rag_fallback(message, context=context, agent_trace=trace)
+
+    def _run_heimdall_rag_fallback(
+        self,
+        message: str,
+        *,
+        context: ConversationContext,
+        agent_trace: list[str],
+    ) -> SalomaoResponse:
+        """Answer from the official knowledge base when SalomaoChat is unavailable."""
+        del context  # Reserved for future provider-neutral fallback enrichment.
+        trace = list(agent_trace)
+        try:
+            triage_response = self._triage.run(message)
+            triage = self._extract_triage_decision(triage_response)
+            trace.append("heimdall: OK")
+        except Exception as exc:
+            self._logger.error("heimdall_triage_failed", error=str(exc))
+            triage = None
+            trace.append("heimdall: failed")
 
         if triage is None:
             return self._failed_triage_response(agent_trace=trace)
-
-        if _is_greeting_only(message):
-            trace.append("supervisor: greeting_clarification")
-            return self._greeting_clarification_response(triage=triage, agent_trace=trace)
-
         if self._requires_mandatory_handoff(triage):
             trace.append("supervisor: mandatory_human_handoff")
             return self._mandatory_handoff_response(triage=triage, agent_trace=trace)
 
-        context = self._build_conversation_context(message)
-        identity = context.customer_identity
-        if identity is not None and identity.status in {"UNKNOWN", "AMBIGUOUS", "CONFLICT"}:
-            if identity.collection_attempts >= 2:
-                trace.append("supervisor: identity_attempts_exhausted")
-                return self._mandatory_handoff_response(
-                    triage=triage,
-                    agent_trace=trace,
-                    reason="Customer identity could not be resolved after two collection attempts.",
-                )
-            trace.append("supervisor: identity_required")
-            return self._identity_collection_response(
-                triage=triage,
-                identity=identity,
-                agent_trace=trace,
-            )
-
-        if (
-            identity is not None
-            and triage.rota in _SENSITIVE_IDENTITY_ROUTES
-            and not identity.sensitive_actions_allowed
-        ):
-            trace.append("supervisor: sensitive_route_identity_handoff")
-            return self._mandatory_handoff_response(
-                triage=triage,
-                agent_trace=trace,
-                reason="Sensitive route requires a verified customer identity.",
-            )
-
-        minimum_confidence = min(1.0, max(0.0, float(getattr(settings, "HEIMDALL_MIN_CONFIDENCE", 0.65))))
-        automatic_confidence = min(
-            1.0,
-            max(
-                minimum_confidence,
-                float(getattr(settings, "HEIMDALL_AUTO_ROUTE_CONFIDENCE", 0.8)),
-            ),
-        )
-        if triage.confidence < minimum_confidence:
-            trace.append("supervisor: low_confidence_handoff")
-            return self._mandatory_handoff_response(
-                triage=triage,
-                agent_trace=trace,
-                reason="Heimdall confidence is below the safe routing threshold.",
-            )
-        if triage.confidence < automatic_confidence:
-            trace.append("supervisor: triage_clarification_required")
-            return self._missing_data_response(
-                triage=triage,
-                agent_trace=trace,
-                missing_data=triage.dados_faltantes or ["mais_detalhes_do_problema"],
-            )
-        if triage.dados_faltantes:
-            trace.append("supervisor: triage_missing_data")
-            return self._missing_data_response(triage=triage, agent_trace=trace)
-
-        if self._salomao_chat is None:
-            trace.append("salomao_chat: unavailable")
+        rag = self._build_rag_agent()
+        if rag is None:
+            trace.append("knowledge_rag: unavailable")
             return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
 
         try:
-            trace.append("salomao_chat: call_started")
-            draft = self._salomao_chat.create_chat_draft(
-                message=message,
-                triage_decision=triage,
-                conversation_context=context,
-            )
+            rag_response = rag.run(message)
+            content = self._extract_content(rag_response).strip()
         except Exception as exc:
-            self._logger.error("salomao_chat_failed", error=str(exc))
-            trace.append("salomao_chat: failed")
+            self._logger.error("knowledge_rag_failed", error=str(exc))
+            trace.append("knowledge_rag: failed")
             return self._salomao_unavailable_response(triage=triage, agent_trace=trace)
 
-        trace.append("salomao_chat: OK")
-        if draft.recommended_actions:
-            trace.append("helpdesk_action: pending_supervisor_decision")
-
-        return self._response_from_salomao_draft(draft, trace, triage=triage)
+        trace.append("knowledge_rag: OK")
+        if not content or "<REQUIRES_ESCALATION>" in content:
+            return self._mandatory_handoff_response(
+                triage=triage,
+                agent_trace=trace,
+                reason="The official knowledge base did not cover the customer request.",
+            )
+        return self._response_from_specialized_service(
+            content=content,
+            triage=triage,
+            agent_trace=trace,
+            requires_handoff=False,
+            handoff_reason=None,
+            sources=self._extract_sources(rag_response),
+            model_name="knowledge_rag_fallback",
+        )
 
     def _requires_mandatory_handoff(self, triage: TriageDecision | None) -> bool:
         """Return True when the triage contract forbids an automated answer."""
@@ -897,6 +902,35 @@ class SalomaoSupervisorAgent:
                 trace_summary=agent_trace,
                 missing_data=["descricao_da_solicitacao"],
                 confidence=triage.confidence if triage else 1.0,
+            ),
+        )
+
+    def _fixed_menu_selection_response(self, choice: str) -> SalomaoResponse:
+        """Respond to exact menu options with audited fixed copy."""
+        message = FIXED_MENU_RESPONSES[choice]
+        action = HubSpotAction(
+            action_type="send_thread_reply",
+            payload={"menu_choice": choice},
+            idempotency_key=f"{self._attendance_idempotency_prefix()}:fixed-menu:{choice}",
+        )
+        return SalomaoResponse(
+            session_id=self.session_id,
+            message=message,
+            sources=[],
+            requires_human_handoff=False,
+            handoff_reason=None,
+            agent_trace=[f"supervisor: fixed_menu_choice_{choice}"],
+            tokens_used=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            model_name="deterministic_menu",
+            latency_ms=0,
+            decision=SupervisorDecision(
+                outcome="waiting_customer",
+                final_response=message,
+                hubspot_action=action,
+                trace_summary=[f"supervisor: fixed_menu_choice_{choice}"],
+                confidence=1.0,
             ),
         )
 

@@ -121,9 +121,5 @@ def test_mcp_connectors_and_config_builder() -> None:
 
 
 def test_static_fallback_tools() -> None:
-    with (
-        patch("apps.ai_agents.agents.tools.hubspot_tools.GetTicketInfo", return_value="hubspot"),
-        patch("apps.ai_agents.agents.tools.jira_tools.SearchJiraIssues", return_value="jira"),
-        patch("apps.ai_agents.tools.inchurch_tools.InChurchDiagnosticsTool", return_value="diagnostics"),
-    ):
-        assert action._build_static_fallback_tools() == ["hubspot", "jira", "diagnostics"]
+    with patch("apps.ai_agents.agents.tools.hubspot_tools.GetTicketInfo", return_value="hubspot"):
+        assert action._build_static_fallback_tools() == ["hubspot"]

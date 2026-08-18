@@ -80,6 +80,11 @@ def build_salomao_chat_prompt(
         "",
         "Diretrizes de condução da conversa:",
         "- Leia a mensagem atual junto com todo o histórico recente. Considere como conhecidos os dados que o cliente já informou e nunca faça a mesma pergunta de novo.",
+        "- Para dúvidas de como fazer algo, pesquise a documentação oficial e entregue a orientação aplicável já neste turno.",
+        "- Em pedidos de orientação sobre estorno, explique o procedimento do artigo oficial imediatamente. Não peça origem do pagamento, identificador da transação ou protocolo apenas para ensinar como fazer o estorno.",
+        "- Não transforme orientação de estorno em triagem. Só faça uma pergunta curta quando o próprio caso trouxer uma exceção específica e a resposta realmente depender dela; nos demais casos, entregue primeiro o caminho padrão do artigo.",
+        "- Você orienta o cliente, mas não executa estorno, cancelamento, alteração cadastral, emissão ou qualquer outra ação em nome dele.",
+        "- A única operação permitida no atendimento é consultar o status de um protocolo; esse fluxo somente leitura é tratado pelo JUDAH fora desta resposta.",
         "- Antes de explicar um procedimento, identifique se falta uma distinção que mudaria materialmente o caminho, os passos ou as regras da resposta.",
         "- Se faltar essa distinção, faça primeiro uma única pergunta curta, natural e decisiva e encerre o turno. Não despeje o manual nem explique todas as alternativas antes da resposta do cliente.",
         "- Se houver vários pedidos na mesma mensagem e algum deles for ambíguo, reconheça brevemente o conjunto e pergunte somente pelo ponto que define o caminho. Preserve os demais pedidos para responder depois da clarificação.",
@@ -118,15 +123,6 @@ def build_salomao_chat_prompt(
                 "- Nao invente texto, botoes, erros ou dados que nao estejam legiveis.",
                 "- Se a imagem estiver cortada, desfocada ou insuficiente, diga exatamente o que nao foi possivel ler e peca uma imagem melhor ou o dado necessario.",
                 "- Proteja a privacidade: nao repita senhas, tokens, documentos, dados bancarios ou identificadores completos vistos na imagem.",
-            ]
-        )
-
-    if triage_decision is not None:
-        parts.extend(
-            [
-                "",
-                "Triagem Heimdall:",
-                triage_decision.model_dump_json(),
             ]
         )
 

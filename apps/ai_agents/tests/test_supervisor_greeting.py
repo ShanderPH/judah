@@ -434,22 +434,28 @@ def test_menu_option_one_always_uses_the_human_handoff() -> None:
     assert response.triage_decision.tags == ["menu_option_1"]
 
 
-def test_menu_options_two_and_three_bypass_llm_triage_with_approved_routes() -> None:
-    for selection, route in (("2", "DUVIDAS_PLATAFORMA"), ("3", "BOLETO")):
+def test_menu_options_two_and_three_use_fixed_copy_without_models() -> None:
+    expected = {
+        "2": "Certo — qual é a sua dúvida sobre a plataforma? Pode escrever normalmente.",
+        "3": (
+            "Certo — vou ajudar com a 2ª via. Informe se o boleto é da igreja ou "
+            "de uma inscrição em evento para eu enviar a orientação correta."
+        ),
+    }
+    for selection, fixed_copy in expected.items():
         supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
         supervisor.session_id = "session-1"
         supervisor.user_metadata = {}
         supervisor._logger = FakeLogger()
         supervisor._triage = FailingTriageRunner()
-        salomao = RecordingSalomaoChat()
-        supervisor._salomao_chat = salomao
+        supervisor._salomao_chat = RaisingSalomaoChat()
 
         response = supervisor._run_integrated_chain(selection)
 
         assert response is not None
-        assert response.triage_decision.rota == route
-        assert response.triage_decision.tags == [f"menu_option_{selection}"]
-        assert salomao.calls[0]["triage_decision"].rota == route
+        assert response.model_name == "deterministic_menu"
+        assert response.message == fixed_copy
+        assert response.requires_human_handoff is False
 
 
 def test_menu_selection_uses_only_a_standalone_current_turn() -> None:
@@ -484,7 +490,7 @@ def test_integrated_chain_uses_salomao_v1_for_high_priority() -> None:
     assert response.requires_human_handoff is False
     assert response.message == "Resposta oficial do Salomão v1."
     assert len(salomao.calls) == 1
-    assert salomao.calls[0]["triage_decision"].prioridade == "ALTA"
+    assert salomao.calls[0]["triage_decision"] is None
 
 
 def test_integrated_chain_uses_salomao_v1_for_customer_frustration() -> None:
@@ -511,12 +517,12 @@ def test_integrated_chain_uses_salomao_v1_for_customer_frustration() -> None:
     assert response.requires_human_handoff is False
     assert response.message == "Resposta oficial do Salomão v1."
     assert len(salomao.calls) == 1
-    assert salomao.calls[0]["triage_decision"].sentimento == "negativo"
+    assert salomao.calls[0]["triage_decision"] is None
     assert "knowledge_rag: OK" not in response.agent_trace
     assert "knowledge_rag: failed" not in response.agent_trace
 
 
-def test_integrated_chain_collects_missing_data_before_salomao_v1() -> None:
+def test_integrated_chain_does_not_let_triage_missing_data_block_salomao_v1() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -540,8 +546,9 @@ def test_integrated_chain_collects_missing_data_before_salomao_v1() -> None:
     assert response.outcome == "waiting_customer"
     assert response.requires_human_handoff is False
     assert "ID da igreja" in response.message
-    assert response.missing_data == ["id_da_igreja"]
-    assert salomao.calls == []
+    assert response.missing_data == []
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"] is None
 
 
 def test_greeting_only_messages_are_detected_without_swallowing_requests() -> None:
@@ -555,6 +562,25 @@ def test_greeting_only_messages_are_detected_without_swallowing_requests() -> No
         )
         is True
     )
+
+
+def test_refund_how_to_reaches_salomao_without_heimdall_questions() -> None:
+    supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
+    supervisor.session_id = "session-refund"
+    supervisor.user_metadata = {}
+    supervisor._logger = FakeLogger()
+    supervisor._triage = FailingTriageRunner()
+    salomao = RecordingSalomaoChat(
+        "Para fazer o estorno, siga estes passos do artigo oficial: 1. Acesse o evento."
+    )
+    supervisor._salomao_chat = salomao
+
+    response = supervisor._run_integrated_chain("Só quero saber como posso fazer o estorno")
+
+    assert response.requires_human_handoff is False
+    assert "passos do artigo oficial" in response.message
+    assert len(salomao.calls) == 1
+    assert salomao.calls[0]["triage_decision"] is None
 
 
 def test_integrated_chain_asks_customer_need_for_greeting_instead_of_handoff() -> None:
@@ -662,7 +688,7 @@ def test_integrated_chain_never_generates_an_alternative_answer_when_v1_is_unava
 
 
 @override_settings(HEIMDALL_MIN_CONFIDENCE=0.65)
-def test_integrated_chain_hands_off_low_confidence_triage() -> None:
+def test_integrated_chain_does_not_run_low_confidence_triage_before_salomao() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-1"
     supervisor.user_metadata = {}
@@ -681,13 +707,11 @@ def test_integrated_chain_hands_off_low_confidence_triage() -> None:
     response = supervisor._run_integrated_chain("Não sei explicar o que aconteceu")
 
     assert response is not None
-    assert response.outcome == "escalate_human"
-    assert response.requires_human_handoff is True
-    assert "safe routing threshold" in (response.handoff_reason or "")
-    assert salomao.calls == []
+    assert response.requires_human_handoff is False
+    assert len(salomao.calls) == 1
 
 
-def test_integrated_chain_collects_unknown_identity_before_service() -> None:
+def test_integrated_chain_allows_guidance_without_identity_collection() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-identity"
     supervisor.user_metadata = {
@@ -713,12 +737,11 @@ def test_integrated_chain_collects_unknown_identity_before_service() -> None:
 
     assert response is not None
     assert response.outcome == "waiting_customer"
-    assert "e-mail cadastrado" in response.message
-    assert "identity_required" in response.risk_flags
-    assert salomao.calls == []
+    assert response.message == "Resposta oficial do Salomão v1."
+    assert len(salomao.calls) == 1
 
 
-def test_integrated_chain_blocks_sensitive_route_for_probable_identity() -> None:
+def test_integrated_chain_allows_financial_guidance_without_executing_action() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-sensitive"
     supervisor.user_metadata = {
@@ -748,13 +771,12 @@ def test_integrated_chain_blocks_sensitive_route_for_probable_identity() -> None
     response = supervisor._run_integrated_chain("Quero contestar uma cobrança")
 
     assert response is not None
-    assert response.outcome == "escalate_human"
-    assert "verified customer identity" in (response.handoff_reason or "")
-    assert salomao.calls == []
+    assert response.requires_human_handoff is False
+    assert len(salomao.calls) == 1
 
 
 @override_settings(HEIMDALL_MIN_CONFIDENCE=0.65, HEIMDALL_AUTO_ROUTE_CONFIDENCE=0.80)
-def test_integrated_chain_clarifies_intermediate_confidence() -> None:
+def test_integrated_chain_lets_salomao_clarify_without_triage_gate() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-clarify"
     supervisor.user_metadata = {}
@@ -774,11 +796,11 @@ def test_integrated_chain_clarifies_intermediate_confidence() -> None:
 
     assert response is not None
     assert response.outcome == "waiting_customer"
-    assert response.missing_data == ["mais_detalhes_do_problema"]
-    assert salomao.calls == []
+    assert response.missing_data == []
+    assert len(salomao.calls) == 1
 
 
-def test_integrated_chain_hands_off_after_identity_attempt_limit() -> None:
+def test_integrated_chain_does_not_use_identity_attempts_for_guidance() -> None:
     supervisor = SalomaoSupervisorAgent.__new__(SalomaoSupervisorAgent)
     supervisor.session_id = "session-identity-limit"
     supervisor.user_metadata = {
@@ -807,9 +829,8 @@ def test_integrated_chain_hands_off_after_identity_attempt_limit() -> None:
     response = supervisor._run_integrated_chain("Não sei o e-mail")
 
     assert response is not None
-    assert response.outcome == "escalate_human"
-    assert "two collection attempts" in (response.handoff_reason or "")
-    assert salomao.calls == []
+    assert response.requires_human_handoff is False
+    assert len(salomao.calls) == 1
 
 
 def test_salomao_draft_tokens_are_propagated_to_response() -> None:

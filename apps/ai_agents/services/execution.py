@@ -44,7 +44,8 @@ HUMAN_HANDOFF_OFF_HOURS_CONFIRMATION = (
     "O atendimento humano funciona de segunda a sexta, das 9h às 17h50; aos sábados, "
     "das 9h às 13h; e aos domingos, das 8h às 12h, no horário de Brasília. "
     "Vou deixar sua conversa encaminhada para a fila da equipe, que dará continuidade "
-    "por aqui no próximo período de atendimento."
+    "por aqui no próximo período de atendimento. Enquanto isso, me conte o que você "
+    "precisa: se houver uma orientação na nossa documentação, eu posso tentar ajudar agora."
 )
 MAX_STALE_TURN_FOLLOWUPS = 3
 

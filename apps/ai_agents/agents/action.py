@@ -1,13 +1,8 @@
-"""HelpdeskActionAgent — Executor de ações externas via MCP e APIs diretas.
+"""Read-only protocol lookup agent and legacy MCP connection helpers.
 
-Decisão arquitetural: este agente recebe ferramentas **dinamicamente** de
-servidores FastMCP (HubSpot, Jira e Central de Ajuda), eliminando o acoplamento estático
-entre o código do agente e as APIs externas. Cada servidor MCP expõe suas
-ferramentas via o protocolo Model Context Protocol; o Agno as descobre em
-runtime e as injecta no contexto do LLM.
-
-Os métodos `connect_*` são assinaturas/placeholders prontos para receber as
-URLs/comandos reais dos servidores MCP quando provisionados.
+MCP connector builders remain available for integrations outside the customer
+assistant. The agent itself deliberately receives only ``GetTicketInfo`` so an
+LLM cannot discover or invoke mutating external tools.
 """
 
 from __future__ import annotations
@@ -205,57 +200,23 @@ def build_mcp_tools_from_config(
 # ---------------------------------------------------------------------------
 
 _ACTION_INSTRUCTIONS = [
-    "Você é o HelpdeskAction — agente de ações do helpdesk InChurch.",
-    "Você é acionado pelo Supervisor Salomão quando a rota do Heimdall "
-    "requer uma AÇÃO concreta no HubSpot (tickets/contatos/negócios), "
-    "na Central de Ajuda InChurch (tickets internos/artigos) ou no Jira "
-    "(issues).",
-    "Use o contexto estruturado do Heimdall (rota, prioridade, tags, "
-    "dados_faltantes) para decidir quais ferramentas MCP acionar.",
-    "Se `dados_faltantes` não estiver vazio, peça ao Supervisor para "
-    "coletar esses dados antes de executar ações irreversíveis.",
-    "Sempre confirme os dados antes de criar ou modificar um recurso externo.",
-    "Priorize a idempotência: verifique se o recurso já existe antes de criar um novo.",
-    "Nunca altere diretamente ticket, pipeline, proprietário ou conversa. "
-    "Retorne somente uma ActionIntent estruturada; o backend valida estado, "
-    "permissão e idempotência antes de executar qualquer efeito externo.",
-    "Uma ActionIntent deve conter nome, parâmetros, motivo e chave de idempotência.",
-    "- Sempre informe ao usuário o seu Protocolo de Atendimento. O Protocolo é o próprio `hubspot_ticket_id` formatado (Ex: 'Seu protocolo é #12345').",
-    "- Sempre responda ao usuário (reply_note) antes de finalizar, alertando que o retorno será no próximo dia útil se for off-hours.",
-    "Não afirme que uma ação foi executada; informe apenas que ela foi recomendada ao Supervisor.",
-    "Se uma ferramenta MCP não estiver disponível, informe o Supervisor imediatamente.",
+    "Você é o HelpdeskAction, restrito à consulta somente leitura do status de protocolos InChurch.",
+    "Use apenas a ferramenta de consulta de ticket/protocolo.",
+    "Nunca crie, atualize, exclua, atribua ou mova tickets, contatos, negócios, conversas, artigos ou issues.",
+    "Nunca execute estorno, cancelamento, emissão ou alteração em nome do cliente.",
+    "Se o pedido não for uma consulta de status de protocolo, não use ferramenta e devolva o caso ao Supervisor para orientação pela documentação.",
     "Nunca exponha tokens, chaves de API ou dados sensíveis na resposta.",
-    "Sempre que o utilizador relatar problemas de visibilidade num evento, peça o ID e utilize a ferramenta diagnose_event_visibility.",
 ]
 
 
 class HelpdeskActionAgent(BaseInChurchAgent):
-    """Executor de ações externas via servidores FastMCP.
-
-    Aceita ferramentas MCP dinamicamente em runtime. As ferramentas são
-    descobertas via protocol handshake com os servidores MCP registrados,
-    sem necessidade de alterar o código do agente quando novos servidores
-    são adicionados.
-
-    Uso típico:
-        # Com servidores MCP reais:
-        hubspot_tool = connect_hubspot_mcp(url=settings.HUBSPOT_MCP_URL)
-        agent = HelpdeskActionAgent(
-            session_id="...",
-            user_metadata={...},
-            mcp_tools=[hubspot_tool],
-        )
-
-        # Com configuração automática via DEFAULT_MCP_SERVERS:
-        agent = HelpdeskActionAgent(session_id="...", user_metadata={...})
+    """Expose only read-only ticket/protocol lookup to the model.
 
     Args:
         session_id: Identificador da sessão.
         user_metadata: Dados do usuário sem ORM.
-        mcp_tools: Lista de MCPTools pré-configurados. Se None, usa
-            `build_mcp_tools_from_config(DEFAULT_MCP_SERVERS)`.
-        extra_mcp_configs: Configurações adicionais de servidores MCP para
-            complementar DEFAULT_MCP_SERVERS.
+        mcp_tools: Legacy connector input. Never exposed to this agent.
+        extra_mcp_configs: Legacy connector configuration input.
     """
 
     def __init__(
@@ -271,11 +232,12 @@ class HelpdeskActionAgent(BaseInChurchAgent):
             configs = DEFAULT_MCP_SERVERS + (extra_mcp_configs or [])
             mcp_tools = build_mcp_tools_from_config(configs)
 
-        # Fallback estático usando Toolkits diretos enquanto MCP não está disponível.
-        # Quando os servidores MCP estiverem ativos, esta lista pode ser esvaziada.
+        # The explicit local toolkit is the complete allowed tool surface.
         static_tools = _build_static_fallback_tools()
 
-        all_tools = [*mcp_tools, *static_tools]
+        # MCPs externos podem expor ferramentas mutáveis. O agente recebe
+        # somente o toolkit local de consulta, com superfície conhecida.
+        all_tools = static_tools
         kwargs: dict[str, Any] = {}
         if db is not None:
             kwargs["db"] = db
@@ -298,13 +260,7 @@ class HelpdeskActionAgent(BaseInChurchAgent):
 
 
 def _build_static_fallback_tools() -> list[Any]:
-    """Retorna ferramentas estáticas como fallback enquanto MCP não está ativo.
-
-    Reutiliza os Toolkits já existentes no projeto para manter compatibilidade
-    com o código legado e garantir funcionamento em ambiente de desenvolvimento.
-    """
+    """Return only the read-only ticket/protocol lookup toolkit."""
     from apps.ai_agents.agents.tools.hubspot_tools import GetTicketInfo
-    from apps.ai_agents.agents.tools.jira_tools import SearchJiraIssues
-    from apps.ai_agents.tools.inchurch_tools import InChurchDiagnosticsTool
 
-    return [GetTicketInfo(), SearchJiraIssues(), InChurchDiagnosticsTool()]
+    return [GetTicketInfo()]

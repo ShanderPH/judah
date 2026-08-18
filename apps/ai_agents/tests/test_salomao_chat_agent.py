@@ -9,7 +9,7 @@ from apps.ai_agents.agents.salomao_chat import (
     build_salomao_chat_prompt,
     salomao_v1_result_to_draft,
 )
-from apps.ai_agents.contracts import ConversationContext, ConversationMessage
+from apps.ai_agents.contracts import ConversationContext, ConversationMessage, TriageDecision
 from apps.integrations.salomao_v1 import SalomaoV1ChatResult, SalomaoV1TokenUsage
 from common.exceptions import ExternalServiceError
 
@@ -218,6 +218,23 @@ def test_prompt_uses_answered_clarification_and_preserves_pending_request() -> N
     assert "[OUTGOING] O estorno é de evento ou de doação?" in prompt
     assert prompt.count("É de inscrição de evento.") == 1
     assert "Preserve os demais pedidos para responder depois da clarificação" in prompt
+
+
+def test_prompt_ignores_triage_and_requires_article_guidance_for_refund() -> None:
+    prompt = build_salomao_chat_prompt(
+        message="Só quero saber como posso fazer o estorno.",
+        triage_decision=TriageDecision(
+            rota="FINANCEIRO",
+            prioridade="MEDIA",
+            dados_faltantes=["origem_do_pagamento", "identificador_da_transacao"],
+            sentimento="neutro",
+        ),
+    )
+
+    assert "Triagem Heimdall:" not in prompt
+    assert "identificador_da_transacao" not in prompt
+    assert "explique o procedimento do artigo oficial imediatamente" in prompt
+    assert "não executa estorno" in prompt
 
 
 def test_salomao_v1_empty_response_becomes_handoff_draft() -> None:
