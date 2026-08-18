@@ -570,9 +570,7 @@ def test_refund_how_to_reaches_salomao_without_heimdall_questions() -> None:
     supervisor.user_metadata = {}
     supervisor._logger = FakeLogger()
     supervisor._triage = FailingTriageRunner()
-    salomao = RecordingSalomaoChat(
-        "Para fazer o estorno, siga estes passos do artigo oficial: 1. Acesse o evento."
-    )
+    salomao = RecordingSalomaoChat("Para fazer o estorno, siga estes passos do artigo oficial: 1. Acesse o evento.")
     supervisor._salomao_chat = salomao
 
     response = supervisor._run_integrated_chain("Só quero saber como posso fazer o estorno")
