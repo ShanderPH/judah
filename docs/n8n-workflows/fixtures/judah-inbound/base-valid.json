@@ -1,0 +1,44 @@
+{
+  "action": "PROCESS_NEW_MESSAGE",
+  "data": {
+    "schema_version": "1.0",
+    "event": {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "type": "conversation.newMessage",
+      "message_id": "message-test",
+      "occurred_at": "2026-08-22T18:00:00.000Z",
+      "source": "judah"
+    },
+    "hubspot": {
+      "portal_id": "portal-test",
+      "thread_id": "thread-test",
+      "ticket_id": null
+    },
+    "conversation": {
+      "threadId": "thread-test",
+      "originalChannelId": null,
+      "originalChannelAccountId": null
+    },
+    "gateway": {
+      "is_incoming_customer_message": true,
+      "delivery_method": "webhook"
+    },
+    "message": {
+      "direction": "INCOMING",
+      "text": "fixture message",
+      "created_at": "2026-08-22T18:00:00.000Z",
+      "channel_id": null,
+      "channel_account_id": null
+    },
+    "delivery_identifiers": {
+      "email": null,
+      "phone": null,
+      "trusted": false,
+      "source": null
+    },
+    "metadata": {
+      "idempotency_key": "342183834ba6c55fe62d79206eac164762df0ccd2fc607d2cecca160f5dce6a7",
+      "service_cycle_id": null
+    }
+  }
+}

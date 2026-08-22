@@ -1,0 +1,3696 @@
+{
+  "name": "[INHPK] BOT | 03 - Conversation Message Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "action"
+            },
+            {
+              "name": "data",
+              "type": "object"
+            },
+            {
+              "name": "transport",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        1104,
+        1456
+      ],
+      "id": "a9e13d0c-145a-4861-a038-799c9b5a9462",
+      "name": "Conversation Gateway Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const action=String(x.action??'').toUpperCase();if(!['REGISTER_STATE','PROCESS_NEW_MESSAGE'].includes(action))throw new Error('Conversation Gateway: action must be REGISTER_STATE or PROCESS_NEW_MESSAGE');return[{json:{...x,action,data:x.data??x.payload??x.data_context??x.dataContext??x.data_to_process??x.dataToProcess??x.data_payload??x.dataPayload??x.data??null}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        1456
+      ],
+      "id": "71c5f03a-f0a7-4e98-9716-55fab2f9b639",
+      "name": "Validate Gateway Action"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5b62f78d-7d99-4ea2-924f-8bfd573cabcc",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "REGISTER_STATE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1648,
+        1456
+      ],
+      "id": "8efafe4a-6d0e-400b-98aa-bfc462ced69c",
+      "name": "Register State?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root=$input.first().json;const x=root.data&&typeof root.data==='object'?root.data:root;const conv=x.conversation??{};const hs=x.hubspot??{};const identity=x.identity??{};const outbound=x.outbound_message?.messageToSend??x.messageToSend??{};const threadId=String(conv.threadId??x.threadId??'');const ticketId=String(hs.ticket_id??hs.ticket?.id??x.ticket_id??'');if(!threadId)throw new Error('REGISTER_STATE: conversation.threadId is required');if(!ticketId)throw new Error('REGISTER_STATE: hubspot.ticket_id is required');const now=new Date().toISOString();const context={schema_version:x.schema_version??'1.0',customer:x.customer??null,identity,hubspot:{portal_id:hs.portal_id??null,ticket_id:ticketId,contact:hs.contact??null},conversation:conv};return[{json:{action:'REGISTER_STATE',data:x,state_row:{thread_id:threadId,ticket_id:ticketId,contact_id:String(hs.contact?.id??x.customer?.id??''),state:String(x.status??'IDENTITY_CONFIRMATION_REQUIRED'),identity_status:String(identity.customer_confirmation==='confirmed'?'IDENTITY_CONFIRMED':identity.state??'IDENTIFIED').toUpperCase(),channel_id:String(outbound.channelId??conv.originalChannelId??''),channel_account_id:String(outbound.channelAccountId??conv.originalChannelAccountId??''),last_message_id:String(conv.last_message_id??''),retry_count:Number(conv.retry_count??0),context_json:JSON.stringify(context),created_at:now,updated_at:now}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        1200
+      ],
+      "id": "8762d34b-6e7a-4b76-be13-be1fea028b71",
+      "name": "Build State Registration"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "bot_conversation_state",
+        "columns": {
+          "column": [
+            {
+              "name": "thread_id"
+            },
+            {
+              "name": "ticket_id"
+            },
+            {
+              "name": "contact_id"
+            },
+            {
+              "name": "state"
+            },
+            {
+              "name": "identity_status"
+            },
+            {
+              "name": "channel_id"
+            },
+            {
+              "name": "channel_account_id"
+            },
+            {
+              "name": "last_message_id"
+            },
+            {
+              "name": "retry_count",
+              "type": "number"
+            },
+            {
+              "name": "context_json"
+            },
+            {
+              "name": "created_at",
+              "type": "date"
+            },
+            {
+              "name": "updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2112,
+        1200
+      ],
+      "id": "f6893cf9-85da-4da8-95c7-3a3232f3c6db",
+      "name": "Ensure Conversation State Table"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Build State Registration').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        1200
+      ],
+      "id": "f76d6687-ad62-422e-8dfb-52c195479f25",
+      "name": "Restore State Registration"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_row.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ String($json.state_row.thread_id) }}",
+            "ticket_id": "={{ String($json.state_row.ticket_id) }}",
+            "contact_id": "={{ String($json.state_row.contact_id ?? '') }}",
+            "state": "={{ $json.state_row.state }}",
+            "identity_status": "={{ $json.state_row.identity_status }}",
+            "channel_id": "={{ String($json.state_row.channel_id ?? '') }}",
+            "channel_account_id": "={{ String($json.state_row.channel_account_id ?? '') }}",
+            "last_message_id": "={{ String($json.state_row.last_message_id ?? '') }}",
+            "retry_count": "={{ Number($json.state_row.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_row.context_json }}",
+            "created_at": "={{ $json.state_row.created_at }}",
+            "updated_at": "={{ $json.state_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2560,
+        1200
+      ],
+      "id": "223d85e7-ee48-48ed-940b-a35e33f4a33e",
+      "name": "Upsert Conversation State"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Restore State Registration').first().json;return[{json:{...x.data,state_persisted:true,persisted_state:x.state_row.state,persisted_at:new Date().toISOString()}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        1200
+      ],
+      "id": "869ea045-e23d-4bfe-9a56-416b1ae71037",
+      "name": "State Registered"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root=$input.first().json;const d=root.data&&typeof root.data==='object'?root.data:root;const isJudah=d?.event?.source==='judah'&&d?.schema_version==='1.0';if(isJudah){const event={...d.event,id:String(d.event.event_id),message_id:String(d.event.message_id),idempotency_key:String(d.metadata?.idempotency_key??'')};return[{json:{action:'PROCESS_NEW_MESSAGE',schema_version:d.schema_version,event,hubspot:d.hubspot,conversation:d.conversation,gateway:d.gateway,message:{...d.message,id:event.message_id,channel_id:d.message.channel_id??null,channel_account_id:d.message.channel_account_id??null},delivery_identifiers:d.delivery_identifiers,metadata:d.metadata,transport:root.transport??{},canonical_data:d,hydration:{message_complete:Boolean(String(d.message?.text??'').trim()&&d.message?.direction&&d.message?.created_at),thread_complete:Boolean(d.hubspot?.ticket_id)}}}];}const threadId=String(d.conversationId??d.objectId??d.threadId??'');const messageId=String(d.messageId??'');if(!threadId||!messageId)throw new Error('PROCESS_NEW_MESSAGE: thread and message IDs are required');const occurred=Number(d.occurredAt);const occurredAt=Number.isFinite(occurred)?new Date(occurred).toISOString():new Date().toISOString();const eventKey=[d.portalId??'',threadId,messageId].map(String).join(':');return[{json:{action:'PROCESS_NEW_MESSAGE',schema_version:'1.0',event:{id:String(d.eventId??eventKey),event_id:String(d.eventId??eventKey),type:String(d.subscriptionType??'conversation.newMessage'),occurred_at:occurredAt,message_id:messageId,idempotency_key:eventKey},hubspot:{portal_id:String(d.portalId??''),thread_id:threadId,ticket_id:null},conversation:{threadId},gateway:{is_incoming_customer_message:null,delivery_method:'legacy_hubspot'},message:null,delivery_identifiers:null,metadata:{idempotency_key:eventKey},transport:root.transport??{},canonical_data:d,hydration:{message_complete:false,thread_complete:false}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        1712
+      ],
+      "id": "61fb9058-abda-4df2-be88-2a69d0fbfa57",
+      "name": "Normalize New Message Event"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "bot_conversation_events_v2",
+        "columns": {
+          "column": [
+            {
+              "name": "event_key"
+            },
+            {
+              "name": "event_id"
+            },
+            {
+              "name": "portal_id"
+            },
+            {
+              "name": "thread_id"
+            },
+            {
+              "name": "message_id"
+            },
+            {
+              "name": "status"
+            },
+            {
+              "name": "attempt_count",
+              "type": "number"
+            },
+            {
+              "name": "occurred_at",
+              "type": "date"
+            },
+            {
+              "name": "received_at",
+              "type": "date"
+            },
+            {
+              "name": "processing_started_at",
+              "type": "date"
+            },
+            {
+              "name": "processed_at",
+              "type": "date"
+            },
+            {
+              "name": "last_error_code"
+            },
+            {
+              "name": "updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2112,
+        1712
+      ],
+      "id": "f377459c-62a7-40b5-a2cf-083bc3865950",
+      "name": "Ensure Conversation Events Table"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Normalize New Message Event').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        1712
+      ],
+      "id": "c86513fc-5750-439d-a6fa-7a58e249a3c1",
+      "name": "Restore New Message Event"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_events_v2",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "keyValue": "={{ $('Restore New Message Event').first().json.event.idempotency_key }}"
+            }
+          ]
+        },
+        "returnAll": false
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2560,
+        1712
+      ],
+      "id": "ecc7d58e-8d42-4a2b-8062-5e4a47a8a779",
+      "name": "Get Inbox Event",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_events_v2",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "keyValue": "={{ $json.inbox_row.event_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $json.inbox_row.event_key }}",
+            "event_id": "={{ $json.inbox_row.event_id }}",
+            "portal_id": "={{ $json.inbox_row.portal_id }}",
+            "thread_id": "={{ $json.inbox_row.thread_id }}",
+            "message_id": "={{ $json.inbox_row.message_id }}",
+            "status": "={{ $json.inbox_row.status }}",
+            "attempt_count": "={{ Number($json.inbox_row.attempt_count ?? 0) }}",
+            "occurred_at": "={{ $json.inbox_row.occurred_at }}",
+            "received_at": "={{ $json.inbox_row.received_at }}",
+            "processing_started_at": "={{ $json.inbox_row.processing_started_at }}",
+            "processed_at": "={{ $json.inbox_row.processed_at }}",
+            "last_error_code": "={{ $json.inbox_row.last_error_code }}",
+            "updated_at": "={{ $json.inbox_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2784,
+        1712
+      ],
+      "id": "00000000-0000-4000-8000-000000000025",
+      "name": "Claim Inbox Event"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Decide Inbox Claim').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3008,
+        1712
+      ],
+      "id": "707e81bd-d798-4f5c-9619-2685ae60af85",
+      "name": "Restore Message Event Context"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/conversations/v3/conversations/threads/{{ $json.hubspot.thread_id }}?association=TICKET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3232,
+        1712
+      ],
+      "id": "e91f4f4f-71bc-491d-849f-5b230b73dac8",
+      "name": "GET Conversation Thread",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Restore Message Event Context').first().json;const t=$input.first().json;const assoc=t.threadAssociations??{};const ticketId=assoc.associatedTicketId??(Array.isArray(assoc)?assoc.find(a=>a.associatedTicketId)?.associatedTicketId:null)??null;return[{json:{...base,hubspot:{...base.hubspot,ticket_id:ticketId?String(ticketId):null},conversation:{threadId:String(t.id??base.hubspot.thread_id),status:t.status??null,archived:Boolean(t.archived),spam:Boolean(t.spam),associatedContactId:t.associatedContactId?String(t.associatedContactId):null,inboxId:t.inboxId?String(t.inboxId):null,originalChannelId:t.originalChannelId?String(t.originalChannelId):null,originalChannelAccountId:t.originalChannelAccountId?String(t.originalChannelAccountId):null,latestMessageTimestamp:t.latestMessageTimestamp??null},gateway:{thread_loaded:true,has_associated_ticket:Boolean(ticketId)}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3456,
+        1712
+      ],
+      "id": "a1c3ce88-26d0-4dfa-a27c-3222e68d4bfa",
+      "name": "Parse Thread Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2e9c16e9-39ba-4917-a3e9-8c26292af12f",
+              "leftValue": "={{ $json.gateway.has_associated_ticket }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3680,
+        1712
+      ],
+      "id": "79257bdf-07b0-49cb-bdab-c749ead0d278",
+      "name": "Thread Has Ticket?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{...x,status:'IGNORED_NO_ASSOCIATED_TICKET'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3904,
+        1920
+      ],
+      "id": "58067f93-2e97-4ffa-97d5-bc8760b719d0",
+      "name": "Ignored - No Associated Ticket"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/conversations/v3/conversations/threads/{{ $json.conversation.threadId }}/messages/{{ $json.event.message_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3904,
+        1648
+      ],
+      "id": "d4501047-07dc-4d9d-b172-de1bbe253997",
+      "name": "GET New Message",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Parse Thread Context').first().json;const m=$input.first().json;const sender=Array.isArray(m.senders)&&m.senders.length?m.senders[0]:{};return[{json:{...base,message:{id:String(m.id??base.event.message_id),type:String(m.type??base.event.message_type??''),direction:String(m.direction??''),text:String(m.text??''),richText:m.richText??null,created_at:m.createdAt??null,updated_at:m.updatedAt??null,channel_id:m.channelId?String(m.channelId):base.conversation.originalChannelId,channel_account_id:m.channelAccountId?String(m.channelAccountId):base.conversation.originalChannelAccountId,sender_actor_id:sender.actorId?String(sender.actorId):null,sender_name:sender.name??null},gateway:{...base.gateway,is_incoming_customer_message:String(m.direction??'').toUpperCase()==='INCOMING'&&String(m.type??'').toUpperCase()==='MESSAGE'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4128,
+        1648
+      ],
+      "id": "42d70378-c593-4103-8390-0e7d49453e67",
+      "name": "Build Incoming Message Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "29f52eb1-eb7f-4ee0-969c-f4916038f6b8",
+              "leftValue": "={{ $json.gateway.is_incoming_customer_message }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4352,
+        1648
+      ],
+      "id": "5c3a4257-f96e-4b2c-a7a8-996414eedf3d",
+      "name": "Incoming Customer Message?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{...x,status:'IGNORED_NON_INCOMING_MESSAGE'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        1872
+      ],
+      "id": "d5fe3c5f-8407-4d3a-a35c-18a401612c0c",
+      "name": "Ignored - Non Incoming Message"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "bot_conversation_state",
+        "columns": {
+          "column": [
+            {
+              "name": "thread_id"
+            },
+            {
+              "name": "ticket_id"
+            },
+            {
+              "name": "contact_id"
+            },
+            {
+              "name": "state"
+            },
+            {
+              "name": "identity_status"
+            },
+            {
+              "name": "channel_id"
+            },
+            {
+              "name": "channel_account_id"
+            },
+            {
+              "name": "last_message_id"
+            },
+            {
+              "name": "retry_count",
+              "type": "number"
+            },
+            {
+              "name": "context_json"
+            },
+            {
+              "name": "created_at",
+              "type": "date"
+            },
+            {
+              "name": "updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        4576,
+        1584
+      ],
+      "id": "8dd2ad71-6f83-4110-8b12-dab666aa1757",
+      "name": "Ensure State Table for Message",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Build Incoming Message Context').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4800,
+        1584
+      ],
+      "id": "d3ae99cd-de8d-4b26-9e21-6df41d921e07",
+      "name": "Restore Incoming Context"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.conversation.threadId }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        5024,
+        1584
+      ],
+      "id": "d33d5476-8b7d-47a9-9377-b600c1ca833f",
+      "name": "Get Conversation State",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Restore Incoming Context').first().json;const row=$input.first().json??{};const found=Boolean(row.thread_id&&row.state);let context=null;if(found&&row.context_json){try{context=JSON.parse(row.context_json)}catch{context=null}}return[{json:{...base,state_found:found,state:found?{thread_id:String(row.thread_id),ticket_id:String(row.ticket_id??base.hubspot.ticket_id??''),contact_id:String(row.contact_id??''),state:String(row.state),identity_status:String(row.identity_status??''),channel_id:String(row.channel_id??base.message.channel_id??''),channel_account_id:String(row.channel_account_id??base.message.channel_account_id??''),last_message_id:String(row.last_message_id??''),retry_count:Number(row.retry_count??0),context_json:row.context_json??'',context}:null,status:found?'STATE_LOADED':'NO_CONVERSATION_STATE'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5248,
+        1584
+      ],
+      "id": "39c3fb98-992d-45ae-bfab-7c63d1d51b68",
+      "name": "Merge Conversation State"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6982ad6f-80f4-4a8a-9a61-f32ea9611a17",
+              "leftValue": "={{ $json.state_found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5472,
+        1584
+      ],
+      "id": "77f8390f-137f-49e2-8df8-8b802009cdcc",
+      "name": "State Found?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{...x,status:'NO_CONVERSATION_STATE',next_action:'REGISTER_OR_RESOLVE_STATE'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5696,
+        1808
+      ],
+      "id": "538249e2-ddd2-4b2f-bb0a-62b8b9c3a0c4",
+      "name": "No Conversation State"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9503b1c2-9115-4cc4-bcd5-e9350d5034fa",
+              "leftValue": "={{ $json.state.state }}",
+              "rightValue": "IDENTITY_CONFIRMATION_REQUIRED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5696,
+        1520
+      ],
+      "id": "41713df5-b672-4124-8c24-b55a17de6ea1",
+      "name": "Awaiting Identity Confirmation?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const map={IDENTITY_REQUIRED:'WAITING_IDENTITY_DATA',IDENTITY_CORRECTION_REQUIRED:'WAITING_IDENTITY_CORRECTION',READY_FOR_TRIAGE:'READY_FOR_TRIAGE',IDENTITY_CONFIRMED:'READY_FOR_TRIAGE',AWAITING_TRIAGE_SELECTION:'WAIT_TRIAGE_SELECTION',TRIAGE_ROUTE_SELECTED:'TRIAGE_ROUTE_SELECTED',HUMAN_HANDOFF:'HUMAN_HANDOFF',CLOSED:'CLOSED'};const routed=map[x.state.state]??'STATE_NOT_HANDLED';return[{json:{...x,status:routed,next_action:routed}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5920,
+        1712
+      ],
+      "id": "4e981b19-553b-4b1f-b162-ee47f18fd02c",
+      "name": "Route Existing Conversation State"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const raw=String(x.message.text??'').trim();const norm=raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9\\s]/g,' ').replace(/\\s+/g,' ').trim();const yes=new Set(['sim','s','yes','correto','correta','isso','confirmo','confirmado','confirmada','esta correto','esta correta','ta certo','ta certa','tudo certo']);const no=new Set(['nao','n','no','incorreto','incorreta','errado','errada','nao esta correto','nao esta correta','precisa corrigir']);const kind=yes.has(norm)?'YES':no.has(norm)?'NO':'UNKNOWN';return[{json:{...x,confirmation_reply:{raw,normalized:norm,kind}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5920,
+        1456
+      ],
+      "id": "b401838c-ad4b-4606-9e94-fffb75914e66",
+      "name": "Interpret Confirmation Reply"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4ddedca7-67c6-41a3-9836-9fd062c7756b",
+              "leftValue": "={{ $json.confirmation_reply.kind }}",
+              "rightValue": "YES",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6144,
+        1456
+      ],
+      "id": "b4183c51-1fbc-4f19-b2c3-6f35c68141a5",
+      "name": "Reply is YES?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;let ctx=x.state.context??{};ctx={...ctx,identity:{...(ctx.identity??{}),state:'confirmed',customer_confirmation:'confirmed',confirmed_at:new Date().toISOString()}};const now=new Date().toISOString();const row={thread_id:x.state.thread_id,ticket_id:x.state.ticket_id,contact_id:x.state.contact_id,state:'READY_FOR_TRIAGE',identity_status:'IDENTITY_CONFIRMED',channel_id:x.message.channel_id||x.state.channel_id,channel_account_id:x.message.channel_account_id||x.state.channel_account_id,last_message_id:x.message.id,retry_count:0,context_json:JSON.stringify(ctx),created_at:ctx?.conversation?.confirmation_sent_at??now,updated_at:now};return[{json:{...x,status:'IDENTITY_CONFIRMED',state_update:row,threadId:x.conversation.threadId,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:String(row.channel_id),channelAccountId:String(row.channel_account_id),text:'Perfeito! Seus dados foram confirmados. 😊'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6368,
+        1328
+      ],
+      "id": "f496ad64-8655-41a1-94e5-453ed9dd3c13",
+      "name": "Prepare Confirmed State"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6592,
+        1328
+      ],
+      "id": "cdffa4db-6414-4147-be16-ed87e1fb81a2",
+      "name": "Update State - Confirmed",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Confirmed State').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6816,
+        1328
+      ],
+      "id": "b72879d3-be90-40af-b367-dbd8b029de7b",
+      "name": "Restore Confirmed Send Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        7040,
+        1328
+      ],
+      "id": "42ece1a1-532b-4c96-b92a-35a96c5c786b",
+      "name": "SEND MESSAGE - Identity Confirmed",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Confirmed State').first().json;return[{json:{...x,status:'READY_FOR_TRIAGE',next_action:'TRIAGE'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7264,
+        1328
+      ],
+      "id": "da724f46-7daf-4b69-b2c0-9c34966ce4f0",
+      "name": "Ready for Triage"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "93031160-5fa6-4f63-b6d7-5373603a5abe",
+              "leftValue": "={{ $json.confirmation_reply.kind }}",
+              "rightValue": "NO",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6368,
+        1584
+      ],
+      "id": "ee89895c-77b2-4dd3-8594-2fe518ea8947",
+      "name": "Reply is NO?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const now=new Date().toISOString();const row={thread_id:x.state.thread_id,ticket_id:x.state.ticket_id,contact_id:x.state.contact_id,state:'IDENTITY_CORRECTION_REQUIRED',identity_status:'IDENTIFIED',channel_id:x.message.channel_id||x.state.channel_id,channel_account_id:x.message.channel_account_id||x.state.channel_account_id,last_message_id:x.message.id,retry_count:0,context_json:x.state.context_json||'',created_at:now,updated_at:now};return[{json:{...x,status:'IDENTITY_CORRECTION_REQUIRED',state_update:row,threadId:x.conversation.threadId,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:String(row.channel_id),channelAccountId:String(row.channel_account_id),text:'Sem problema! Qual informação precisa ser corrigida?\\n\\n*1.* Nome\\n*2.* E-mail\\n*3.* Telefone\\n*4.* Mais de uma informação\\n\\nResponda com o número da opção.'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6592,
+        1488
+      ],
+      "id": "5e3083ca-d31e-443b-9b37-d310ce1d433a",
+      "name": "Prepare Correction State"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6816,
+        1488
+      ],
+      "id": "f81e7c12-b213-4772-9017-4e8850627248",
+      "name": "Update State - Correction Required",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Correction State').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7040,
+        1488
+      ],
+      "id": "d363c03f-fa1f-450e-aacd-7031d53f0bc0",
+      "name": "Restore Correction Send Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        7264,
+        1488
+      ],
+      "id": "1d426be2-c101-4b33-ab9e-6288a0c47533",
+      "name": "SEND MESSAGE - Ask Correction",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Correction State').first().json;return[{json:{...x,status:'IDENTITY_CORRECTION_REQUIRED',next_action:'COLLECT_IDENTITY_CORRECTION'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7488,
+        1488
+      ],
+      "id": "d7218f90-72a0-44ea-af7a-6eff1c9a4d9f",
+      "name": "Awaiting Identity Correction"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const now=new Date().toISOString();const retries=Number(x.state.retry_count??0)+1;const row={thread_id:x.state.thread_id,ticket_id:x.state.ticket_id,contact_id:x.state.contact_id,state:'IDENTITY_CONFIRMATION_REQUIRED',identity_status:x.state.identity_status||'IDENTIFIED',channel_id:x.message.channel_id||x.state.channel_id,channel_account_id:x.message.channel_account_id||x.state.channel_account_id,last_message_id:x.message.id,retry_count:retries,context_json:x.state.context_json||'',created_at:now,updated_at:now};return[{json:{...x,status:'IDENTITY_CONFIRMATION_REQUIRED',state_update:row,threadId:x.conversation.threadId,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:String(row.channel_id),channelAccountId:String(row.channel_account_id),text:'Não consegui identificar sua confirmação. Por favor, responda apenas *SIM* se os dados estiverem corretos ou *NÃO* se precisar corrigir alguma informação.'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6592,
+        1680
+      ],
+      "id": "e71f06bf-6346-4420-9f0c-e9b724f0c9e6",
+      "name": "Prepare Confirmation Clarification"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6816,
+        1680
+      ],
+      "id": "864ac469-ff8d-4bdb-97fa-0c4cc786eaeb",
+      "name": "Update State - Confirmation Retry",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Confirmation Clarification').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7040,
+        1680
+      ],
+      "id": "22459c35-89e4-4280-844e-c92c78c1d7d6",
+      "name": "Restore Clarification Send Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        7264,
+        1680
+      ],
+      "id": "e5193c67-e307-466e-88b7-45bcfcdcebe6",
+      "name": "SEND MESSAGE - Clarify Confirmation",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Confirmation Clarification').first().json;return[{json:{...x,status:'IDENTITY_CONFIRMATION_REQUIRED',next_action:'WAIT_CONFIRMATION',confirmation_retry_count:x.state_update.retry_count}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7488,
+        1680
+      ],
+      "id": "946a32ea-b1ef-49d3-9a9b-edd218198b74",
+      "name": "Awaiting Clear Confirmation"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{action:'SHOW_MENU',data:x}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7488,
+        1328
+      ],
+      "id": "697c077a-72a9-4b8d-a641-21043a154a7b",
+      "name": "Build SHOW_MENU Input"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "frcZbnqGnlYDobMU",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/frcZbnqGnlYDobMU",
+          "cachedResultName": "[INHPK] BOT | 04 - Triage Menu Router"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "={{ $json.action }}",
+            "data": "={{ $json.data }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        7712,
+        1328
+      ],
+      "id": "8b82473a-bd13-43f1-ad6c-b538ae30f102",
+      "name": "Call WF-04 SHOW_MENU",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "36923027-e4d0-4cd3-873c-4956a780c463",
+              "leftValue": "={{ $json.state.state }}",
+              "rightValue": "AWAITING_TRIAGE_SELECTION",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6144,
+        1904
+      ],
+      "id": "a4397363-7c4f-4a00-bc16-66684ad9a6cc",
+      "name": "Awaiting Triage Selection?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{action:'PROCESS_SELECTION',data:x}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6368,
+        1840
+      ],
+      "id": "fc67055f-201c-463d-83bf-94b8f2f5efac",
+      "name": "Build PROCESS_SELECTION Input"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "frcZbnqGnlYDobMU",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/frcZbnqGnlYDobMU",
+          "cachedResultName": "[INHPK] BOT | 04 - Triage Menu Router"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "={{ $json.action }}",
+            "data": "={{ $json.data }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        6592,
+        1840
+      ],
+      "id": "bfbcc6a0-0e1d-46ec-abc1-5a5349416e48",
+      "name": "Call WF-04 PROCESS_SELECTION",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:x}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6368,
+        2032
+      ],
+      "id": "5242b39b-de36-4023-b80e-b032f79f5d5c",
+      "name": "Existing State Routed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const n=$('Restore New Message Event').first().json;const row=$input.first().json??{};const now=new Date();const status=String(row.status??'');const recent=status==='PROCESSING'&&row.processing_started_at&&now-Date.parse(row.processing_started_at)<300000;let action='PROCESS';if(status==='PROCESSED'||status==='IGNORED')action='DUPLICATE';else if(recent)action='BUSY';else if(status==='FAILED_RETRYABLE'&&['NO_CONVERSATION_STATE','IDENTITY_REQUIRED','IDENTITY_CORRECTION_REQUIRED'].includes(String(row.last_error_code??'')))action='PENDING';const received=row.received_at??n.transport?.received_at??now.toISOString();const inbox_row={event_key:n.event.idempotency_key,event_id:n.event.id,portal_id:n.hubspot.portal_id,thread_id:n.hubspot.thread_id,message_id:n.event.message_id,status:'PROCESSING',attempt_count:Number(row.attempt_count??0)+(action==='PROCESS'?1:0),occurred_at:n.event.occurred_at,received_at:received,processing_started_at:action==='PROCESS'?now.toISOString():(row.processing_started_at??null),processed_at:row.processed_at??null,last_error_code:row.last_error_code??'',updated_at:now.toISOString()};return[{json:{...n,inbox_action:action,existing_status:status,inbox_row}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000026",
+      "name": "Decide Inbox Claim",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        1712
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000027",
+              "leftValue": "={{ $json.inbox_action }}",
+              "rightValue": "PROCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000028",
+      "name": "Inbox Should Process?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2900,
+        1712
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;if(x.inbox_action==='DUPLICATE')return[{json:{status:'accepted',event_id:x.event.id,duplicate:true,processing_status:x.existing_status}}];return[{json:{status:'retryable',event_id:x.event.id,duplicate:false,processing_status:x.existing_status||'FAILED_RETRYABLE',error_code:x.inbox_action==='BUSY'?'CONCURRENT_PROCESSING':x.inbox_row.last_error_code}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000029",
+      "name": "Return Inbox Short Circuit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        1910
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "bot_conversation_thread_cursor_v1",
+        "columns": {
+          "column": [
+            {
+              "name": "thread_id"
+            },
+            {
+              "name": "status"
+            },
+            {
+              "name": "processing_event_key"
+            },
+            {
+              "name": "processing_started_at",
+              "type": "date"
+            },
+            {
+              "name": "last_occurred_at",
+              "type": "date"
+            },
+            {
+              "name": "last_message_id"
+            },
+            {
+              "name": "updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000030",
+      "name": "Ensure Thread Cursor Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3120,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Decide Inbox Claim').all();"
+      },
+      "id": "00000000-0000-4000-8000-000000000031",
+      "name": "Restore Claimed Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3340,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_thread_cursor_v1",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.hubspot.thread_id }}"
+            }
+          ]
+        },
+        "returnAll": false
+      },
+      "id": "00000000-0000-4000-8000-000000000032",
+      "name": "Get Thread Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3560,
+        1600
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Restore Claimed Event').first().json;const c=$input.first().json??{};const now=Date.now();const recent=c.status==='PROCESSING'&&c.processing_started_at&&now-Date.parse(c.processing_started_at)<300000&&String(c.processing_event_key??'')!==x.event.idempotency_key;const current=[Date.parse(x.event.occurred_at),String(x.event.message_id)];const previous=[Date.parse(c.last_occurred_at??0),String(c.last_message_id??'')];const older=Number.isFinite(previous[0])&&previous[0]>0&&(current[0]<previous[0]||(current[0]===previous[0]&&current[1]<=previous[1]));const thread_action=recent?'BUSY':older?'OUT_OF_ORDER':'PROCESS';return[{json:{...x,thread_action,thread_cursor:c}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000033",
+      "name": "Check Thread Ordering",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3780,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000034",
+              "leftValue": "={{ $json.thread_action }}",
+              "rightValue": "PROCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000035",
+      "name": "Thread May Process?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4000,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:x.thread_action==='BUSY'?{...x,pending_error_code:'CONCURRENT_THREAD_PROCESSING'}:{...x,inbox_terminal_status:'IGNORED'}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000036",
+      "name": "Classify Thread Short Circuit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4220,
+        1800
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000037",
+              "leftValue": "={{ $json.thread_action }}",
+              "rightValue": "BUSY",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000038",
+      "name": "Thread Is Busy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4440,
+        1800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const c=x.thread_cursor??{};return[{json:{...x,thread_cursor_row:{thread_id:x.hubspot.thread_id,status:'PROCESSING',processing_event_key:x.event.idempotency_key,processing_started_at:new Date().toISOString(),last_occurred_at:c.last_occurred_at??null,last_message_id:c.last_message_id??'',updated_at:new Date().toISOString()}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000039",
+      "name": "Prepare Thread Claim",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4220,
+        1480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_thread_cursor_v1",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.thread_cursor_row.thread_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.thread_cursor_row.thread_id }}",
+            "status": "={{ $json.thread_cursor_row.status }}",
+            "processing_event_key": "={{ $json.thread_cursor_row.processing_event_key }}",
+            "processing_started_at": "={{ $json.thread_cursor_row.processing_started_at }}",
+            "last_occurred_at": "={{ $json.thread_cursor_row.last_occurred_at }}",
+            "last_message_id": "={{ $json.thread_cursor_row.last_message_id }}",
+            "updated_at": "={{ $json.thread_cursor_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000040",
+      "name": "Claim Thread Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        4440,
+        1480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000041",
+              "leftValue": "={{ !$json.hydration.thread_complete }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000042",
+      "name": "Needs Thread Lookup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3200,
+        1712
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return[{json:{...x,conversation:x.conversation??{threadId:x.hubspot.thread_id},gateway:{...x.gateway,thread_loaded:false,has_associated_ticket:Boolean(x.hubspot.ticket_id)}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000043",
+      "name": "Use Hydrated Thread Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3440,
+        1500
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000044",
+              "leftValue": "={{ !$json.hydration.message_complete }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000045",
+      "name": "Needs Message Lookup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3880,
+        1560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const m=x.message;return[{json:{...x,message:{...m,id:String(x.event.message_id),channel_id:m.channel_id??x.conversation?.originalChannelId??null,channel_account_id:m.channel_account_id??x.conversation?.originalChannelAccountId??null},gateway:{...x.gateway,is_incoming_customer_message:true}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000046",
+      "name": "Use Hydrated Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4120,
+        1460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const base=$('Decide Inbox Claim').first().json;const now=new Date().toISOString();const requested=String(x.inbox_terminal_status??'PROCESSED');const status=requested==='IGNORED'?'IGNORED':'PROCESSED';return[{json:{inbox_row:{...base.inbox_row,status,processed_at:now,processing_started_at:base.inbox_row.processing_started_at,last_error_code:'',updated_at:now},result:{status:'accepted',event_id:base.event.id,duplicate:false,processing_status:status}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000047",
+      "name": "Prepare Inbox Terminal Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8000,
+        2120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_events_v2",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "keyValue": "={{ $json.inbox_row.event_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $json.inbox_row.event_key }}",
+            "event_id": "={{ $json.inbox_row.event_id }}",
+            "portal_id": "={{ $json.inbox_row.portal_id }}",
+            "thread_id": "={{ $json.inbox_row.thread_id }}",
+            "message_id": "={{ $json.inbox_row.message_id }}",
+            "status": "={{ $json.inbox_row.status }}",
+            "attempt_count": "={{ Number($json.inbox_row.attempt_count ?? 0) }}",
+            "occurred_at": "={{ $json.inbox_row.occurred_at }}",
+            "received_at": "={{ $json.inbox_row.received_at }}",
+            "processing_started_at": "={{ $json.inbox_row.processing_started_at }}",
+            "processed_at": "={{ $json.inbox_row.processed_at }}",
+            "last_error_code": "={{ $json.inbox_row.last_error_code }}",
+            "updated_at": "={{ $json.inbox_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000048",
+      "name": "Update Inbox Terminal",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        8240,
+        2120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t=$('Prepare Inbox Terminal Update').first().json;const base=$('Check Thread Ordering').first().json;const processed=t.result.processing_status==='PROCESSED';const previous=base.thread_cursor??{};return[{json:{...t,thread_cursor_row:{thread_id:base.hubspot.thread_id,status:'IDLE',processing_event_key:'',processing_started_at:null,last_occurred_at:processed?base.event.occurred_at:(previous.last_occurred_at??null),last_message_id:processed?base.event.message_id:(previous.last_message_id??''),updated_at:new Date().toISOString()}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000049",
+      "name": "Prepare Final Thread Cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8480,
+        2120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_thread_cursor_v1",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.thread_cursor_row.thread_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.thread_cursor_row.thread_id }}",
+            "status": "={{ $json.thread_cursor_row.status }}",
+            "processing_event_key": "={{ $json.thread_cursor_row.processing_event_key }}",
+            "processing_started_at": "={{ $json.thread_cursor_row.processing_started_at }}",
+            "last_occurred_at": "={{ $json.thread_cursor_row.last_occurred_at }}",
+            "last_message_id": "={{ $json.thread_cursor_row.last_message_id }}",
+            "updated_at": "={{ $json.thread_cursor_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000050",
+      "name": "Finalize Thread Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        8720,
+        2120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return[{json:$('Prepare Inbox Terminal Update').first().json.result}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000051",
+      "name": "Return Standard Acceptance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8960,
+        2120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(i=>({json:{...i.json,inbox_terminal_status:'IGNORED'}}));"
+      },
+      "id": "00000000-0000-4000-8000-000000000052",
+      "name": "Prepare Ignored Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7760,
+        2300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const pending=['WAITING_IDENTITY_DATA','WAITING_IDENTITY_CORRECTION','STATE_NOT_HANDLED'].includes(String(x.status));return[{json:{...x,inbox_pending:pending,pending_error_code:x.status==='WAITING_IDENTITY_DATA'?'IDENTITY_REQUIRED':x.status==='WAITING_IDENTITY_CORRECTION'?'IDENTITY_CORRECTION_REQUIRED':'STATE_NOT_HANDLED'}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000053",
+      "name": "Classify Existing State Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6600,
+        2032
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000054",
+              "leftValue": "={{ $json.inbox_pending }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000055",
+      "name": "Existing State Pending?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6840,
+        2032
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$input.first().json;const base=$('Decide Inbox Claim').first().json;const now=new Date().toISOString();const error=String(input.pending_error_code??input.status??'TRANSIENT_NODE_FAILURE');return[{json:{inbox_row:{...base.inbox_row,status:'FAILED_RETRYABLE',processed_at:null,last_error_code:error,updated_at:now},result:{status:'retryable',event_id:base.event.id,duplicate:false,processing_status:'FAILED_RETRYABLE',error_code:error}}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000056",
+      "name": "Prepare Retryable Inbox Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7520,
+        2520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_events_v2",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "keyValue": "={{ $json.inbox_row.event_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $json.inbox_row.event_key }}",
+            "event_id": "={{ $json.inbox_row.event_id }}",
+            "portal_id": "={{ $json.inbox_row.portal_id }}",
+            "thread_id": "={{ $json.inbox_row.thread_id }}",
+            "message_id": "={{ $json.inbox_row.message_id }}",
+            "status": "={{ $json.inbox_row.status }}",
+            "attempt_count": "={{ Number($json.inbox_row.attempt_count ?? 0) }}",
+            "occurred_at": "={{ $json.inbox_row.occurred_at }}",
+            "received_at": "={{ $json.inbox_row.received_at }}",
+            "processing_started_at": "={{ $json.inbox_row.processing_started_at }}",
+            "processed_at": "={{ $json.inbox_row.processed_at }}",
+            "last_error_code": "={{ $json.inbox_row.last_error_code }}",
+            "updated_at": "={{ $json.inbox_row.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000057",
+      "name": "Update Inbox Failed Retryable",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        7760,
+        2520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return[{json:$('Prepare Retryable Inbox Update').first().json.result}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000058",
+      "name": "Return Retryable Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8000,
+        2520
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Conversation Gateway Input": {
+      "main": [
+        [
+          {
+            "node": "Validate Gateway Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Gateway Action": {
+      "main": [
+        [
+          {
+            "node": "Register State?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register State?": {
+      "main": [
+        [
+          {
+            "node": "Build State Registration",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize New Message Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build State Registration": {
+      "main": [
+        [
+          {
+            "node": "Ensure Conversation State Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Conversation State Table": {
+      "main": [
+        [
+          {
+            "node": "Restore State Registration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore State Registration": {
+      "main": [
+        [
+          {
+            "node": "Upsert Conversation State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Conversation State": {
+      "main": [
+        [
+          {
+            "node": "State Registered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize New Message Event": {
+      "main": [
+        [
+          {
+            "node": "Ensure Conversation Events Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Conversation Events Table": {
+      "main": [
+        [
+          {
+            "node": "Restore New Message Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore New Message Event": {
+      "main": [
+        [
+          {
+            "node": "Get Inbox Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Restore Message Event Context": {
+      "main": [
+        [
+          {
+            "node": "Needs Thread Lookup?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "GET Conversation Thread": {
+      "main": [
+        [
+          {
+            "node": "Parse Thread Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Thread Context": {
+      "main": [
+        [
+          {
+            "node": "Thread Has Ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Thread Has Ticket?": {
+      "main": [
+        [
+          {
+            "node": "Needs Message Lookup?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignored - No Associated Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET New Message": {
+      "main": [
+        [
+          {
+            "node": "Build Incoming Message Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Incoming Message Context": {
+      "main": [
+        [
+          {
+            "node": "Incoming Customer Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Incoming Customer Message?": {
+      "main": [
+        [
+          {
+            "node": "Ensure State Table for Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignored - Non Incoming Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure State Table for Message": {
+      "main": [
+        [
+          {
+            "node": "Restore Incoming Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Incoming Context": {
+      "main": [
+        [
+          {
+            "node": "Get Conversation State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Conversation State": {
+      "main": [
+        [
+          {
+            "node": "Merge Conversation State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Conversation State": {
+      "main": [
+        [
+          {
+            "node": "State Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Found?": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Identity Confirmation?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Conversation State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Awaiting Identity Confirmation?": {
+      "main": [
+        [
+          {
+            "node": "Interpret Confirmation Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route Existing Conversation State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpret Confirmation Reply": {
+      "main": [
+        [
+          {
+            "node": "Reply is YES?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply is YES?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Confirmed State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply is NO?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Confirmed State": {
+      "main": [
+        [
+          {
+            "node": "Update State - Confirmed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Confirmed": {
+      "main": [
+        [
+          {
+            "node": "Restore Confirmed Send Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Confirmed Send Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Identity Confirmed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Identity Confirmed": {
+      "main": [
+        [
+          {
+            "node": "Ready for Triage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply is NO?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Correction State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Confirmation Clarification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Correction State": {
+      "main": [
+        [
+          {
+            "node": "Update State - Correction Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Correction Required": {
+      "main": [
+        [
+          {
+            "node": "Restore Correction Send Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Correction Send Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Ask Correction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Ask Correction": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Identity Correction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Confirmation Clarification": {
+      "main": [
+        [
+          {
+            "node": "Update State - Confirmation Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Confirmation Retry": {
+      "main": [
+        [
+          {
+            "node": "Restore Clarification Send Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Clarification Send Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Clarify Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Clarify Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Clear Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready for Triage": {
+      "main": [
+        [
+          {
+            "node": "Build SHOW_MENU Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SHOW_MENU Input": {
+      "main": [
+        [
+          {
+            "node": "Call WF-04 SHOW_MENU",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Existing Conversation State": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Triage Selection?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Awaiting Triage Selection?": {
+      "main": [
+        [
+          {
+            "node": "Build PROCESS_SELECTION Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Existing State Routed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build PROCESS_SELECTION Input": {
+      "main": [
+        [
+          {
+            "node": "Call WF-04 PROCESS_SELECTION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ignored - No Associated Ticket": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ignored Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Ignored - Non Incoming Message": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ignored Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "No Conversation State": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Awaiting Identity Correction": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Awaiting Clear Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Call WF-04 SHOW_MENU": {
+      "main": [
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call WF-04 PROCESS_SELECTION": {
+      "main": [
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing State Routed": {
+      "main": [
+        [
+          {
+            "node": "Classify Existing State Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Get Inbox Event": {
+      "main": [
+        [
+          {
+            "node": "Decide Inbox Claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Decide Inbox Claim": {
+      "main": [
+        [
+          {
+            "node": "Inbox Should Process?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Inbox Should Process?": {
+      "main": [
+        [
+          {
+            "node": "Claim Inbox Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Inbox Short Circuit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Inbox Event": {
+      "main": [
+        [
+          {
+            "node": "Ensure Thread Cursor Table",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Ensure Thread Cursor Table": {
+      "main": [
+        [
+          {
+            "node": "Restore Claimed Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Restore Claimed Event": {
+      "main": [
+        [
+          {
+            "node": "Get Thread Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Get Thread Cursor": {
+      "main": [
+        [
+          {
+            "node": "Check Thread Ordering",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Check Thread Ordering": {
+      "main": [
+        [
+          {
+            "node": "Thread May Process?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Thread May Process?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Thread Claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify Thread Short Circuit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Thread Short Circuit": {
+      "main": [
+        [
+          {
+            "node": "Thread Is Busy?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Thread Is Busy?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Thread Claim": {
+      "main": [
+        [
+          {
+            "node": "Claim Thread Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Claim Thread Cursor": {
+      "main": [
+        [
+          {
+            "node": "Restore Message Event Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Needs Thread Lookup?": {
+      "main": [
+        [
+          {
+            "node": "GET Conversation Thread",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Use Hydrated Thread Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Hydrated Thread Context": {
+      "main": [
+        [
+          {
+            "node": "Thread Has Ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Needs Message Lookup?": {
+      "main": [
+        [
+          {
+            "node": "GET New Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Use Hydrated Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Hydrated Message": {
+      "main": [
+        [
+          {
+            "node": "Incoming Customer Message?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare Inbox Terminal Update": {
+      "main": [
+        [
+          {
+            "node": "Update Inbox Terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Update Inbox Terminal": {
+      "main": [
+        [
+          {
+            "node": "Prepare Final Thread Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare Final Thread Cursor": {
+      "main": [
+        [
+          {
+            "node": "Finalize Thread Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Finalize Thread Cursor": {
+      "main": [
+        [
+          {
+            "node": "Return Standard Acceptance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare Ignored Result": {
+      "main": [
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare Retryable Inbox Update": {
+      "main": [
+        [
+          {
+            "node": "Update Inbox Failed Retryable",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Update Inbox Failed Retryable": {
+      "main": [
+        [
+          {
+            "node": "Return Retryable Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Classify Existing State Result": {
+      "main": [
+        [
+          {
+            "node": "Existing State Pending?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Existing State Pending?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retryable Inbox Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Inbox Terminal Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "versionId": "13848d83-06f1-4a07-b1ed-fbf6bab269ee",
+  "meta": {
+    "instanceId": "700ec74a6edf9a43091cdbcfac1b711af98a789203b783088068e43981ed58d5"
+  },
+  "nodeGroups": [],
+  "id": "wd8kXYBvmLdrMWfr",
+  "tags": []
+}
