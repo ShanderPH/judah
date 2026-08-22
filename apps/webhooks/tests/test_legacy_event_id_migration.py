@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
@@ -13,13 +15,24 @@ MIGRATE_TO = ("webhooks", "0006_drop_legacy_event_id_uniqueness")
 LEGACY_INDEX = "legacy_webhook_event_id_uniq"
 
 
+@pytest.fixture
+def restore_migrations() -> Iterator[None]:
+    """Restore the complete migration graph after historical assertions."""
+    try:
+        yield
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+
 def _migrate(target: tuple[str, str]) -> MigrationExecutor:
     executor = MigrationExecutor(connection)
     executor.migrate([target])
     return executor
 
 
-def test_legacy_event_id_uniqueness_apply_reverse_reapply() -> None:
+def test_legacy_event_id_uniqueness_apply_reverse_reapply(restore_migrations: None) -> None:
     executor = _migrate(MIGRATE_FROM)
     old_apps = executor.loader.project_state([MIGRATE_FROM]).apps
     webhook_event = old_apps.get_model("webhooks", "WebhookEvent")
