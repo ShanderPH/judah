@@ -5,9 +5,8 @@ durável e mantém o lifecycle operacional de tickets, filas, atribuição,
 disponibilidade de agentes, calendário, métricas e integrações compartilhadas.
 
 Identificação de clientes e triagem não são responsabilidades do JUDAH. A
-implementação legada foi removida; uma integração posterior delegará essas
-decisões ao n8n. Este repositório ainda não contém webhook, contrato, endpoint,
-outbox, reconciliação ou placeholder para essa integração futura.
+implementação legada foi removida; o n8n recebe de forma confiável as mensagens
+inbound persistidas pelo JUDAH e permanece responsável por essas decisões.
 
 ## Responsabilidades atuais
 
@@ -21,11 +20,13 @@ outbox, reconciliação ou placeholder para essa integração futura.
 - execução assíncrona pelo Celery e persistência PostgreSQL/Supabase;
 - capacidades independentes de RAG, base de conhecimento e adaptador Salomão.
 
-## Boundary futuro do n8n
+## Boundary do n8n
 
-Em uma etapa posterior, o n8n será responsável por coleta de dados,
-identificação, confirmação de identidade, triagem e geração da decisão entregue
-ao JUDAH. A implementação desse boundary não faz parte do estado atual.
+O n8n é responsável por coleta de dados, identificação, confirmação de
+identidade e triagem. O JUDAH implementa somente a ingestão durável, outbox,
+entrega HMAC e reconciliação descritas em
+`docs/architecture/n8n-inbound-adapter.md`; a execução das decisões do n8n
+continua fora deste escopo.
 
 ## Stack
 
