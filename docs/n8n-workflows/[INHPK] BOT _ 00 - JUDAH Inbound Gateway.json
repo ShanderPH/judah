@@ -1,0 +1,670 @@
+{
+  "name": "[INHPK] BOT | 00 - JUDAH Inbound Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "judah-bot-inbound",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "POST /judah-bot-inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1800,
+        0
+      ],
+      "webhookId": "judah-bot-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item=$input.first();const headers=Object.fromEntries(Object.entries(item.json.headers??{}).map(([k,v])=>[String(k).toLowerCase(),Array.isArray(v)?String(v[0]??''):String(v??'')]));const required=['content-type','x-judah-event-id','x-idempotency-key','x-judah-timestamp','x-judah-signature','x-delivery-attempt'];let ok=required.every(k=>headers[k].trim()!=='');const tsRaw=headers['x-judah-timestamp']??'';ok=ok&&/^[0-9]+$/.test(tsRaw);const ts=Number(tsRaw);const now=Math.floor(Date.now()/1000);ok=ok&&Number.isSafeInteger(ts)&&ts>0&&ts<=now+300&&ts>=now-300;const signature=headers['x-judah-signature']??'';const match=/^sha256=([a-fA-F0-9]{64})$/.exec(signature);const contentType=(headers['content-type']??'').toLowerCase();ok=ok&&Boolean(match)&&(contentType==='application/json'||contentType.startsWith('application/json;'))&&/^[1-9][0-9]*$/.test(headers['x-delivery-attempt']??'');const encoded=item.binary?.data?.data;let raw='';try{if(typeof encoded!=='string')throw new Error('missing raw body');const bytes=Buffer.from(encoded,'base64');raw=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(!Buffer.from(raw,'utf8').equals(bytes))throw new Error('non canonical utf8');}catch{ok=false;}if(!ok)return[{json:{auth_preflight_ok:false}}];return[{json:{auth_preflight_ok:true,event_id:headers['x-judah-event-id'],idempotency_key:headers['x-idempotency-key'].toLowerCase(),delivery_attempt:headers['x-delivery-attempt'],received_digest:match[1].toLowerCase(),raw_body:raw,signed_input:tsRaw+'.'+raw,received_at:new Date().toISOString()}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Preflight Authentication",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1560,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000003",
+              "leftValue": "={{ $json.auth_preflight_ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Authentication Preflight Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ $json.signed_input }}",
+        "dataPropertyName": "computed_digest",
+        "encoding": "hex"
+      },
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Compute HMAC-SHA256",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        -1080,
+        -120
+      ],
+      "notes": "Configure a Crypto credential named JUDAH Inbound HMAC. The credential is intentionally absent from this export."
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const a=String(x.received_digest??'');const b=String(x.computed_digest??'');let diff=a.length^64;diff|=b.length^64;for(let i=0;i<64;i++){diff|=(a.charCodeAt(i)||0)^(b.charCodeAt(i)||0);}return[{json:{hmac_valid:diff===0,event_id:x.event_id,idempotency_key:x.idempotency_key,delivery_attempt:x.delivery_attempt,received_at:x.received_at,raw_body:x.raw_body}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "Constant-Time HMAC Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -840,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000007",
+              "leftValue": "={{ $json.hmac_valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000008",
+      "name": "HMAC Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -600,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;let body;let valid=true;try{body=JSON.parse(x.raw_body);}catch{valid=false;}const d=body?.data;const isObj=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);const iso=v=>typeof v==='string'&&Number.isFinite(Date.parse(v));if(!isObj(body)||body.action!=='PROCESS_NEW_MESSAGE'||!isObj(d))valid=false;if(valid){valid=d.schema_version==='1.0'&&d.event?.type==='conversation.newMessage'&&d.event?.source==='judah'&&d.message?.direction==='INCOMING'&&d.gateway?.is_incoming_customer_message===true&&['webhook','reconciliation'].includes(d.gateway?.delivery_method)&&String(d.message?.text??'').trim()!==''&&iso(d.event?.occurred_at)&&iso(d.message?.created_at)&&String(d.event?.event_id??'')===x.event_id&&String(d.metadata?.idempotency_key??'').toLowerCase()===x.idempotency_key&&String(d.hubspot?.thread_id??'')===String(d.conversation?.threadId??'')&&/^[a-f0-9]{64}$/.test(x.idempotency_key)&&Boolean(String(d.hubspot?.portal_id??''))&&Boolean(String(d.event?.message_id??''));}return[{json:valid?{payload_valid:true,action:body.action,data:d,transport:{event_id:x.event_id,idempotency_key:x.idempotency_key,delivery_attempt:x.delivery_attempt,received_at:x.received_at},canonical_key_input:'hubspot:'+d.hubspot.portal_id+':'+d.hubspot.thread_id+':'+d.event.message_id}:{payload_valid:false}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Parse and Validate Canonical Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000010",
+              "leftValue": "={{ $json.payload_valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000011",
+      "name": "Payload Structure Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -120,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ $json.canonical_key_input }}",
+        "dataPropertyName": "recomputed_key",
+        "encoding": "hex"
+      },
+      "id": "00000000-0000-4000-8000-000000000012",
+      "name": "Recompute Idempotency Key",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        120,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const a=String(x.transport.idempotency_key);const b=String(x.recomputed_key);let diff=a.length^64;diff|=b.length^64;for(let i=0;i<64;i++)diff|=(a.charCodeAt(i)||0)^(b.charCodeAt(i)||0);const {recomputed_key,canonical_key_input,...safe}=x;return[{json:{...safe,payload_valid:diff===0}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000013",
+      "name": "Validate Recomputed Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000014",
+              "leftValue": "={{ $json.payload_valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000015",
+      "name": "Idempotency Key Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        600,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "wd8kXYBvmLdrMWfr",
+          "mode": "list",
+          "cachedResultName": "[INHPK] BOT | 03 - Conversation Message Gateway"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "={{ $json.action }}",
+            "data": "={{ $json.data }}",
+            "transport": "={{ $json.transport }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "type": "string"
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "type": "object"
+            },
+            {
+              "id": "transport",
+              "displayName": "transport",
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000016",
+      "name": "Call WF-03 PROCESS_NEW_MESSAGE",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        840,
+        -480
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const expected=$('Validate Recomputed Key').first().json.transport.event_id;const valid=x?.status==='accepted'&&String(x.event_id??'')===expected&&typeof x.duplicate==='boolean';return[{json:valid?{accepted_result_valid:true,status:'accepted',event_id:expected,duplicate:x.duplicate}:{accepted_result_valid:false}}];"
+      },
+      "id": "00000000-0000-4000-8000-000000000017",
+      "name": "Validate WF-03 Acceptance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000018",
+              "leftValue": "={{ $json.accepted_result_valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000019",
+      "name": "WF-03 Result Accepted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1320,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: $json.status, event_id: $json.event_id, duplicate: $json.duplicate } }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000020",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1560,
+        -600
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"rejected\",\"reason\":\"authentication_failed\"}",
+        "options": {
+          "responseCode": 401,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000021",
+      "name": "Respond 401 Authentication Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -360,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"rejected\",\"reason\":\"invalid_payload\"}",
+        "options": {
+          "responseCode": 422,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000022",
+      "name": "Respond 422 Invalid Payload",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        840,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"error\",\"reason\":\"internal_error\"}",
+        "options": {
+          "responseCode": 500,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000023",
+      "name": "Respond 500 Internal Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1560,
+        -240
+      ]
+    }
+  ],
+  "connections": {
+    "POST /judah-bot-inbound": {
+      "main": [
+        [
+          {
+            "node": "Preflight Authentication",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Preflight Authentication": {
+      "main": [
+        [
+          {
+            "node": "Authentication Preflight Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Authentication Preflight Passed?": {
+      "main": [
+        [
+          {
+            "node": "Compute HMAC-SHA256",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401 Authentication Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute HMAC-SHA256": {
+      "main": [
+        [
+          {
+            "node": "Constant-Time HMAC Check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Constant-Time HMAC Check": {
+      "main": [
+        [
+          {
+            "node": "HMAC Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "HMAC Valid?": {
+      "main": [
+        [
+          {
+            "node": "Parse and Validate Canonical Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401 Authentication Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Validate Canonical Payload": {
+      "main": [
+        [
+          {
+            "node": "Payload Structure Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Payload Structure Valid?": {
+      "main": [
+        [
+          {
+            "node": "Recompute Idempotency Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 422 Invalid Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recompute Idempotency Key": {
+      "main": [
+        [
+          {
+            "node": "Validate Recomputed Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Validate Recomputed Key": {
+      "main": [
+        [
+          {
+            "node": "Idempotency Key Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Idempotency Key Valid?": {
+      "main": [
+        [
+          {
+            "node": "Call WF-03 PROCESS_NEW_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 422 Invalid Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call WF-03 PROCESS_NEW_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "Validate WF-03 Acceptance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 Internal Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate WF-03 Acceptance": {
+      "main": [
+        [
+          {
+            "node": "WF-03 Result Accepted?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "WF-03 Result Accepted?": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 Internal Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "00000000-0000-4000-8000-000000000024",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

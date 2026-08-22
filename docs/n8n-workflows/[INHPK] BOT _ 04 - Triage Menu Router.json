@@ -1,0 +1,1518 @@
+{
+  "name": "[INHPK] BOT | 04 - Triage Menu Router",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "action"
+            },
+            {
+              "name": "data",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -672,
+        224
+      ],
+      "id": "cd4ea687-d9ac-423b-9089-eb651d885df9",
+      "name": "Triage Menu Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root=$input.first().json;const action=String(root.action??'').trim().toUpperCase();if(!['SHOW_MENU','PROCESS_SELECTION'].includes(action))throw new Error('Triage Menu Router: action must be SHOW_MENU or PROCESS_SELECTION');const data=root.data&&typeof root.data==='object'?root.data:{};return[{json:{action,data}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        224
+      ],
+      "id": "5d5bd410-8e84-4bb8-8f43-47f48aa3717d",
+      "name": "Validate Triage Action"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "56c705c6-b781-4723-b3d8-740e910742b4",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "SHOW_MENU",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -224,
+        224
+      ],
+      "id": "6da224c7-652b-42c4-8557-bb2a27572520",
+      "name": "Show Menu?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root=$input.first().json;const x=root.data??{};const source=x.state_update??x.state??x.state_row??{};const conversation=x.conversation??{};const message=x.message??{};const threadId=String(conversation.threadId??source.thread_id??x.threadId??'');const ticketId=String(source.ticket_id??x.hubspot?.ticket_id??'');const channelId=String(message.channel_id??source.channel_id??conversation.originalChannelId??'');const channelAccountId=String(message.channel_account_id??source.channel_account_id??conversation.originalChannelAccountId??'');if(!threadId)throw new Error('SHOW_MENU: thread_id is required');if(!ticketId)throw new Error('SHOW_MENU: ticket_id is required');if(!channelId||!channelAccountId)throw new Error('SHOW_MENU: channel identifiers are required');const parse=v=>{if(v&&typeof v==='object')return v;if(!v)return {};try{return JSON.parse(v)}catch{return {}}};const now=new Date().toISOString();const context=parse(source.context_json);const nextContext={...context,triage:{...(context.triage??{}),menu_version:'1.0',status:'awaiting_selection',shown_at:now,retry_count:0}};const row={thread_id:threadId,ticket_id:ticketId,contact_id:String(source.contact_id??x.hubspot?.contact?.id??''),state:'AWAITING_TRIAGE_SELECTION',identity_status:String(source.identity_status??'IDENTITY_CONFIRMED'),channel_id:channelId,channel_account_id:channelAccountId,last_message_id:String(message.id??source.last_message_id??''),retry_count:0,context_json:JSON.stringify(nextContext),created_at:source.created_at??now,updated_at:now};const text='Como podemos ajudar?\\n\\n*1.* Suporte Técnico\\n*2.* Dúvidas sobre a Plataforma\\n*3.* 2ª Via de Boletos\\n*4.* Encerrar atendimento\\n\\nResponda com o número da opção desejada.';return[{json:{...x,action:'SHOW_MENU',status:'AWAITING_TRIAGE_SELECTION',state_update:row,threadId,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId,channelAccountId,text}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "eeabc9e6-38ea-4662-8d39-b1dc816b6cad",
+      "name": "Build Triage Menu State"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        0
+      ],
+      "id": "8273a361-e64a-48e9-8bb3-fdbaef4722bb",
+      "name": "Update State - Awaiting Triage Selection"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Build Triage Menu State').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "3bf6fa30-c076-4bc6-b9cb-0e232aa548ea",
+      "name": "Restore Triage Menu Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        672,
+        0
+      ],
+      "id": "cdf401ce-8ee1-4b9c-8b06-303b374f3f58",
+      "name": "SEND MESSAGE - Triage Menu"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Build Triage Menu State').first().json;return[{json:{...x,status:'AWAITING_TRIAGE_SELECTION',next_action:'WAIT_TRIAGE_SELECTION',menu_shown:true}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "7eab4ba0-d4bb-43b4-9ce1-554c2add3e5b",
+      "name": "Awaiting Triage Selection"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root=$input.first().json;const x=root.data??{};const state=x.state??x.state_update??{};const raw=String(x.message?.text??x.selection??'').trim();const normalized=raw.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9\\s]/g,' ').replace(/\\s+/g,' ').trim();const aliases=new Map([['1','SUPORTE_TECNICO_N1'],['suporte','SUPORTE_TECNICO_N1'],['suporte tecnico','SUPORTE_TECNICO_N1'],['2','DUVIDAS_PLATAFORMA'],['duvida','DUVIDAS_PLATAFORMA'],['duvidas','DUVIDAS_PLATAFORMA'],['duvidas sobre a plataforma','DUVIDAS_PLATAFORMA'],['3','BOLETO'],['boleto','BOLETO'],['boletos','BOLETO'],['segunda via','BOLETO'],['2 via de boletos','BOLETO'],['4','ENCERRAR_ATENDIMENTO'],['encerrar','ENCERRAR_ATENDIMENTO'],['encerrar atendimento','ENCERRAR_ATENDIMENTO']]);const labels={SUPORTE_TECNICO_N1:'Suporte Técnico',DUVIDAS_PLATAFORMA:'Dúvidas sobre a Plataforma',BOLETO:'2ª Via de Boletos',ENCERRAR_ATENDIMENTO:'Encerrar atendimento'};const route=aliases.get(normalized)??null;return[{json:{...x,state,selection:{raw,normalized,valid:Boolean(route),route,label:route?labels[route]:null,is_close:route==='ENCERRAR_ATENDIMENTO'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        448
+      ],
+      "id": "85c62b5c-e7f8-4bbd-974e-a00babae6e80",
+      "name": "Interpret Triage Selection"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d71a3129-fcbd-416e-aab5-74a49a55121f",
+              "leftValue": "={{ $json.selection.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        224,
+        448
+      ],
+      "id": "f263b7b5-ca64-48dc-a1f1-34f96272cdef",
+      "name": "Valid Triage Selection?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9fa82de0-8f99-4590-96f0-32a11c5b40ad",
+              "leftValue": "={{ $json.selection.is_close }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        448,
+        352
+      ],
+      "id": "167a2c57-aa9f-4d86-9ebf-cafa6e44df50",
+      "name": "Close Atendimento?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const state=x.state??{};const now=new Date().toISOString();const parse=v=>{if(v&&typeof v==='object')return v;if(!v)return {};try{return JSON.parse(v)}catch{return {}}};const context=parse(state.context_json);const triage={...(context.triage??{}),menu_version:'1.0',status:'route_selected',selection:x.selection.raw,route:x.selection.route,label:x.selection.label,selected_at:now};const row={thread_id:String(state.thread_id??x.conversation?.threadId??''),ticket_id:String(state.ticket_id??x.hubspot?.ticket_id??''),contact_id:String(state.contact_id??''),state:'TRIAGE_ROUTE_SELECTED',identity_status:String(state.identity_status??'IDENTITY_CONFIRMED'),channel_id:String(x.message?.channel_id??state.channel_id??''),channel_account_id:String(x.message?.channel_account_id??state.channel_account_id??''),last_message_id:String(x.message?.id??state.last_message_id??''),retry_count:0,context_json:JSON.stringify({...context,triage}),created_at:state.created_at??now,updated_at:now};if(!row.thread_id||!row.ticket_id)throw new Error('PROCESS_SELECTION: conversation state is incomplete');const text='Você selecionou *'+x.selection.label+'*. Vou direcionar seu atendimento.';return[{json:{...x,status:'TRIAGE_ROUTE_SELECTED',route:x.selection.route,state_update:row,threadId:row.thread_id,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:row.channel_id,channelAccountId:row.channel_account_id,text}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        256
+      ],
+      "id": "a1e56b95-5f4b-424f-b183-9987f33f6720",
+      "name": "Prepare Selected Route State"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        256
+      ],
+      "id": "0dc5d4aa-783c-43fd-bb76-b906be55330e",
+      "name": "Update State - Triage Route Selected"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Selected Route State').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        256
+      ],
+      "id": "cf5380e2-8982-45a9-ae54-c587a627e029",
+      "name": "Restore Selected Route Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1344,
+        256
+      ],
+      "id": "e5d3fd1a-fa82-4d99-9637-45f8353d10d1",
+      "name": "SEND MESSAGE - Route Selected"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Selected Route State').first().json;return[{json:{...x,status:'TRIAGE_ROUTE_SELECTED',next_action:'JUDAH_DISPATCH',route:x.route}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        256
+      ],
+      "id": "b5220f6f-6065-4360-bf6e-33b3f1590057",
+      "name": "Ready for Judah Dispatch"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const state=x.state??{};const now=new Date().toISOString();const parse=v=>{if(v&&typeof v==='object')return v;if(!v)return {};try{return JSON.parse(v)}catch{return {}}};const context=parse(state.context_json);const triage={...(context.triage??{}),menu_version:'1.0',status:'closed_by_customer',selection:x.selection.raw,route:'ENCERRAR_ATENDIMENTO',label:x.selection.label,selected_at:now,closed_at:now};const row={thread_id:String(state.thread_id??x.conversation?.threadId??''),ticket_id:String(state.ticket_id??x.hubspot?.ticket_id??''),contact_id:String(state.contact_id??''),state:'CLOSED',identity_status:String(state.identity_status??'IDENTITY_CONFIRMED'),channel_id:String(x.message?.channel_id??state.channel_id??''),channel_account_id:String(x.message?.channel_account_id??state.channel_account_id??''),last_message_id:String(x.message?.id??state.last_message_id??''),retry_count:0,context_json:JSON.stringify({...context,triage}),created_at:state.created_at??now,updated_at:now};if(!row.thread_id||!row.ticket_id)throw new Error('PROCESS_SELECTION: conversation state is incomplete');const text='Atendimento encerrado. Se precisar de ajuda novamente, é só nos chamar. 💚';return[{json:{...x,status:'CLOSED',route:'ENCERRAR_ATENDIMENTO',state_update:row,threadId:row.thread_id,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:row.channel_id,channelAccountId:row.channel_account_id,text}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        448
+      ],
+      "id": "335bd55d-b306-4bd5-937e-2bb5dc94dad4",
+      "name": "Prepare Closed State"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        448
+      ],
+      "id": "0c9f9455-eec3-4256-b057-31392b387c3e",
+      "name": "Update State - Closed"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Closed State').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        448
+      ],
+      "id": "55d590f8-3b70-445c-bbd9-deeeb902ecbf",
+      "name": "Restore Closed Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1344,
+        448
+      ],
+      "id": "5f5f8467-5bf4-4b20-ac54-3b56f4eeb8dd",
+      "name": "SEND MESSAGE - Atendimento Closed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Closed State').first().json;return[{json:{...x,status:'CLOSED',next_action:'NONE',closed:true}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        448
+      ],
+      "id": "9ba6d01a-0b07-44d7-a21f-38ec37ee08c5",
+      "name": "Atendimento Closed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const state=x.state??{};const now=new Date().toISOString();const parse=v=>{if(v&&typeof v==='object')return v;if(!v)return {};try{return JSON.parse(v)}catch{return {}}};const context=parse(state.context_json);const retries=Number(state.retry_count??0)+1;const triage={...(context.triage??{}),menu_version:'1.0',status:'awaiting_selection',retry_count:retries,last_invalid_selection:x.selection.raw,last_invalid_at:now};const row={thread_id:String(state.thread_id??x.conversation?.threadId??''),ticket_id:String(state.ticket_id??x.hubspot?.ticket_id??''),contact_id:String(state.contact_id??''),state:'AWAITING_TRIAGE_SELECTION',identity_status:String(state.identity_status??'IDENTITY_CONFIRMED'),channel_id:String(x.message?.channel_id??state.channel_id??''),channel_account_id:String(x.message?.channel_account_id??state.channel_account_id??''),last_message_id:String(x.message?.id??state.last_message_id??''),retry_count:retries,context_json:JSON.stringify({...context,triage}),created_at:state.created_at??now,updated_at:now};if(!row.thread_id||!row.ticket_id)throw new Error('PROCESS_SELECTION: conversation state is incomplete');const text='Não consegui identificar a opção escolhida. Por favor, responda apenas com um dos números abaixo:\\n\\n*1.* Suporte Técnico\\n*2.* Dúvidas sobre a Plataforma\\n*3.* 2ª Via de Boletos\\n*4.* Encerrar atendimento';return[{json:{...x,status:'AWAITING_TRIAGE_SELECTION',state_update:row,threadId:row.thread_id,messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:row.channel_id,channelAccountId:row.channel_account_id,text}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        640
+      ],
+      "id": "2aa6b295-2e6d-4117-8e44-a8360de6f4b2",
+      "name": "Prepare Triage Selection Retry"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_conversation_state",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "keyValue": "={{ $json.state_update.thread_id ?? '' }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "thread_id": "={{ $json.state_update.thread_id ?? '' }}",
+            "ticket_id": "={{ $json.state_update.ticket_id ?? '' }}",
+            "contact_id": "={{ $json.state_update.contact_id ?? '' }}",
+            "state": "={{ $json.state_update.state ?? '' }}",
+            "identity_status": "={{ $json.state_update.identity_status ?? '' }}",
+            "channel_id": "={{ $json.state_update.channel_id ?? '' }}",
+            "channel_account_id": "={{ $json.state_update.channel_account_id ?? '' }}",
+            "last_message_id": "={{ $json.state_update.last_message_id ?? '' }}",
+            "retry_count": "={{ Number($json.state_update.retry_count ?? 0) }}",
+            "context_json": "={{ $json.state_update.context_json ?? '' }}",
+            "created_at": "={{ $json.state_update.created_at }}",
+            "updated_at": "={{ $json.state_update.updated_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "contact_id",
+              "displayName": "contact_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "identity_status",
+              "displayName": "identity_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_id",
+              "displayName": "channel_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel_account_id",
+              "displayName": "channel_account_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_message_id",
+              "displayName": "last_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "context_json",
+              "displayName": "context_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        640
+      ],
+      "id": "746bc6db-c156-4706-a0ee-3324d4c91e1b",
+      "name": "Update State - Triage Selection Retry"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Prepare Triage Selection Retry').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        640
+      ],
+      "id": "a43c6fe5-ce76-4674-8ef3-a7a8079787ab",
+      "name": "Restore Triage Retry Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1120,
+        640
+      ],
+      "id": "46fd3f81-942e-4e9c-8ccb-f89ea6db87bd",
+      "name": "SEND MESSAGE - Triage Retry"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Triage Selection Retry').first().json;return[{json:{...x,status:'AWAITING_TRIAGE_SELECTION',next_action:'WAIT_TRIAGE_SELECTION',triage_retry_count:x.state_update.retry_count}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        640
+      ],
+      "id": "18f3e59d-ff76-4144-ae90-7ee52760bd51",
+      "name": "Awaiting Valid Triage Selection"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Triage Menu Input": {
+      "main": [
+        [
+          {
+            "node": "Validate Triage Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Triage Action": {
+      "main": [
+        [
+          {
+            "node": "Show Menu?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show Menu?": {
+      "main": [
+        [
+          {
+            "node": "Build Triage Menu State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Interpret Triage Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Triage Menu State": {
+      "main": [
+        [
+          {
+            "node": "Update State - Awaiting Triage Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Awaiting Triage Selection": {
+      "main": [
+        [
+          {
+            "node": "Restore Triage Menu Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Triage Menu Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Triage Menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Triage Menu": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Triage Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpret Triage Selection": {
+      "main": [
+        [
+          {
+            "node": "Valid Triage Selection?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Triage Selection?": {
+      "main": [
+        [
+          {
+            "node": "Close Atendimento?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Triage Selection Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close Atendimento?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Closed State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Selected Route State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Selected Route State": {
+      "main": [
+        [
+          {
+            "node": "Update State - Triage Route Selected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Triage Route Selected": {
+      "main": [
+        [
+          {
+            "node": "Restore Selected Route Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Selected Route Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Route Selected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Route Selected": {
+      "main": [
+        [
+          {
+            "node": "Ready for Judah Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Closed State": {
+      "main": [
+        [
+          {
+            "node": "Update State - Closed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Closed": {
+      "main": [
+        [
+          {
+            "node": "Restore Closed Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Closed Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Atendimento Closed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Atendimento Closed": {
+      "main": [
+        [
+          {
+            "node": "Atendimento Closed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Triage Selection Retry": {
+      "main": [
+        [
+          {
+            "node": "Update State - Triage Selection Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State - Triage Selection Retry": {
+      "main": [
+        [
+          {
+            "node": "Restore Triage Retry Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Triage Retry Payload": {
+      "main": [
+        [
+          {
+            "node": "SEND MESSAGE - Triage Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND MESSAGE - Triage Retry": {
+      "main": [
+        [
+          {
+            "node": "Awaiting Valid Triage Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "abda757a-0772-440b-8e43-e71081320a67",
+  "meta": {
+    "instanceId": "700ec74a6edf9a43091cdbcfac1b711af98a789203b783088068e43981ed58d5"
+  },
+  "nodeGroups": [],
+  "id": "frcZbnqGnlYDobMU",
+  "tags": []
+}

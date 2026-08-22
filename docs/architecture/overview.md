@@ -1,5 +1,8 @@
 # Visão arquitetural
 
+O fluxo confiável de mensagens HubSpot para n8n está documentado em
+[`n8n-inbound-adapter.md`](./n8n-inbound-adapter.md).
+
 JUDAH é o backend operacional do Help Desk InChurch. Django Ninja expõe a API,
 PostgreSQL/Supabase mantém o estado compartilhado e Celery executa trabalho
 assíncrono. Redis atende cache, locks e broker.

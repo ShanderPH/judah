@@ -1,0 +1,645 @@
+{
+  "name": "[INHPK] BOT | 01 - Inbound Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "eventsUi": {
+          "eventValues": [
+            {
+              "name": "ticket.propertyChange",
+              "property": "=hs_v2_date_entered_1269308450"
+            },
+            {
+              "name": "conversation.newMessage"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.hubspotTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2752,
+        160
+      ],
+      "id": "2574eacd-ebcc-4e30-a6c8-eeecd74885e6",
+      "name": "Novo atendimento Iniciado",
+      "webhookId": "31dd5fdc-ca4f-47dc-a2c1-661808012698",
+      "credentials": {
+        "hubspotDeveloperApi": {
+          "id": "Qz2Zy0MIcqNmC7kn",
+          "name": "HubSpot Developer account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const e=$input.first().json;const occurredAt=Number(e.occurredAt);const stageId=String(e.propertyName||'').replace('hs_v2_date_entered_','');const eventKey=[e.portalId,e.ticketId,e.propertyName,e.propertyValue].map(v=>String(v??'')).join(':');return [{json:{schema_version:'1.0',status:'INBOUND_RECEIVED',event:{id:String(e.eventId),subscription_id:String(e.subscriptionId),type:e.subscriptionType,attempt:Number(e.attemptNumber??0),occurred_at:Number.isFinite(occurredAt)?new Date(occurredAt).toISOString():null,property_name:e.propertyName,property_value:String(e.propertyValue??''),change_source:e.changeSource??null,source_id:e.sourceId??null,idempotency_key:eventKey},hubspot:{portal_id:String(e.portalId),app_id:String(e.appId),ticket_id:String(e.ticketId),target_stage_id:stageId}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2272,
+        176
+      ],
+      "id": "52befa13-d3f9-4d26-af04-6800bf0d599c",
+      "name": "Normalize Event"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "bot_inbound_events",
+        "columns": {
+          "column": [
+            {
+              "name": "event_key"
+            },
+            {
+              "name": "event_id"
+            },
+            {
+              "name": "portal_id"
+            },
+            {
+              "name": "ticket_id"
+            },
+            {
+              "name": "property_name"
+            },
+            {
+              "name": "received_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -2048,
+        176
+      ],
+      "id": "99095f4b-57f5-43dd-ba06-74bafc93f368",
+      "name": "Ensure Idempotency Table"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Normalize Event').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1824,
+        176
+      ],
+      "id": "cb6af25b-9ef3-41c9-8a50-670751ade45e",
+      "name": "Restore Normalized Event"
+    },
+    {
+      "parameters": {
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_inbound_events",
+          "mode": "name"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "keyValue": "={{ $json.event.idempotency_key }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -1600,
+        176
+      ],
+      "id": "002d01db-9685-4b27-a145-7b1a80ddd564",
+      "name": "Idempotency - New Event?"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "bot_inbound_events",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $json.event.idempotency_key }}",
+            "event_id": "={{ $json.event.id }}",
+            "portal_id": "={{ $json.hubspot.portal_id }}",
+            "ticket_id": "={{ $json.hubspot.ticket_id }}",
+            "property_name": "={{ $json.event.property_name }}",
+            "received_at": "={{ $json.event.occurred_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "event_key",
+              "displayName": "event_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "portal_id",
+              "displayName": "portal_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "property_name",
+              "displayName": "property_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "received_at",
+              "displayName": "received_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -1376,
+        176
+      ],
+      "id": "bd0476eb-64d4-49d9-abc7-74d51de57bfd",
+      "name": "Register Inbound Event"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Restore Normalized Event').all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1152,
+        176
+      ],
+      "id": "1529a58b-e373-43dc-82d1-cfb1b14a1b8d",
+      "name": "Restore Gateway Context"
+    },
+    {
+      "parameters": {
+        "authentication": "appToken",
+        "resource": "ticket",
+        "operation": "get",
+        "ticketId": {
+          "__rl": true,
+          "value": "={{ $json.hubspot.ticket_id }}",
+          "mode": "id"
+        },
+        "additionalFields": {
+          "properties": [
+            "hs_pipeline",
+            "hs_pipeline_stage",
+            "subject",
+            "hs_ticket_priority",
+            "hs_createdate",
+            "hs_lastmodifieddate"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        -928,
+        176
+      ],
+      "id": "7fb45e53-eda9-4e78-b164-0aa19ad0af29",
+      "name": "GET - Current Ticket",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Restore Gateway Context').first().json;const t=$input.first().json;const p=t.properties??{};const value=k=>p?.[k]?.value??p?.[k]??null;const currentStage=value('hs_pipeline_stage');return [{json:{...base,status:'TICKET_VALIDATED',hubspot:{...base.hubspot,ticket:{id:String(t.objectId??t.id??base.hubspot.ticket_id),pipeline_id:value('hs_pipeline'),pipeline_stage_id:currentStage===null?null:String(currentStage),subject:value('subject'),priority:value('hs_ticket_priority'),created_at:value('hs_createdate'),last_modified_at:value('hs_lastmodifieddate')}},gateway:{stage_matches:String(currentStage??'')===String(base.hubspot.target_stage_id),validated_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -704,
+        176
+      ],
+      "id": "eb114a6b-1955-4bbe-83d9-5d05b34af2c6",
+      "name": "Build Gateway Contract"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "545ca90d-c2be-4708-ade3-619c1d77b5c1",
+              "leftValue": "={{ $json.gateway.stage_matches }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -480,
+        176
+      ],
+      "id": "18b4f415-b184-419c-9b42-7c0533767723",
+      "name": "Still in Target Stage?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,status:'READY_FOR_IDENTITY_RESOLUTION'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        80
+      ],
+      "id": "bace215b-a79c-4cdf-8352-79a0208ec87e",
+      "name": "Ready for Identity Resolver"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,status:'IGNORED_STAGE_MISMATCH'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        272
+      ],
+      "id": "df7b83a3-0879-441b-83dc-27a401d26cd6",
+      "name": "Ignored - Stage Changed"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "vwdul4s5sfEUNyJq",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/vwdul4s5sfEUNyJq",
+          "cachedResultName": "[INHPK] BOT | 02 - Customer Identity Resolver"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        32,
+        80
+      ],
+      "id": "e0658aeb-9082-4b19-8818-57a1de95b122",
+      "name": "Call '[INHPK] BOT | 02 - Customer Identity Resolver'"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "73c065f3-11b5-4601-b663-d80e2b709fe7",
+              "leftValue": "={{ $json.subscriptionType }}",
+              "rightValue": "=conversation.newMessage",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2528,
+        160
+      ],
+      "id": "b670939d-29f1-4c6e-bc22-fea18a08065c",
+      "name": "Router"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "wd8kXYBvmLdrMWfr",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/wd8kXYBvmLdrMWfr",
+          "cachedResultName": "[INHPK] BOT | 03 - Conversation Message Gateway"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "={{ $json.action }}",
+            "data": "={{ $json.data }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -1968,
+        -144
+      ],
+      "id": "135fef3f-36c6-40d0-a8da-9877d663f90c",
+      "name": "Call '[INHPK] BOT | 03 - Conversation Message Gateway'"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{json:{action:'PROCESS_NEW_MESSAGE',data:$json}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2256,
+        -144
+      ],
+      "id": "65edbccd-2a9a-4236-bb1c-51b75e0d70e1",
+      "name": "Process New Message"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Novo atendimento Iniciado": {
+      "main": [
+        [
+          {
+            "node": "Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Event": {
+      "main": [
+        [
+          {
+            "node": "Ensure Idempotency Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Idempotency Table": {
+      "main": [
+        [
+          {
+            "node": "Restore Normalized Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Normalized Event": {
+      "main": [
+        [
+          {
+            "node": "Idempotency - New Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Idempotency - New Event?": {
+      "main": [
+        [
+          {
+            "node": "Register Inbound Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Inbound Event": {
+      "main": [
+        [
+          {
+            "node": "Restore Gateway Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Gateway Context": {
+      "main": [
+        [
+          {
+            "node": "GET - Current Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET - Current Ticket": {
+      "main": [
+        [
+          {
+            "node": "Build Gateway Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Gateway Contract": {
+      "main": [
+        [
+          {
+            "node": "Still in Target Stage?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still in Target Stage?": {
+      "main": [
+        [
+          {
+            "node": "Ready for Identity Resolver",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignored - Stage Changed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready for Identity Resolver": {
+      "main": [
+        [
+          {
+            "node": "Call '[INHPK] BOT | 02 - Customer Identity Resolver'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router": {
+      "main": [
+        [
+          {
+            "node": "Process New Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process New Message": {
+      "main": [
+        [
+          {
+            "node": "Call '[INHPK] BOT | 03 - Conversation Message Gateway'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "9d38e132-56cd-4762-a5ad-d43860f2cffa",
+  "meta": {
+    "instanceId": "700ec74a6edf9a43091cdbcfac1b711af98a789203b783088068e43981ed58d5"
+  },
+  "nodeGroups": [],
+  "id": "RYR001tk9z7iWatr",
+  "tags": []
+}

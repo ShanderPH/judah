@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from apps.webhooks.schemas import (
     HubSpotWebhookPayload,
+    HubSpotWebhookResponse,
     JiraWebhookPayload,
     WebhookEventResponse,
 )
@@ -38,6 +39,11 @@ class TestHubSpotWebhookPayload:
         assert payload.property_name is None
         assert payload.property_value is None
         assert payload.portal_id is None
+
+
+def test_hubspot_webhook_response_is_explicit() -> None:
+    response = HubSpotWebhookResponse(status="accepted", events_queued=2, events_received=2)
+    assert response.events_queued == 2
 
 
 class TestJiraWebhookPayload:

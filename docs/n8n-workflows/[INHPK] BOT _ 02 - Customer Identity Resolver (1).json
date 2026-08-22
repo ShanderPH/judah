@@ -1,0 +1,1227 @@
+{
+  "name": "[INHPK] BOT | 02 - Customer Identity Resolver",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -4736,
+        1120
+      ],
+      "id": "e432031b-1af2-443f-a65f-4ba694b50a45",
+      "name": "Identity Resolver Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;if(!x?.hubspot?.ticket_id)throw new Error('Identity Resolver: hubspot.ticket_id is required');const cfg=x.identity_config??{};return [{json:{...x,schema_version:String(x.schema_version??'1.0'),identity_config:{default_country_code:String(cfg.default_country_code??'55')},resolver:{started_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4448,
+        1120
+      ],
+      "id": "ab1cc9c4-b0d9-461f-aa6c-f6eb35944385",
+      "name": "Validate Resolver Input"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/crm/objects/2026-03/tickets/{{ $json.hubspot.ticket_id }}?associations=contacts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -4224,
+        1120
+      ],
+      "id": "cb63c6e6-8549-4773-a223-39b36d663140",
+      "name": "GET Ticket Contact Associations",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Validate Resolver Input').first().json;const r=$input.first().json;const rows=r?.associations?.contacts?.results??[];const ids=[...new Set(rows.map(v=>String(v.id??'')).filter(Boolean))];return [{json:{...base,association:{contact_ids:ids,contact_count:ids.length,raw_types:rows.map(v=>v.type).filter(Boolean)}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4000,
+        1120
+      ],
+      "id": "c40468df-703b-43d0-96f0-166acf547fe9",
+      "name": "Parse Contact Associations"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a4d039b5-74c6-4424-8992-78c61244c118",
+              "leftValue": "={{ $json.association.contact_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -3776,
+        1120
+      ],
+      "id": "bdba9914-5de9-486b-8a6f-69b5b3c32b82",
+      "name": "No Associated Contact?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "571972cc-d207-4842-8bc4-deb92b9cddc8",
+              "leftValue": "={{ $json.association.contact_count }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -3536,
+        1600
+      ],
+      "id": "076ec1a5-401b-4cc6-8324-b3a125e32b85",
+      "name": "Exactly One Associated Contact?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,status:'IDENTITY_AMBIGUOUS',customer:null,identity:{state:'ambiguous',source:'hubspot_ticket_association',confidence:0,candidate_contact_ids:x.association.contact_ids,reason:'multiple_contacts_associated_to_ticket',contact_created:false,contact_associated:true},context:{customer_available:false,resolved_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3312,
+        1760
+      ],
+      "id": "e675aba0-64a6-417c-abaf-6aa69c2014d4",
+      "name": "Ambiguous Associated Contacts"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,selected_contact:{id:String(x.association.contact_ids[0]),source:'hubspot_ticket_association',matched_by:'ticket_association',created:false,associated:true}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3312,
+        1536
+      ],
+      "id": "cfec5994-77f9-41f6-bea4-8adeff5a179d",
+      "name": "Select Associated Contact"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const i=x.identity_input??{};const cc=String(x.identity_config?.default_country_code??'55').replace(/\\D/g,'');const clean=v=>{const s=String(v??'').trim();return s||null};const email=clean(i.email)?.toLowerCase()??null;const normalizePhone=v=>{const raw=clean(v);if(!raw)return null;let d=raw.replace(/\\D/g,'');if(d.startsWith('00'))d=d.slice(2);if(!d)return null;if(!raw.trim().startsWith('+')&&(d.length===10||d.length===11)&&cc)d=cc+d;return '+'+d};const phoneRaw=clean(i.phone)??clean(i.mobilephone);const phone=normalizePhone(phoneRaw);const firstname=clean(i.firstname);const lastname=clean(i.lastname);const missing=[];if(!firstname)missing.push('firstname');if(!lastname)missing.push('lastname');if(!email&&!phone)missing.push('email_or_phone');const groups=[];if(email)groups.push({filters:[{propertyName:'email',operator:'EQ',value:email}]});if(phone){groups.push({filters:[{propertyName:'phone',operator:'EQ',value:phone}]});groups.push({filters:[{propertyName:'mobilephone',operator:'EQ',value:phone}]});}return [{json:{...x,identity:{state:'unidentified',source:'identity_input',input:{firstname,lastname,email,phone,phone_raw:phoneRaw},has_lookup_identifier:Boolean(email||phone),can_create_contact:missing.length===0,missing_fields:missing,search_filter_groups:groups}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3552,
+        960
+      ],
+      "id": "7fb1c72e-3c12-43cb-81c9-fd6f39bb8074",
+      "name": "Normalize Identity Input"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7e5f0bfb-2d3f-48ea-80ef-eae36dbe6647",
+              "leftValue": "={{ $json.identity.has_lookup_identifier }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -3328,
+        960
+      ],
+      "id": "765c161d-aa76-450b-b537-88779515ad39",
+      "name": "Has Lookup Identifier?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,status:'IDENTITY_REQUIRED',customer:null,identity:{...x.identity,state:'unidentified',reason:'insufficient_identity_data',required_fields:x.identity.missing_fields.length?x.identity.missing_fields:['email_or_phone']},context:{customer_available:false,resolved_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3104,
+        800
+      ],
+      "id": "f0e30145-0f2b-4b31-8348-ba1215daa321",
+      "name": "Identity Required - No Identifier"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/objects/2026-03/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { filterGroups: $json.identity.search_filter_groups, limit: 10, properties: ['firstname','lastname','email','phone','mobilephone','company','jobtitle','lifecyclestage','hs_language'] } }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -3104,
+        1024
+      ],
+      "id": "0c1679f0-41f7-46af-989e-b29872afb8f8",
+      "name": "Search Existing Contacts",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Normalize Identity Input').first().json;const r=$input.first().json;const rows=Array.isArray(r.results)?r.results:[];const ids=[...new Set(rows.map(v=>String(v.id??'')).filter(Boolean))];return [{json:{...base,contact_search:{total:Number(r.total??ids.length),candidate_ids:ids,results:rows}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2880,
+        1024
+      ],
+      "id": "3b3fb7b4-b08b-4f09-9939-8a322fd92b77",
+      "name": "Parse Contact Search"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5eec4951-030e-496e-84c3-199e4faca3ff",
+              "leftValue": "={{ $json.contact_search.candidate_ids.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2656,
+        1024
+      ],
+      "id": "fdb17b28-d77f-47f4-8406-2f3c1d673041",
+      "name": "No Search Match?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1a538a51-bcf7-4c65-bfe4-ac72fae1c60c",
+              "leftValue": "={{ $json.contact_search.candidate_ids.length }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2432,
+        1184
+      ],
+      "id": "a056cd5d-4e11-4ca7-b7c8-89b7c3df83f4",
+      "name": "Exactly One Search Match?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{...x,status:'IDENTITY_AMBIGUOUS',customer:null,identity:{...x.identity,state:'ambiguous',source:'hubspot_contact_search',confidence:0,candidate_contact_ids:x.contact_search.candidate_ids,reason:'multiple_contacts_match_identifiers',contact_created:false,contact_associated:false},context:{customer_available:false,resolved_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        1328
+      ],
+      "id": "e21408f2-3887-42e8-8410-a116d05279d1",
+      "name": "Ambiguous Search Matches"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const id=String(x.contact_search.candidate_ids[0]);const matchedBy=x.identity.input.email?'email':(x.identity.input.phone?'phone':'identifier');return [{json:{...x,selected_contact:{id,source:'hubspot_contact_search',matched_by:matchedBy,created:false,associated:false}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        1152
+      ],
+      "id": "b3979b85-15be-457c-a461-02c02e2c72a8",
+      "name": "Select Existing Contact"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "94f7c827-33ac-4191-9055-71f39611a1d9",
+              "leftValue": "={{ $json.identity.can_create_contact }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2432,
+        896
+      ],
+      "id": "05d2dc03-da5a-42ed-a716-b4594549ada7",
+      "name": "Enough Data to Create?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const missing=x.identity.missing_fields??[];return [{json:{...x,status:'IDENTITY_REQUIRED',customer:null,identity:{...x.identity,state:'unidentified',reason:'contact_not_found_and_more_data_required',required_fields:missing},context:{customer_available:false,resolved_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        768
+      ],
+      "id": "2f4a9190-0bb9-4c75-a0d5-23020fa6727c",
+      "name": "Identity Required - Complete Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;const i=x.identity.input;const properties={firstname:i.firstname,lastname:i.lastname};if(i.email)properties.email=i.email;if(i.phone)properties.phone=i.phone;return [{json:{...x,contact_create_payload:{properties}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        928
+      ],
+      "id": "34dde08a-1dd1-444e-b4e2-d70369e42d72",
+      "name": "Build Contact Create Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Build Contact Create Payload').first().json;const r=$input.first().json;if(!r.id)throw new Error('HubSpot contact creation returned no id');return [{json:{...base,selected_contact:{id:String(r.id),source:'hubspot_contact_created',matched_by:'created_from_identity_input',created:true,associated:false}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1760,
+        928
+      ],
+      "id": "569fbc07-5916-496d-ba43-951091b49ff9",
+      "name": "Select Created Contact"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;if(!x?.selected_contact?.id)throw new Error('Contact association: selected_contact.id is required');return [{json:x}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        1088
+      ],
+      "id": "c6882ae9-9f79-482e-932f-09fd0aaa74c0",
+      "name": "Prepare Contact Association"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.hubapi.com/crm/objects/2026-03/contact/{{ $json.selected_contact.id }}/associations/default/ticket/{{ $json.hubspot.ticket_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -1312,
+        1088
+      ],
+      "id": "f1c5f3d2-2d1e-4ea3-9f09-232adaf7d97f",
+      "name": "Associate Contact to Ticket",
+      "alwaysOutputData": true,
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$('Prepare Contact Association').first().json;return [{json:{...x,selected_contact:{...x.selected_contact,associated:true}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1088,
+        1088
+      ],
+      "id": "ea5528dc-3fbc-4df1-ac1b-697220dffec2",
+      "name": "Restore Associated Contact Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;if(!x?.selected_contact?.id)throw new Error('Canonical lookup: selected_contact.id is required');return [{json:x}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -784,
+        1536
+      ],
+      "id": "0915fd77-47ff-4538-8ecb-ee006cdf53db",
+      "name": "Prepare Canonical Contact Lookup"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/crm/objects/2026-03/contacts/{{ $json.selected_contact.id }}?properties=firstname,lastname,email,phone,mobilephone,company,jobtitle,lifecyclestage,hs_language&associations=companies",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -560,
+        1536
+      ],
+      "id": "cbfd1070-46ba-42b3-9955-f4d773729b28",
+      "name": "GET Canonical Contact",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Prepare Canonical Contact Lookup').first().json;const r=$input.first().json;const p=r.properties??{};const val=k=>{const v=p?.[k]?.value??p?.[k]??null;return v===undefined||v===''?null:v};const cc=String(base.identity_config?.default_country_code??'55').replace(/\\D/g,'');const normalizePhone=v=>{if(v===null||v===undefined||String(v).trim()==='')return null;const raw=String(v).trim();let d=raw.replace(/\\D/g,'');if(d.startsWith('00'))d=d.slice(2);if(!d)return null;if(!raw.startsWith('+')&&(d.length===10||d.length===11)&&cc)d=cc+d;return '+'+d};const firstname=val('firstname');const lastname=val('lastname');const phoneRaw=val('phone')??val('mobilephone');const companyIds=[...new Set((r?.associations?.companies?.results??[]).map(v=>String(v.id??'')).filter(Boolean))];const selected=base.selected_contact;const confidence=selected.source==='hubspot_ticket_association'?1:selected.source==='hubspot_contact_search'?0.95:0.9;return [{json:{schema_version:base.schema_version,status:'IDENTIFIED',event:base.event??null,hubspot:{...base.hubspot,contact:{id:String(r.id??selected.id)},associated_company_ids:companyIds},customer:{id:String(r.id??selected.id),firstname,lastname,fullname:[firstname,lastname].filter(Boolean).join(' ')||null,email:val('email'),phone:{raw:phoneRaw,normalized_e164:normalizePhone(phoneRaw)},mobilephone:val('mobilephone'),company:val('company'),jobtitle:val('jobtitle'),lifecycle_stage:val('lifecyclestage'),language:val('hs_language'),created_at:r.createdAt??null,updated_at:r.updatedAt??null},identity:{state:'identified',source:selected.source,matched_by:selected.matched_by,confidence,contact_created:Boolean(selected.created),contact_associated:Boolean(selected.associated||selected.source==='hubspot_ticket_association')},context:{customer_available:true,resolved_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -336,
+        1536
+      ],
+      "id": "30fd148e-2faa-4fb3-841e-241f2c0a05b8",
+      "name": "Build Canonical Customer Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;if(!x?.hubspot?.ticket_id)throw new Error('Conversation context: hubspot.ticket_id is required');if(!['IDENTIFIED','IDENTITY_REQUIRED'].includes(x.status))throw new Error(`Conversation context: unsupported status ${x.status??'undefined'}`);return [{json:x}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        1312
+      ],
+      "id": "deceacf8-faa5-48bb-a83e-4ab29eefcf37",
+      "name": "Prepare Conversation Context"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MxJxIoB9y4DMofeW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MxJxIoB9y4DMofeW",
+          "cachedResultName": "SUBWORKFLOW - SEND MESSAGE"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "threadId": "={{ $json.threadId }}",
+            "messageToSend": "={{ $json.messageToSend }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "threadId",
+              "displayName": "threadId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageToSend",
+              "displayName": "messageToSend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        784,
+        1536
+      ],
+      "id": "a8163eb3-bd49-4b81-90b2-5d6ea9f5496b",
+      "name": "Call 'SUBWORKFLOW - SEND MESSAGE'"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Select Conversation Thread1').first().json;const payload=$('Build SEND MESSAGE Input1').first().json;const now=new Date().toISOString();const isConfirmation=payload.target_status==='IDENTITY_CONFIRMATION_REQUIRED';return[{json:{...base,status:payload.target_status,identity:{...base.identity,...(isConfirmation?{customer_confirmation:'pending'}:{customer_confirmation:null})},conversation:{...base.conversation,channelId:String(payload.messageToSend.channelId),channelAccountId:String(payload.messageToSend.channelAccountId),last_outbound_action:payload.action,last_outbound_at:now,...(isConfirmation?{confirmation_sent_at:now}:{identity_requested_at:now})},outbound_message:{type:payload.outbound_type,threadId:payload.threadId,messageToSend:payload.messageToSend,requires_response:true,expected_responses:payload.expected_responses}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        1536
+      ],
+      "id": "bc172004-8b42-4b19-92ef-0897d5682164",
+      "name": "Finalize Identity State"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "wd8kXYBvmLdrMWfr",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/wd8kXYBvmLdrMWfr",
+          "cachedResultName": "[INHPK] BOT | 03 - Conversation Message Gateway"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "action": "={{ $json.action }}",
+            "data": "={{ $json.data }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1456,
+        1536
+      ],
+      "id": "72e94013-7444-44f7-86cd-66fe1cd7ff1e",
+      "name": "Call WF-03 REGISTER_STATE"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Select Conversation Thread1').first().json;const messages=Array.isArray($json.results)?$json.results:[];const valid=messages.filter(m=>m.type==='MESSAGE'&&m.channelId&&m.channelAccountId);valid.sort((a,b)=>new Date(b.createdAt??b.updatedAt??0)-new Date(a.createdAt??a.updatedAt??0));const latest=valid[0]??{};const channelId=latest.channelId??base.conversation.originalChannelId;const channelAccountId=latest.channelAccountId??base.conversation.originalChannelAccountId;if(!base.conversation?.threadId)throw new Error('SEND MESSAGE: threadId não encontrado');if(!channelId||!channelAccountId)throw new Error('SEND MESSAGE: channelId/channelAccountId não encontrados');const maskEmail=e=>{if(!e)return null;const [u,d]=String(e).split('@');if(!d)return e;const visible=u.slice(0,2);return `${visible}${'*'.repeat(Math.max(3,u.length-visible.length))}@${d}`};const maskPhone=p=>{if(!p)return null;const d=String(p).replace(/\\D/g,'');return d.length>=4?d.slice(-4):null};let action;let outboundType;let targetStatus;let text;let expectedResponses=[];if(base.status==='IDENTIFIED'){const c=base.customer??{};const fields=[];if(c.fullname)fields.push(`nome *${c.fullname}*`);if(c.email)fields.push(`e-mail *${maskEmail(c.email)}*`);const phone=c?.phone?.normalized_e164??c?.phone?.raw??c?.mobilephone;const phoneEnd=maskPhone(phone);if(phoneEnd)fields.push(`telefone com final *${phoneEnd}*`);const details=fields.length?fields.join(', '):'seu cadastro';action='IDENTITY_CONFIRMATION';outboundType='identity_confirmation';targetStatus='IDENTITY_CONFIRMATION_REQUIRED';expectedResponses=['SIM','NÃO'];text=`Encontrei seu cadastro com ${details}. Esses dados estão corretos?\\n\\nResponda *SIM* para confirmar ou *NÃO* caso algum dado precise ser corrigido.`;}else{const missing=Array.isArray(base.identity?.required_fields)?base.identity.required_fields:[];action='IDENTITY_DATA_REQUEST';outboundType='identity_required';targetStatus='IDENTITY_REQUIRED';if(base.identity?.reason==='insufficient_identity_data'||missing.includes('email_or_phone')){expectedResponses=['EMAIL','TELEFONE'];text='Para localizar seu cadastro, informe por favor o *e-mail* ou *telefone* utilizado no cadastro.';}else{const labels={firstname:'nome',lastname:'sobrenome'};const requested=missing.filter(v=>labels[v]).map(v=>labels[v]);expectedResponses=missing.map(v=>String(v).toUpperCase());const fields=requested.length===2?'seu *nome e sobrenome*':requested.length===1?`seu *${requested[0]}*`:'seu *nome e sobrenome*';text=`Não localizei um cadastro com os dados informados. Para criar seu cadastro, informe por favor ${fields}.`;}}return[{json:{action,outbound_type:outboundType,target_status:targetStatus,expected_responses:expectedResponses,threadId:String(base.conversation.threadId),messageToSend:{type:'MESSAGE',senderActorId:'A-81908844',channelId:String(channelId),channelAccountId:String(channelAccountId),text},metadata:{ticket_id:String(base.hubspot.ticket_id),contact_id:base.hubspot?.contact?.id?String(base.hubspot.contact.id):null,identity_status:targetStatus,identity_source:base.identity?.source??null,processed_at:new Date().toISOString()}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        1536
+      ],
+      "id": "94ae3684-74d4-4846-aebe-03d533086ac7",
+      "name": "Build SEND MESSAGE Input1"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/conversations/v3/conversations/threads?associatedTicketId={{ $json.hubspot.ticket_id }}&limit=500",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -112,
+        1536
+      ],
+      "id": "fbc64ef1-55d5-4456-ba83-6dd88790b105",
+      "name": "GET Threads by Ticket1",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Prepare Conversation Context').first().json;const threads=Array.isArray($json.results)?$json.results:[];if(!threads.length)throw new Error(`Nenhuma conversation thread encontrada para o ticket ${base.hubspot.ticket_id}`);const usable=threads.filter(t=>!t.spam);const pool=(usable.length?usable:threads);const open=pool.filter(t=>t.status==='OPEN'&&!t.archived);const candidates=open.length?open:pool;candidates.sort((a,b)=>new Date(b.latestMessageTimestamp??b.latestMessageReceivedTimestamp??b.latestMessageSentTimestamp??b.createdAt??0)-new Date(a.latestMessageTimestamp??a.latestMessageReceivedTimestamp??a.latestMessageSentTimestamp??a.createdAt??0));const thread=candidates[0];return[{json:{...base,conversation:{threadId:String(thread.id),status:thread.status??null,archived:Boolean(thread.archived),inboxId:thread.inboxId?String(thread.inboxId):null,originalChannelId:thread.originalChannelId?String(thread.originalChannelId):null,originalChannelAccountId:thread.originalChannelAccountId?String(thread.originalChannelAccountId):null,latestMessageTimestamp:thread.latestMessageTimestamp??null,selection_strategy:open.length?'latest_open_thread':'latest_available_thread'}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        1536
+      ],
+      "id": "f57ece2d-9a71-4d0a-bd79-4eea250a933d",
+      "name": "Select Conversation Thread1"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/conversations/v3/conversations/threads/{{ $json.conversation.threadId }}/messages?limit=500",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        336,
+        1536
+      ],
+      "id": "053a4969-cc94-4691-b0c4-371436bbf83d",
+      "name": "GET Thread Messages1",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$input.first().json;return [{json:{action:'REGISTER_STATE',data:x}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1232,
+        1536
+      ],
+      "id": "965d7be6-8a6d-4e04-87a2-7f252794f405",
+      "name": "Build REGISTER_STATE Payload1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/objects/2026-03/contacts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.contact_create_payload }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -1984,
+        928
+      ],
+      "id": "3125a7bd-644b-4760-bb85-ff34e7f3fecf",
+      "name": "Create HubSpot Contact",
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "T51Delm08MoS1O7O",
+          "name": "HubSpot App Token account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Identity Resolver Input": {
+      "main": [
+        [
+          {
+            "node": "Validate Resolver Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Resolver Input": {
+      "main": [
+        [
+          {
+            "node": "GET Ticket Contact Associations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Ticket Contact Associations": {
+      "main": [
+        [
+          {
+            "node": "Parse Contact Associations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Contact Associations": {
+      "main": [
+        [
+          {
+            "node": "No Associated Contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Associated Contact?": {
+      "main": [
+        [
+          {
+            "node": "Normalize Identity Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Exactly One Associated Contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exactly One Associated Contact?": {
+      "main": [
+        [
+          {
+            "node": "Select Associated Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ambiguous Associated Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Associated Contact": {
+      "main": [
+        [
+          {
+            "node": "Prepare Canonical Contact Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Identity Input": {
+      "main": [
+        [
+          {
+            "node": "Has Lookup Identifier?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Lookup Identifier?": {
+      "main": [
+        [
+          {
+            "node": "Search Existing Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Identity Required - No Identifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing Contacts": {
+      "main": [
+        [
+          {
+            "node": "Parse Contact Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Contact Search": {
+      "main": [
+        [
+          {
+            "node": "No Search Match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Search Match?": {
+      "main": [
+        [
+          {
+            "node": "Enough Data to Create?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Exactly One Search Match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exactly One Search Match?": {
+      "main": [
+        [
+          {
+            "node": "Select Existing Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ambiguous Search Matches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Existing Contact": {
+      "main": [
+        [
+          {
+            "node": "Prepare Contact Association",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enough Data to Create?": {
+      "main": [
+        [
+          {
+            "node": "Build Contact Create Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Identity Required - Complete Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Contact Create Payload": {
+      "main": [
+        [
+          {
+            "node": "Create HubSpot Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Created Contact": {
+      "main": [
+        [
+          {
+            "node": "Prepare Contact Association",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Contact Association": {
+      "main": [
+        [
+          {
+            "node": "Associate Contact to Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associate Contact to Ticket": {
+      "main": [
+        [
+          {
+            "node": "Restore Associated Contact Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Associated Contact Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Canonical Contact Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Canonical Contact Lookup": {
+      "main": [
+        [
+          {
+            "node": "GET Canonical Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Canonical Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Canonical Customer Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Canonical Customer Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Conversation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Identity Required - No Identifier": {
+      "main": [
+        [
+          {
+            "node": "Prepare Conversation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Identity Required - Complete Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Conversation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Conversation Context": {
+      "main": [
+        [
+          {
+            "node": "GET Threads by Ticket1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'SUBWORKFLOW - SEND MESSAGE'": {
+      "main": [
+        [
+          {
+            "node": "Finalize Identity State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Identity State": {
+      "main": [
+        [
+          {
+            "node": "Build REGISTER_STATE Payload1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SEND MESSAGE Input1": {
+      "main": [
+        [
+          {
+            "node": "Call 'SUBWORKFLOW - SEND MESSAGE'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Threads by Ticket1": {
+      "main": [
+        [
+          {
+            "node": "Select Conversation Thread1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Conversation Thread1": {
+      "main": [
+        [
+          {
+            "node": "GET Thread Messages1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Thread Messages1": {
+      "main": [
+        [
+          {
+            "node": "Build SEND MESSAGE Input1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build REGISTER_STATE Payload1": {
+      "main": [
+        [
+          {
+            "node": "Call WF-03 REGISTER_STATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create HubSpot Contact": {
+      "main": [
+        [
+          {
+            "node": "Select Created Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "dc7d53cf-870c-407a-88a1-3fd8c501d80f",
+  "meta": {
+    "instanceId": "700ec74a6edf9a43091cdbcfac1b711af98a789203b783088068e43981ed58d5"
+  },
+  "nodeGroups": [],
+  "id": "vwdul4s5sfEUNyJq",
+  "tags": []
+}

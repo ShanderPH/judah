@@ -28,5 +28,19 @@ nomes e defaults é `core/settings/`.
 - `JIRA_SERVER_URL`, `JIRA_API_TOKEN`, `JIRA_USER_EMAIL`, `JIRA_WEBHOOK_SECRET`
 - `SENTRY_DSN`
 
-Não existem variáveis ativas de identificação, Heimdall, Supervisor, pipeline de
-triagem, rollout de bot ou reconciliação de mensagens.
+## Entrega confiável JUDAH para n8n
+
+- `N8N_BOT_INBOUND_REQUIRED` (default `false`): exige URL/secret no boot produtivo.
+- `N8N_BOT_INBOUND_URL`, `JUDAH_N8N_HMAC_SECRET`.
+- `N8N_BOT_CONNECT_TIMEOUT_SECONDS`, `N8N_BOT_READ_TIMEOUT_SECONDS`.
+- `N8N_BOT_MAX_DELIVERY_ATTEMPTS`, `N8N_BOT_RETRY_BASE_SECONDS`, `N8N_BOT_RETRY_MAX_SECONDS`.
+- `N8N_BOT_PROCESSING_STALE_SECONDS`, `N8N_BOT_OUTBOX_BATCH_SIZE`.
+- `N8N_BOT_RECONCILIATION_ENABLED` (default `false`).
+- `N8N_BOT_RECONCILIATION_INTERVAL_SECONDS`, `N8N_BOT_RECONCILIATION_LOOKBACK_SECONDS`.
+- `N8N_BOT_RECONCILIATION_BATCH_SIZE`, `N8N_BOT_SENDER_ACTOR_ID`.
+- `HUBSPOT_CONVERSATIONS_CONNECT_TIMEOUT_SECONDS`, `HUBSPOT_CONVERSATIONS_READ_TIMEOUT_SECONDS`.
+- `HUBSPOT_CONVERSATIONS_MAX_ATTEMPTS`, `HUBSPOT_WEBHOOK_MAX_BODY_BYTES`,
+  `HUBSPOT_WEBHOOK_MAX_BATCH_SIZE`.
+
+Nenhuma variável transfere identificação ou triagem para o JUDAH. Pollers não
+são adicionados automaticamente ao Celery Beat.

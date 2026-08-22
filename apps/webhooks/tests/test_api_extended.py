@@ -45,7 +45,7 @@ def test_hubspot_webhook_debug_accepts_and_queues() -> None:
             [{"subscriptionType": "ticket.creation", "objectId": "1"}],
         )
     assert status == 202
-    assert result["events_queued"] == 1
+    assert result.events_queued == 1
     record.assert_called_once()
     delay.assert_called_once_with("event-1")
 
@@ -62,6 +62,32 @@ def test_hubspot_webhook_bad_signature_is_rejected_before_persistence() -> None:
         api.hubspot_webhook(request, [{"objectId": "1"}])
     record.assert_not_called()
     delay.assert_not_called()
+
+
+@override_settings(
+    HUBSPOT_APP_SECRET="secret",
+    DEBUG=False,
+    HUBSPOT_WEBHOOK_MAX_BODY_BYTES=1,
+    HUBSPOT_WEBHOOK_MAX_BATCH_SIZE=100,
+)
+def test_hubspot_webhook_rejects_oversized_body_after_authentication() -> None:
+    request = RequestFactory().post("/webhook", data=b"[]", content_type="application/json")
+    with patch("apps.webhooks.api._is_valid_hubspot_request", return_value=True), pytest.raises(HttpError) as raised:
+        api.hubspot_webhook(request, [])
+    assert raised.value.status_code == 413
+
+
+@override_settings(
+    HUBSPOT_APP_SECRET="secret",
+    DEBUG=False,
+    HUBSPOT_WEBHOOK_MAX_BODY_BYTES=1000,
+    HUBSPOT_WEBHOOK_MAX_BATCH_SIZE=1,
+)
+def test_hubspot_webhook_rejects_oversized_batch_after_authentication() -> None:
+    request = RequestFactory().post("/webhook", data=b"[]", content_type="application/json")
+    with patch("apps.webhooks.api._is_valid_hubspot_request", return_value=True), pytest.raises(HttpError) as raised:
+        api.hubspot_webhook(request, [{}, {}])
+    assert raised.value.status_code == 413
 
 
 @override_settings(JIRA_WEBHOOK_SECRET="", DEBUG=True)
