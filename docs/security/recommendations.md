@@ -6,7 +6,7 @@
 
 1. **Garantir `debug_mode=False` em produção** para agentes de IA.
 2. **Auditar sintaxe de exceções** em `apps/support/services.py`, `auto_assign_service.py` e `hubspot_handler.py` (a correção principal em `services.py` já foi aplicada).
-3. **Adicionar rate limiting** nos endpoints de IA (`/api/v1/ai/*`).
+3. **Revisar rate limiting** nos endpoints públicos e de autenticação.
 4. **Revisar logs** para não imprimir tokens, chaves ou payloads completos de webhooks.
 
 ## Médio prazo

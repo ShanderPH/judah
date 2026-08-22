@@ -18,17 +18,17 @@ def test_client_identifier_prefers_user_then_forwarded_ip() -> None:
     assert _get_client_identifier(request) == "ip:9.9.9.9"
 
 
-@override_settings(RATE_LIMIT_OVERRIDES={"/api/v1/ai/": (2, 30)})
+@override_settings(RATE_LIMIT_OVERRIDES={"/api/v1/auth/": (2, 30)})
 def test_rate_limit_non_api_override_headers_and_limit() -> None:
     get_response = Mock(return_value=HttpResponse("ok"))
     middleware = RateLimitMiddleware(get_response)
     factory = RequestFactory()
 
     assert middleware(factory.get("/health/")).status_code == 200
-    assert middleware._get_limits("/api/v1/ai/chat") == (2, 30)
+    assert middleware._get_limits("/api/v1/auth/login") == (2, 30)
     assert middleware._get_limits("/api/v1/other") == (100, 60)
 
-    request = factory.get("/api/v1/ai/chat", REMOTE_ADDR="1.2.3.4")
+    request = factory.get("/api/v1/auth/login", REMOTE_ADDR="1.2.3.4")
     with patch("common.rate_limit.cache") as cache:
         cache.get.side_effect = [0, None]
         response = middleware(request)

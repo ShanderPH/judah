@@ -1,11 +1,9 @@
-"""Deterministic safety policies for Supervisor decisions."""
+"""Deterministic response-quality signals for independent AI replies."""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-
-from apps.ai_agents.contracts import SupervisorDecision
 
 _CUSTOMER_INPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -97,43 +95,7 @@ def resolution_evidence_signals(text: str) -> list[str]:
     return signals
 
 
-def enforce_resolution_semantics(decision: SupervisorDecision) -> SupervisorDecision:
-    """Downgrade a non-conclusive ``candidate_resolved`` decision safely."""
-    if decision.outcome != "candidate_resolved":
-        return decision
-
-    customer_signals = customer_input_signals(decision.final_response)
-    resolution_signals = resolution_evidence_signals(decision.final_response)
-    if not customer_signals and resolution_signals:
-        return decision
-
-    policy_reason = (
-        "candidate_resolution_requires_customer_input"
-        if customer_signals
-        else "candidate_resolution_lacks_positive_evidence"
-    )
-    risk_flags = list(dict.fromkeys([*decision.risk_flags, policy_reason]))
-    trace_summary = list(
-        dict.fromkeys(
-            [
-                *decision.trace_summary,
-                "resolution_policy: downgraded_to_waiting_customer",
-                *(f"resolution_policy: {signal}" for signal in customer_signals),
-                *(["resolution_policy: no_positive_resolution_evidence"] if not resolution_signals else []),
-            ]
-        )
-    )
-    return decision.model_copy(
-        update={
-            "outcome": "waiting_customer",
-            "risk_flags": risk_flags,
-            "trace_summary": trace_summary,
-        }
-    )
-
-
 __all__ = [
     "customer_input_signals",
-    "enforce_resolution_semantics",
     "resolution_evidence_signals",
 ]

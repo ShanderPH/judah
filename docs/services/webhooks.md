@@ -1,115 +1,12 @@
-# `apps.webhooks` — Recebimento de Webhooks
+# Webhooks
 
-## Resumo
+`POST /api/v1/webhooks/hubspot/` valida HMAC, persiste cada entrega e devolve
+`202` antes do processamento assíncrono. O worker normaliza eventos no ledger e
+despacha somente efeitos operacionais válidos:
 
-Módulo responsável por receber, validar assinatura, persistir e rotear webhooks inbound do HubSpot e Jira.
+- entrada no estágio NOVO do pipeline de suporte: autoatribuição;
+- fechamento calculado: encerramento do lifecycle;
+- alteração de owner: sincronização de atribuição.
 
-## Contexto
-
-O JUDAH é o ponto de entrada canônico para webhooks. Todo evento é persistido em `WebhookEvent` antes do processamento, garantindo auditabilidade e possibilidade de replay.
-
-## Responsabilidades
-
-- Receber webhooks de HubSpot e Jira.
-- Verificar assinaturas HMAC (v1/v3 para HubSpot, sha256 para Jira).
-- Persistir eventos brutos.
-- Rotear para handlers apropriados.
-- Gerenciar retries e dead letter queue.
-
-## Modelos
-
-### `WebhookEvent`
-
-| Campo | Descrição |
-|-------|-----------|
-| `event_type` | Tipo do evento (ex: `ticket.propertyChange`) |
-| `event_id` | ID do evento enviado pela origem |
-| `object_id` | ID do objeto afetado |
-| `property_name` / `property_value` | Propriedade alterada (HubSpot) |
-| `payload` | JSON bruto |
-| `processed` / `processed_at` | Estado de processamento |
-| `retry_count` / `error_message` | Retry e erro |
-
-### `DeadLetterQueue`
-
-Eventos que falharam após `MAX_RETRIES` (3).
-
-## Endpoints
-
-Base: `/api/v1/webhooks/`
-
-| Método | Path | Auth | Descrição |
-|--------|------|------|-----------|
-| POST | `/hubspot/` | — | Recebe webhooks do HubSpot |
-| POST | `/hubspot/sandbox/` | — | Alias de sandbox com a mesma validação e o mesmo roteamento |
-| POST | `/jira/` | — | Recebe webhooks do Jira |
-
-## Validação de assinatura
-
-### HubSpot v1
-
-```text
-X-HubSpot-Signature = SHA-256(client_secret + body)
-```
-
-### HubSpot v3
-
-```text
-X-HubSpot-Signature-v3 = HMAC-SHA256(timestamp + method + url + body)
-```
-
-### Jira
-
-```text
-X-Hub-Signature = sha256=<HMAC-SHA256(body)>
-```
-
-## Roteamento
-
-- Eventos `ticket.*`, `contact.*`, `deal.*`, `company.*`, `conversation.*` → `hubspot_handler`.
-- Outros eventos → tentativa de `jira_handler`.
-- Toda mudança de propriedade de ticket recebida é persistida e registrada nos logs.
-- `hs_pipeline_stage=HUBSPOT_SUPPORT_NEW_STAGE_ID` dispara o Matchmaker de atribuição automática.
-- `hs_pipeline_stage=HUBSPOT_N1_NEW_STAGE_ID` dispara o Supervisor com Salomão quando a IA está habilitada.
-- `hs_last_message_from_visitor` retoma o Supervisor para a próxima fala do cliente, mantendo conversas de múltiplos turnos.
-- O worker move o ticket para `HUBSPOT_AI_TRIAGE_STAGE_ID` enquanto processa e para `HUBSPOT_AI_WAITING_STAGE_ID` após enviar a resposta.
-- Antes do Supervisor, o worker resolve a identidade do participante de forma determinística e persiste somente evidências operacionais sem e-mail ou telefone bruto.
-- O Heimdall roda no backend mesmo quando `SALOMAO_V1_BASE_URL` não está configurado; nesse caso, qualquer resposta especializada indisponível falha com handoff humano seguro.
-- Falha de envio, canal sem resposta automática ou transbordo move o ticket para `HUBSPOT_HUMAN_ESCALATION_STAGE_ID`.
-- Estágios não configurados não alteram o status local nem executam tarefas com efeito colateral.
-
-## Regras de negócio
-
-- Eventos são sempre persistidos, mesmo com assinatura inválida.
-- Em produção, sem secret configurado, o endpoint retorna 500 (HubSpot) ou 401 (Jira).
-- Em `DEBUG` sem secret, a assinatura é bypassada.
-- Após 3 falhas, o evento vai para `DeadLetterQueue`.
-
-## Arquivos relacionados
-
-- [`apps/webhooks/api.py`](../../apps/webhooks/api.py)
-- [`apps/webhooks/services.py`](../../apps/webhooks/services.py)
-- [`apps/webhooks/handlers/hubspot_handler.py`](../../apps/webhooks/handlers/hubspot_handler.py)
-- [`apps/webhooks/handlers/jira_handler.py`](../../apps/webhooks/handlers/jira_handler.py)
-
-## Pontos de atenção
-
-- O endpoint canônico é `/api/v1/webhooks/hubspot/`. O arquivo `apps/ai_agents/api/webhooks.py` define `/hubspot/ticket-change`, mas esse router **não está montado** em `core/urls.py`, mesmo quando `AI_ROUTING_ENABLED=true`.
-
-### Responsabilidade das subscriptions de ticket
-
-- `hs_v2_date_entered_939275049` é a ocorrência primária de entrada do Matchmaker. A identidade usa o timestamp calculado do provider; entregas tardias preservam a projeção mais nova, mas ainda passam pela revalidação idempotente de pipeline, estágio e owner.
-- `hubspot_owner_id` reconcilia atribuição e autoridade humana.
-- `hs_pipeline_stage` é um sinal compartilhado e redundante, não um requisito exclusivo da atribuição.
-- `hs_v2_date_entered_939271304` sinaliza entrada calculada na rota de IA.
-- `conversation.newMessage` é o sinal primário de mensagem para o Supervisor.
-- `hs_last_message_from_visitor` é apenas sinal auxiliar de transição; nunca é usado como identidade de mensagem.
-
-Reativação, desativação ou alteração dessas subscriptions é um gate operacional separado da publicação do código.
-- O handler Jira atual apenas loga eventos; não há integração funcional além de criação manual via service.
-
-## Recomendações
-
-- Manter `/api/v1/webhooks/hubspot/` como endpoint único; o router alternativo permanece desmontado apenas por compatibilidade de código.
-- Implementar processamento real de eventos Jira.
-- Adicionar UI/admin para visualizar `DeadLetterQueue`.
+O webhook Jira permanece independente. Eventos de mensagens não acionam mais
+identificação, triagem, resposta automática ou handoff de bot.

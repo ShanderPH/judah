@@ -186,41 +186,12 @@ CELERY_WORKER_REDIRECT_STDOUTS = True
 CELERY_WORKER_REDIRECT_STDOUTS_LEVEL = "INFO"
 CELERY_WORKER_LOG_COLOR = False
 
-# Dedicated queue for AI supervisor pipeline. Keeps long-running LLM
-# workloads isolated from the latency-sensitive support / matchmaker
-# queues so that a runaway agent cannot starve auto-assignment workers.
-# The queue is declared here but ``run_supervisor_pipeline_task`` only
-# dispatches when ``AI_ROUTING_ENABLED`` is true.
 CELERY_TASK_ROUTES = {
     "webhooks.process_webhook_event_task": {"queue": "celery"},
-    "ai_agents.run_supervisor_pipeline_task": {"queue": "ai_tasks"},
-    "ai_agents.run_salomao_v1_thread_pipeline_task": {"queue": "ai_tasks"},
-    "ai_agents.request_human_handoff_task": {"queue": "ai_tasks"},
-    "ai_agents.publish_handoff_observation_task": {"queue": "ai_tasks"},
-    "ai_agents.retry_failed_lifecycle_instances_task": {"queue": "ai_tasks"},
     "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }
 
 # --- Feature flags ---
-
-# AI routing is disabled by default. When False, the ``/ai/`` Ninja router is
-# not mounted and the supervisor pipeline task is not dispatched from webhooks.
-# This isolates the dormant AI drop from the legacy auto-assignment system.
-AI_ROUTING_ENABLED = config("AI_ROUTING_ENABLED", default=False, cast=bool)
-AI_ROUTING_ROLLOUT_PERCENTAGE = config("AI_ROUTING_ROLLOUT_PERCENTAGE", default=100, cast=int)
-# Independent execution controls. Defaults preserve the legacy coupling while
-# deployments can explicitly suspend Salomao without disabling human routing
-# or automatic assignment.
-SALOMAO_SUPERVISOR_ENABLED = config(
-    "SALOMAO_SUPERVISOR_ENABLED",
-    default=True,
-    cast=bool,
-)
-SALOMAO_WAITING_RECONCILIATION_ENABLED = config(
-    "SALOMAO_WAITING_RECONCILIATION_ENABLED",
-    default=True,
-    cast=bool,
-)
 
 # Controls automatic agent availability writes from HubSpot polling, SAT and
 # availability webhooks. Staging overrides this to False unconditionally.
@@ -317,10 +288,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "ai_agents.run_lifecycle_watchdog_task",
         "schedule": 60,
     },
-    "ai-lifecycle-retry-dispatch": {
-        "task": "ai_agents.retry_failed_lifecycle_instances_task",
-        "schedule": 60,
-    },
 }
 
 # ---------------------------------------------------------------------------
@@ -394,18 +361,7 @@ SALOMAO_V1_TIMEOUT_SECONDS = max(
     config("SALOMAO_V1_TIMEOUT_SECONDS", default=120.0, cast=float),
 )
 SALOMAO_V1_IMAGE_TIMEOUT_SECONDS = config("SALOMAO_V1_IMAGE_TIMEOUT_SECONDS", default=180.0, cast=float)
-SALOMAO_V1_AS_TEAM_AGENT = config("SALOMAO_V1_AS_TEAM_AGENT", default=True, cast=bool)
 SALOMAO_V1_MAX_ATTEMPTS = config("SALOMAO_V1_MAX_ATTEMPTS", default=3, cast=int)
-SALOMAO_MIN_CONFIDENCE = config("SALOMAO_MIN_CONFIDENCE", default=0.65, cast=float)
-SALOMAO_MESSAGE_QUIET_SECONDS = config("SALOMAO_MESSAGE_QUIET_SECONDS", default=4.0, cast=float)
-SALOMAO_MESSAGE_MAX_WAIT_SECONDS = config("SALOMAO_MESSAGE_MAX_WAIT_SECONDS", default=12.0, cast=float)
-SALOMAO_WAITING_RECONCILIATION_LIMIT = config(
-    "SALOMAO_WAITING_RECONCILIATION_LIMIT",
-    default=50,
-    cast=int,
-)
-HEIMDALL_MIN_CONFIDENCE = config("HEIMDALL_MIN_CONFIDENCE", default=0.65, cast=float)
-HEIMDALL_AUTO_ROUTE_CONFIDENCE = config("HEIMDALL_AUTO_ROUTE_CONFIDENCE", default=0.80, cast=float)
 
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
@@ -420,25 +376,9 @@ HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
 # telemetry-only. True = cycle divergences fail closed. Must stay False until
 # Gate C/G approval.
 CONVERSATION_CYCLES_ENFORCED = config("CONVERSATION_CYCLES_ENFORCED", default=False, cast=bool)
-HUBSPOT_SALOMAO_SENDER_ACTOR_ID = config("HUBSPOT_SALOMAO_SENDER_ACTOR_ID", default="")
-HUBSPOT_AI_TRIAGE_PIPELINE_ID = config("HUBSPOT_AI_TRIAGE_PIPELINE_ID", default="636594474")
-HUBSPOT_N1_NEW_STAGE_ID = config("HUBSPOT_N1_NEW_STAGE_ID", default="939271304")
-HUBSPOT_AI_TRIAGE_STAGE_ID = config("HUBSPOT_AI_TRIAGE_STAGE_ID", default="1115636653")
-HUBSPOT_AI_WAITING_STAGE_ID = config("HUBSPOT_AI_WAITING_STAGE_ID", default="1113543321")
-HUBSPOT_HUMAN_ESCALATION_STAGE_ID = config("HUBSPOT_HUMAN_ESCALATION_STAGE_ID", default="1113543321")
-HUBSPOT_CLOSED_STAGE_ID = config("HUBSPOT_CLOSED_STAGE_ID", default="939271307")
-HUBSPOT_AI_REPLY_DISABLED_CHANNELS = config("HUBSPOT_AI_REPLY_DISABLED_CHANNELS", default="")
 HUBSPOT_SUPPORT_PIPELINE_ID = config("HUBSPOT_SUPPORT_PIPELINE_ID", default="636459134")
 HUBSPOT_SUPPORT_NEW_STAGE_ID = config("HUBSPOT_SUPPORT_NEW_STAGE_ID", default="939275049")
 HUBSPOT_SUPPORT_CLOSED_STAGE_ID = config("HUBSPOT_SUPPORT_CLOSED_STAGE_ID", default="939275052")
-HUBSPOT_OFF_HOURS_PIPELINE_ID = config(
-    "HUBSPOT_OFF_HOURS_PIPELINE_ID",
-    default=HUBSPOT_AI_TRIAGE_PIPELINE_ID,
-)
-HUBSPOT_OFF_HOURS_STAGE_ID = config(
-    "HUBSPOT_OFF_HOURS_STAGE_ID",
-    default=HUBSPOT_HUMAN_ESCALATION_STAGE_ID,
-)
 HUBSPOT_DEFAULT_TICKET_PIPELINE_ID = config("HUBSPOT_DEFAULT_TICKET_PIPELINE_ID", default="0")
 HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID = config("HUBSPOT_DEFAULT_TICKET_NEW_STAGE_ID", default="1")
 HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID = config("HUBSPOT_DEFAULT_TICKET_OPEN_STAGE_ID", default="2")

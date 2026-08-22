@@ -24,8 +24,8 @@ def _get_client_identifier(request: HttpRequest) -> str:
 class RateLimitMiddleware:
     """Sliding-window rate limit middleware backed by Redis.
 
-    Reads per-path overrides from settings.RATE_LIMIT_OVERRIDES:
-        {"/api/v1/ai/": (20, 60), "/api/v1/auth/": (10, 60)}
+    Reads per-path overrides from settings.RATE_LIMIT_OVERRIDES, for example
+    ``{"/api/v1/auth/": (10, 60)}``.
 
     Falls back to DEFAULT_RATE / DEFAULT_WINDOW for all other paths.
     """

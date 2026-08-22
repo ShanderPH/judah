@@ -1,4 +1,4 @@
-# Resolve the validated Agno/MCP pair identically in every installation path.
+# Resolve validated AI dependencies identically in every installation path.
 -c constraints.txt
 
 # Core
@@ -21,13 +21,12 @@ django-celery-beat>=2.7.0
 # AI & Agents
 agno>=2.5.0
 fastapi>=0.115.0
+python-multipart>=0.0.20
 sqlalchemy>=2.0.0
 aiosqlite>=0.20.0
 openai>=1.60.0
 anthropic>=0.40.0
 pinecone==5.4.2
-# Agno 2.8.x imports the MCP 1.x API (McpError and mcp.server.fastmcp).
-mcp>=1.27.0,<2.0.0
 python-dotenv>=1.2.0
 
 # Integrations

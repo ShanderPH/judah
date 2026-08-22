@@ -1,39 +1,11 @@
-"""Typed contracts used for handoffs between JUDAH AI agents."""
+"""Typed contracts for independent JUDAH AI capabilities."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, Literal, Self
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
-
-
-class TriageDecision(BaseModel):
-    """Central triage contract shared by Heimdall, the Supervisor, and adapter agents."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    rota: Literal[
-        "BOLETO",
-        "EVENTOS",
-        "DUVIDAS_PLATAFORMA",
-        "MEIOS_DE_PAGAMENTO",
-        "FINANCEIRO",
-        "SUPORTE_TECNICO_N1",
-        "CUSTOMER_SUCCESS",
-        "ESCALAR_IMEDIATAMENTE",
-        "ATENDIMENTO_IA",
-    ]
-    prioridade: Literal["CRITICA", "ALTA", "MEDIA", "BAIXA"]
-    tags: list[str] = Field(default_factory=list)
-    dados_faltantes: list[str] = Field(default_factory=list)
-    sentimento: Literal["positivo", "neutro", "negativo"]
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    evidence: list[str] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("evidence", "evidences"),
-    )
-    policy_version: str = "heimdall-v1"
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConversationMessage(BaseModel):
@@ -48,29 +20,8 @@ class ConversationMessage(BaseModel):
     message_id: str | None = None
 
 
-class CustomerIdentity(BaseModel):
-    """Privacy-safe result of resolving the active conversation participant."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["VERIFIED", "PROBABLE", "AMBIGUOUS", "UNKNOWN", "CONFLICT"] = "UNKNOWN"
-    contact_id: str | None = None
-    church_id: str | None = None
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    matched_by: str = "none"
-    evidence: list[str] = Field(default_factory=list)
-    missing_fields: list[str] = Field(default_factory=list)
-    masked_name: str | None = None
-    collection_attempts: int = Field(default=0, ge=0)
-
-    @property
-    def sensitive_actions_allowed(self) -> bool:
-        """Return whether this identity is strong enough for sensitive actions."""
-        return self.status == "VERIFIED"
-
-
 class ScheduleResolution(BaseModel):
-    """Provider-neutral snapshot of the effective helpdesk schedule."""
+    """Provider-neutral snapshot of the effective Help Desk schedule."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -84,7 +35,7 @@ class ScheduleResolution(BaseModel):
 
     @classmethod
     def from_runtime(cls, value: Self | Mapping[str, object]) -> Self:
-        """Normalize the richer resolver payload into the conversation contract."""
+        """Normalize the schedule resolver payload into this contract."""
         if isinstance(value, cls):
             return value
         source_rule_id = value.get("source_rule_id")
@@ -102,7 +53,7 @@ class ScheduleResolution(BaseModel):
 
 
 class ConversationContext(BaseModel):
-    """Provider-neutral context passed into agent handoffs."""
+    """Provider-neutral context for an independent AI interaction."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -128,11 +79,10 @@ class ConversationContext(BaseModel):
     recent_messages: list[ConversationMessage] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
-    customer_identity: CustomerIdentity | None = None
 
 
 class ActionIntent(BaseModel):
-    """A structured action recommendation produced by an agent."""
+    """A structured action recommendation produced by an independent agent."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -142,24 +92,8 @@ class ActionIntent(BaseModel):
     idempotency_key: str | None = None
 
 
-class HubSpotAction(BaseModel):
-    """A HubSpot write action allowed only after SupervisorDecision."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    action_type: Literal[
-        "send_thread_reply",
-        "update_ticket_stage",
-        "assign_ticket_to_human_queue",
-        "add_internal_note",
-        "mark_ai_resolution_attempt",
-    ]
-    payload: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str
-
-
 class SalomaoChatDraft(BaseModel):
-    """Normalized draft produced by the Salomao v1 adapter agent."""
+    """Normalized draft produced by the standalone Salomao adapter."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -177,66 +111,10 @@ class SalomaoChatDraft(BaseModel):
     model_name: str | None = None
 
 
-class SupervisorDecision(BaseModel):
-    """Internal structured decision before converting to SalomaoResponse."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    outcome: Literal["candidate_resolved", "waiting_customer", "escalate_human", "failed"]
-    final_response: str
-    hubspot_action: HubSpotAction | None = None
-    trace_summary: list[str] = Field(default_factory=list)
-    risk_flags: list[str] = Field(default_factory=list)
-    missing_data: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-
-
-class HandoffPackage(BaseModel):
-    """Structured context transferred from the AI workflow to a human queue."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    conversation_instance_id: str
-    state: str
-    hubspot_thread_id: str | None = None
-    hubspot_ticket_id: str | None = None
-    hubspot_contact_id: str | None = None
-    church_id: str | None = None
-    customer_identity_status: str = "UNKNOWN"
-    customer_identity_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    customer_identity_method: str = "none"
-    source_message_id: str = ""
-    channel: str = ""
-    assigned_agent_id: str | None = None
-    reason: str
-    priority: str | None = None
-    tags: list[str] = Field(default_factory=list)
-    missing_data: list[str] = Field(default_factory=list)
-    triage: dict[str, Any] | None = None
-    ai_summary: str = ""
-    customer_tone: str = "Neutro"
-    customer_tone_context: str = ""
-    conversation_summary: str = ""
-    recommended_next_step: str = ""
-    module_lookup_status: str = "not_requested"
-    module_lookup_message: str = ""
-    obtained_modules: list[dict[str, Any]] = Field(default_factory=list)
-    church_plan_lookup_status: str = "not_requested"
-    church_plan_lookup_message: str = ""
-    church_plan: dict[str, Any] | None = None
-    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
-    recommended_queue: str = "support_n1"
-
-
 __all__ = [
     "ActionIntent",
     "ConversationContext",
     "ConversationMessage",
-    "CustomerIdentity",
-    "HandoffPackage",
-    "HubSpotAction",
     "SalomaoChatDraft",
     "ScheduleResolution",
-    "SupervisorDecision",
-    "TriageDecision",
 ]

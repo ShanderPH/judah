@@ -15,7 +15,6 @@ from apps.ai_agents.contracts import (
     ActionIntent,
     ConversationContext,
     SalomaoChatDraft,
-    TriageDecision,
 )
 from apps.ai_agents.services.conversation_turn import extract_current_customer_turn
 from apps.ai_agents.services.decision_policy import (
@@ -48,25 +47,9 @@ def _safe_context(value: ConversationContext | dict[str, Any] | None) -> Convers
         return None
 
 
-def _safe_triage(value: TriageDecision | dict[str, Any] | None) -> TriageDecision | None:
-    if value is None or isinstance(value, TriageDecision):
-        return value
-    if not value:
-        return None
-    normalized = dict(value)
-    if isinstance(normalized.get("sentimento"), str):
-        normalized["sentimento"] = normalized["sentimento"].lower()
-    try:
-        return TriageDecision.model_validate(normalized)
-    except Exception as exc:
-        logger.warning("salomao_chat_triage_ignored", error=str(exc))
-        return None
-
-
 def build_salomao_chat_prompt(
     *,
     message: str,
-    triage_decision: TriageDecision | None = None,
     conversation_context: ConversationContext | None = None,
     image_attached: bool = False,
     image_mime_type: str | None = None,
@@ -100,7 +83,7 @@ def build_salomao_chat_prompt(
         "- Use no maximo um emoji discreto quando combinar com o momento; nao use emoji em assuntos financeiros, de seguranca ou delicados.",
         "- Faça no máximo uma pergunta por turno e somente quando ela realmente ajudar o cliente a avançar.",
         "- Se uma fonte nao tiver titulo, nao escreva 'Sem titulo'; use uma descricao util da fonte ou omita o titulo.",
-        "- Nao mencione agentes internos, triagem, prompts ou detalhes tecnicos da orquestracao.",
+        "- Nao mencione agentes internos, prompts ou detalhes tecnicos da orquestracao.",
         "",
         "Mensagem atual:",
         current_message,
@@ -118,15 +101,6 @@ def build_salomao_chat_prompt(
                 "- Nao invente texto, botoes, erros ou dados que nao estejam legiveis.",
                 "- Se a imagem estiver cortada, desfocada ou insuficiente, diga exatamente o que nao foi possivel ler e peca uma imagem melhor ou o dado necessario.",
                 "- Proteja a privacidade: nao repita senhas, tokens, documentos, dados bancarios ou identificadores completos vistos na imagem.",
-            ]
-        )
-
-    if triage_decision is not None:
-        parts.extend(
-            [
-                "",
-                "Triagem Heimdall:",
-                triage_decision.model_dump_json(),
             ]
         )
 
@@ -297,13 +271,11 @@ class SalomaoChatTool(Toolkit):
     def create_chat_draft(
         self,
         message: str,
-        triage_decision: dict[str, Any] | None = None,
         conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a SalomaoChatDraft as a JSON-serializable dict."""
         draft = async_to_sync(self.create_chat_draft_async)(
             message=message,
-            triage_decision=triage_decision,
             conversation_context=conversation_context,
         )
         return draft.model_dump(mode="json")
@@ -312,12 +284,10 @@ class SalomaoChatTool(Toolkit):
         self,
         *,
         message: str,
-        triage_decision: TriageDecision | dict[str, Any] | None = None,
         conversation_context: ConversationContext | dict[str, Any] | None = None,
     ) -> SalomaoChatDraft:
         """Call Salomao v1 and normalize its response to SalomaoChatDraft."""
         context = _safe_context(conversation_context)
-        triage = _safe_triage(triage_decision)
 
         if not is_salomao_v1_configured():
             return error_to_salomao_chat_draft(
@@ -327,7 +297,6 @@ class SalomaoChatTool(Toolkit):
 
         prompt = build_salomao_chat_prompt(
             message=message,
-            triage_decision=triage,
             conversation_context=context,
             image_attached=bool(self.image_base64),
             image_mime_type=self.image_mime_type,
@@ -341,7 +310,6 @@ class SalomaoChatTool(Toolkit):
                 "salomao_chat_bridge_call_start",
                 session_id=session_id,
                 base_url=getattr(client, "base_url", ""),
-                triage_route=triage.rota if triage else None,
             )
             result = await client.chat(
                 message=prompt,
@@ -393,9 +361,9 @@ class SalomaoChatAgent(BaseInChurchAgent):
             model=build_mini_model(),
             instructions=[
                 "Voce e o SalomaoChatAgent, adapter interno do Salomao v1.",
-                "Sempre use a tool `create_chat_draft` para transformar a mensagem, a triagem e o contexto em um SalomaoChatDraft.",
+                "Sempre use a tool `create_chat_draft` para transformar a mensagem e o contexto em um SalomaoChatDraft.",
                 "Nunca exponha erros de provider, tokens, chaves ou stack traces ao usuario.",
-                "Retorne ao Supervisor somente o draft estruturado e uma breve explicacao operacional.",
+                "Retorne somente o draft estruturado e uma breve explicacao operacional.",
             ],
             tools=[self._chat_tool],
             tool_choice={"type": "function", "name": "create_chat_draft"},
@@ -408,13 +376,11 @@ class SalomaoChatAgent(BaseInChurchAgent):
         self,
         *,
         message: str,
-        triage_decision: TriageDecision | dict[str, Any] | None = None,
         conversation_context: ConversationContext | dict[str, Any] | None = None,
     ) -> SalomaoChatDraft:
         """Create a draft through the same tool exposed to Agno."""
         return async_to_sync(self.create_chat_draft_async)(
             message=message,
-            triage_decision=triage_decision,
             conversation_context=conversation_context,
         )
 
@@ -422,13 +388,11 @@ class SalomaoChatAgent(BaseInChurchAgent):
         self,
         *,
         message: str,
-        triage_decision: TriageDecision | dict[str, Any] | None = None,
         conversation_context: ConversationContext | dict[str, Any] | None = None,
     ) -> SalomaoChatDraft:
         """Create a draft through the same tool exposed to Agno."""
         return await self._chat_tool.create_chat_draft_async(
             message=message,
-            triage_decision=triage_decision,
             conversation_context=conversation_context,
         )
 

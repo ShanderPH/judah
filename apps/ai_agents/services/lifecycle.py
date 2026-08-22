@@ -20,7 +20,7 @@ from apps.ai_agents.models import (
     ConversationStateTransition,
     ToolCallAuditLog,
 )
-from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
+from apps.ai_agents.services.channel_capabilities import normalize_channel
 from apps.ai_agents.services.instance_identity import (
     find_conversation_instance,
     promote_or_get_thread_instance,
@@ -37,12 +37,9 @@ logger = structlog.get_logger(__name__)
 RouteName = Literal[
     "IGNORE",
     "AUTO_ASSIGNMENT",
-    "AI_TRIAGE",
     "AI_SERVICE",
     "HUMAN_HANDOFF",
-    "MESSAGE_VERIFY",
     "CLOSE",
-    "WAIT_FOR_CONTACT_DATA",
 ]
 
 _STAGE_NOVO_ID = settings.HUBSPOT_SUPPORT_NEW_STAGE_ID
@@ -153,44 +150,13 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     ConversationInstance.State.CONTEXT_HYDRATING: {
         ConversationInstance.State.CONTEXT_READY,
-        ConversationInstance.State.CONTACT_REQUIRED,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.IGNORED,
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.CONTEXT_READY: {
-        ConversationInstance.State.CONTACT_REQUIRED,
-        ConversationInstance.State.TRIAGE_PENDING,
         ConversationInstance.State.AI_SERVICE_PENDING,
-        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.QUEUE_PENDING,
-        ConversationInstance.State.FAILED_RETRYABLE,
-    },
-    ConversationInstance.State.CONTACT_REQUIRED: {
-        ConversationInstance.State.CONTACT_COLLECTING,
-        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.FAILED_RETRYABLE,
-    },
-    ConversationInstance.State.CONTACT_COLLECTING: {
-        ConversationInstance.State.CONTACT_ASSOCIATING,
-        ConversationInstance.State.CONTEXT_HYDRATING,
-        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.FAILED_RETRYABLE,
-    },
-    ConversationInstance.State.CONTACT_ASSOCIATING: {
-        ConversationInstance.State.CONTEXT_READY,
-        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.FAILED_RETRYABLE,
-    },
-    ConversationInstance.State.TRIAGE_PENDING: {
-        ConversationInstance.State.TRIAGE_RUNNING,
-        ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-        ConversationInstance.State.FAILED_RETRYABLE,
-    },
-    ConversationInstance.State.TRIAGE_RUNNING: {
-        ConversationInstance.State.AI_SERVICE_PENDING,
-        ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.QUEUE_PENDING,
         ConversationInstance.State.FAILED_RETRYABLE,
@@ -201,7 +167,6 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         ConversationInstance.State.FAILED_RETRYABLE,
     },
     ConversationInstance.State.AI_SERVICE_RUNNING: {
-        ConversationInstance.State.CONTACT_REQUIRED,
         ConversationInstance.State.WAITING_FOR_CUSTOMER,
         ConversationInstance.State.RESOLVED_BY_AI,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
@@ -238,7 +203,6 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     ConversationInstance.State.RESOLVED_BY_HUMAN: {ConversationInstance.State.CLOSED},
     ConversationInstance.State.FAILED_RETRYABLE: {
         ConversationInstance.State.CONTEXT_HYDRATING,
-        ConversationInstance.State.TRIAGE_PENDING,
         ConversationInstance.State.AI_SERVICE_PENDING,
         ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
         ConversationInstance.State.RESOLVED_BY_AI,
@@ -319,10 +283,8 @@ class EventNormalizer:
 
         if raw_event_type == "conversation.newMessage":
             # HubSpot emits this event for internal comments and welcome
-            # messages as well as visitor and agent messages. The webhook
-            # contract does not include ``direction``. A MESSAGE without an
-            # explicit direction must therefore be verified against provider
-            # history before it can mutate the customer-turn lifecycle.
+            # messages as well as visitor and agent messages. The event is
+            # retained in the durable ledger, but it has no bot-side effect.
             if message_type and message_type != "MESSAGE":
                 normalized_type = "conversation_non_customer_message"
             elif direction in {"INCOMING", "OUTGOING"}:
@@ -335,16 +297,9 @@ class EventNormalizer:
             if property_name == _PROP_STAGE_NOVO:
                 normalized_type = "ticket_entered_n1"
                 pipeline_stage_id = _STAGE_NOVO_ID
-            elif property_name in {
-                _PROP_STAGE_CLOSED,
-                f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_CLOSED_STAGE_ID', '')}",
-            }:
+            elif property_name == _PROP_STAGE_CLOSED:
                 normalized_type = "ticket_closed"
-                pipeline_stage_id = (
-                    _STAGE_FECHADO_ID
-                    if property_name == _PROP_STAGE_CLOSED
-                    else str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", "") or "")
-                )
+                pipeline_stage_id = _STAGE_FECHADO_ID
             elif property_name == _PROP_OWNER_ID:
                 normalized_type = "owner_changed"
             elif property_name == _PROP_PIPELINE_STAGE:
@@ -390,14 +345,11 @@ class RoutingPolicyEngine:
     """Deterministic policy router that runs before any agent."""
 
     def route(self, event: NormalizedEvent) -> RouteDecision:
-        can_reply = can_send_automated_reply(event.channel)
-
         if event.direction and event.direction != "INCOMING":
             return RouteDecision(
                 route="IGNORE",
                 target_state=ConversationInstance.State.IGNORED,
                 reason="Non-incoming conversation message.",
-                can_send_reply=can_reply,
             )
 
         if event.event_type == "ticket_closed":
@@ -405,7 +357,6 @@ class RoutingPolicyEngine:
                 route="CLOSE",
                 target_state=ConversationInstance.State.CLOSED,
                 reason="HubSpot ticket closed.",
-                can_send_reply=can_reply,
             )
 
         if event.event_type == "ticket_entered_n1":
@@ -413,70 +364,12 @@ class RoutingPolicyEngine:
                 route="AUTO_ASSIGNMENT",
                 target_state=ConversationInstance.State.QUEUE_PENDING,
                 reason="Ticket entered the support N1 assignment stage.",
-                can_send_reply=can_reply,
-            )
-
-        triage_pipeline_id = getattr(settings, "HUBSPOT_AI_TRIAGE_PIPELINE_ID", "")
-        triage_new_stage_id = getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", "")
-        triage_stage_id = getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", "")
-        triage_closed_stage_id = getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", "")
-        belongs_to_triage_pipeline = (
-            not triage_pipeline_id or not event.pipeline_id or event.pipeline_id == triage_pipeline_id
-        )
-        if (
-            event.event_type == "ticket_stage_changed"
-            and belongs_to_triage_pipeline
-            and triage_closed_stage_id
-            and event.pipeline_stage_id == triage_closed_stage_id
-        ):
-            return RouteDecision(
-                route="CLOSE",
-                target_state=ConversationInstance.State.CLOSED,
-                reason="Ticket entered the configured AI triage closed stage.",
-                can_send_reply=can_reply,
-            )
-
-        if (
-            event.event_type == "ticket_stage_changed"
-            and belongs_to_triage_pipeline
-            and event.pipeline_stage_id in {triage_new_stage_id, triage_stage_id}
-            and event.pipeline_stage_id
-        ):
-            return RouteDecision(
-                route="AI_TRIAGE",
-                target_state=ConversationInstance.State.CONTEXT_HYDRATING,
-                reason="Ticket entered a configured AI triage stage.",
-                can_send_reply=can_reply,
-            )
-
-        if event.event_type == "conversation_message_received":
-            if not can_reply:
-                return RouteDecision(
-                    route="HUMAN_HANDOFF",
-                    target_state=ConversationInstance.State.HUMAN_HANDOFF_REQUESTED,
-                    reason=f"Channel {event.channel} does not allow automated replies.",
-                    can_send_reply=False,
-                )
-            return RouteDecision(
-                route="AI_TRIAGE",
-                target_state=ConversationInstance.State.CONTEXT_HYDRATING,
-                reason="Incoming HubSpot conversation message.",
-                can_send_reply=True,
-            )
-
-        if event.event_type == "conversation_message_observed":
-            return RouteDecision(
-                route="MESSAGE_VERIFY",
-                target_state=ConversationInstance.State.NORMALIZED,
-                reason="HubSpot message notification requires provider direction verification.",
-                can_send_reply=can_reply,
             )
 
         return RouteDecision(
             route="IGNORE",
             target_state=ConversationInstance.State.IGNORED,
             reason="No lifecycle policy matched this event.",
-            can_send_reply=can_reply,
         )
 
 
@@ -521,47 +414,24 @@ class LifecycleEngine:
                         reason="Assigned human agent sent the first outgoing message.",
                         source_event_id=event.source_event_id,
                     )
-                elif decision.route not in {"IGNORE", "MESSAGE_VERIFY"}:
-                    can_reopen_terminal = (
-                        event.event_type == "ticket_entered_n1"
-                        or decision.route in {"AI_TRIAGE", "AI_SERVICE"}
-                        or (event.event_type == "conversation_message_received" and event.direction == "INCOMING")
-                    )
-                    preserve_human_authority_until_provider_check = (
-                        event.event_type == "conversation_message_received"
-                        and decision.route in {"AI_TRIAGE", "AI_SERVICE"}
-                        and instance.state
-                        in {
-                            ConversationInstance.State.HUMAN_ASSIGNED,
-                            ConversationInstance.State.HUMAN_IN_PROGRESS,
-                        }
-                    )
+                elif decision.route != "IGNORE":
+                    can_reopen_terminal = event.event_type == "ticket_entered_n1" or decision.route == "AI_SERVICE"
                     allow_authoritative_queue_entry = (
                         event.event_type == "ticket_entered_n1"
                         and decision.route == "AUTO_ASSIGNMENT"
                         and decision.target_state == ConversationInstance.State.QUEUE_PENDING
                     )
-                    allow_authoritative_ai_entry = (
-                        event.event_type == "ticket_stage_changed"
-                        and decision.route in {"AI_TRIAGE", "AI_SERVICE"}
-                        and decision.target_state == ConversationInstance.State.CONTEXT_HYDRATING
+                    self.transition(
+                        instance,
+                        decision.target_state,
+                        reason=decision.reason,
+                        source_event_id=event.source_event_id,
+                        allow_terminal_reopen=can_reopen_terminal,
+                        allow_authoritative_queue_entry=allow_authoritative_queue_entry,
                     )
-                    if not preserve_human_authority_until_provider_check:
-                        self.transition(
-                            instance,
-                            decision.target_state,
-                            reason=decision.reason,
-                            source_event_id=event.source_event_id,
-                            allow_terminal_reopen=can_reopen_terminal,
-                            allow_authoritative_queue_entry=allow_authoritative_queue_entry,
-                            allow_authoritative_ai_entry=allow_authoritative_ai_entry,
-                        )
                 elif instance_created and not event.hubspot_ticket_id:
-                    # A ticket can emit metadata/property events before the
-                    # actionable pipeline or customer-message event. Keeping
-                    # that new ticket instance NORMALIZED allows the later
-                    # event to enter AI processing instead of failing because
-                    # an unrelated first property terminalized it as IGNORED.
+                    # A thread-only event has no current operational handler;
+                    # retain the event and make that terminal outcome explicit.
                     self.transition(
                         instance,
                         decision.target_state,
@@ -596,7 +466,7 @@ class LifecycleEngine:
         """Classify whether a late event may still produce a domain effect."""
         if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
             return EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
-        if decision.route in {"IGNORE", "MESSAGE_VERIFY"}:
+        if decision.route == "IGNORE":
             return EffectOrderingPolicy.PRESERVE_PROJECTION_ONLY
         return EffectOrderingPolicy.REVALIDATE_CURRENT_PROVIDER_STATE
 
@@ -658,7 +528,6 @@ class LifecycleEngine:
         source_event_id: str = "",
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
-        allow_authoritative_ai_entry: bool = False,
     ) -> ConversationInstance:
         with transaction.atomic():
             locked = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
@@ -670,7 +539,6 @@ class LifecycleEngine:
                 to_state,
                 allow_terminal_reopen=allow_terminal_reopen,
                 allow_authoritative_queue_entry=allow_authoritative_queue_entry,
-                allow_authoritative_ai_entry=allow_authoritative_ai_entry,
             )
             now = timezone.now()
             from_state = locked.state
@@ -692,10 +560,10 @@ class LifecycleEngine:
             locked.last_activity_at = now
             if to_state == ConversationInstance.State.CLOSED and locked.closed_at is None:
                 locked.closed_at = now
-            elif (is_terminal_reopen or allow_authoritative_ai_entry) and to_state not in TERMINAL_STATES:
+            elif is_terminal_reopen and to_state not in TERMINAL_STATES:
                 locked.closed_at = None
             update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
-            if is_terminal_reopen or allow_authoritative_ai_entry:
+            if is_terminal_reopen:
                 locked.assigned_agent_id = None
                 update_fields.append("assigned_agent_id")
             locked.save(update_fields=update_fields)
@@ -932,7 +800,6 @@ class LifecycleEngine:
         *,
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
-        allow_authoritative_ai_entry: bool = False,
     ) -> None:
         if from_state in TERMINAL_STATES:
             if allow_terminal_reopen:
@@ -942,11 +809,6 @@ class LifecycleEngine:
             # The calculated HubSpot NOVO-stage timestamp is authoritative.
             # It may race with an in-flight AI projection, but callers cannot
             # use this exception for ordinary application transitions.
-            return
-        if allow_authoritative_ai_entry and to_state == ConversationInstance.State.CONTEXT_HYDRATING:
-            # A configured HubSpot AI-stage event or a worker that just
-            # revalidated that same route may supersede stale human lifecycle
-            # state. Ordinary callers cannot use this exception.
             return
         if to_state in {ConversationInstance.State.CLOSED, ConversationInstance.State.RESOLVED_BY_HUMAN}:
             return
