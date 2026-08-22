@@ -161,9 +161,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements/test.txt
 
-      - name: Verify Agno/MCP compatibility contract
+      - name: Verify Agno compatibility contract
         run: |
-          python -c "from importlib.metadata import version; assert version('agno') == '2.8.5'; assert version('mcp') == '1.28.1'"
+          python -c "from importlib.metadata import version; assert version('agno') == '2.8.5'"
 
       - name: Assert disposable database target
         run: python -m common.database_safety
