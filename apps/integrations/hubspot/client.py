@@ -731,6 +731,126 @@ class HubSpotClient:
             logger.warning("hubspot_count_active_tickets_failed", owner_id=owner_id, error=str(exc))
             return -1  # Return -1 to indicate error; caller should handle gracefully
 
+    def _get_conversations_json(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """GET one Conversations API resource with bounded provider-aware retry."""
+        import random
+        import time
+
+        import requests
+
+        url = f"https://api.hubapi.com{path}"
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        attempts = max(int(settings.HUBSPOT_CONVERSATIONS_MAX_ATTEMPTS), 1)
+        timeout = (
+            float(settings.HUBSPOT_CONVERSATIONS_CONNECT_TIMEOUT_SECONDS),
+            float(settings.HUBSPOT_CONVERSATIONS_READ_TIMEOUT_SECONDS),
+        )
+        for attempt in range(1, attempts + 1):
+            try:
+                response = _circuit_breaker.call(requests.get, url, headers=headers, params=params, timeout=timeout)
+            except requests.Timeout as exc:
+                if attempt < attempts:
+                    time.sleep(min(0.25 * (2 ** (attempt - 1)) + random.uniform(0, 0.25), 2.0))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot Conversations request timed out.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.TIMEOUT,
+                ) from exc
+            except requests.RequestException as exc:
+                raise HubSpotAPIError(
+                    "HubSpot Conversations request failed.",
+                    retryable=True,
+                    error_code=HubSpotFailureKind.UNKNOWN,
+                ) from exc
+
+            status = response.status_code
+            retry_after_raw = response.headers.get("Retry-After")
+            try:
+                retry_after = float(retry_after_raw) if retry_after_raw else None
+            except ValueError:
+                retry_after = None
+            if status == 404:
+                raise HubSpotResourceNotFoundError("conversation resource", path)
+            if status in {401, 403}:
+                raise HubSpotAPIError(
+                    "HubSpot rejected Conversations API authentication.",
+                    external_status=status,
+                    retryable=False,
+                    error_code=(HubSpotFailureKind.UNAUTHORIZED if status == 401 else HubSpotFailureKind.FORBIDDEN),
+                )
+            if status == 429 or status >= 500:
+                if attempt < attempts:
+                    delay = retry_after if retry_after is not None else 0.25 * (2 ** (attempt - 1))
+                    time.sleep(min(delay + random.uniform(0, 0.25), 5.0))
+                    continue
+                raise HubSpotAPIError(
+                    "HubSpot Conversations API is temporarily unavailable.",
+                    external_status=status,
+                    retryable=True,
+                    error_code=(HubSpotFailureKind.RATE_LIMITED if status == 429 else HubSpotFailureKind.SERVER_ERROR),
+                    retry_after_seconds=retry_after,
+                )
+            if not 200 <= status < 300:
+                raise HubSpotAPIError(
+                    "HubSpot rejected the Conversations request.",
+                    external_status=status,
+                    retryable=False,
+                )
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise HubSpotAPIError(
+                    "HubSpot returned malformed Conversations JSON.",
+                    external_status=status,
+                    retryable=True,
+                    error_code=HubSpotFailureKind.MALFORMED_RESPONSE,
+                ) from exc
+            if not isinstance(body, dict):
+                raise HubSpotAPIError(
+                    "HubSpot returned an invalid Conversations response.",
+                    external_status=status,
+                    retryable=True,
+                    error_code=HubSpotFailureKind.MALFORMED_RESPONSE,
+                )
+            return body
+        raise AssertionError("bounded HubSpot Conversations retry loop exhausted unexpectedly")
+
+    def get_conversation_thread(self, thread_id: str) -> dict[str, Any]:
+        """Retrieve one HubSpot conversation thread with associations."""
+        return self._get_conversations_json(
+            f"/conversations/v3/conversations/threads/{thread_id}",
+            params={"association": "TICKET"},
+        )
+
+    def get_conversation_message(self, thread_id: str, message_id: str) -> dict[str, Any]:
+        """Retrieve one message required to hydrate a webhook envelope."""
+        return self._get_conversations_json(
+            f"/conversations/v3/conversations/threads/{thread_id}/messages/{message_id}"
+        )
+
+    def list_conversation_messages_page(
+        self,
+        thread_id: str,
+        *,
+        after: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Retrieve one stable, cursor-paginated page of thread messages."""
+        params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": "createdAt"}
+        if after:
+            params["after"] = after
+        body = self._get_conversations_json(
+            f"/conversations/v3/conversations/threads/{thread_id}/messages",
+            params=params,
+        )
+        raw_results = body.get("results")
+        results = [item for item in raw_results if isinstance(item, dict)] if isinstance(raw_results, list) else []
+        paging = body.get("paging")
+        next_page = paging.get("next") if isinstance(paging, dict) else None
+        next_after = next_page.get("after") if isinstance(next_page, dict) else None
+        return results, str(next_after) if next_after else None
+
 
 _hubspot_client: HubSpotClient | None = None
 

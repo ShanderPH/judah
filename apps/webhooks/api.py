@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from ninja import Body, Router
 
+from apps.webhooks.metrics import emit_metric
+from apps.webhooks.n8n_inbound import record_hubspot_message_envelope
+from apps.webhooks.schemas import HubSpotWebhookResponse
 from apps.webhooks.services import record_webhook_event
 from apps.webhooks.signatures import (
     is_valid_hubspot_request,
@@ -58,8 +61,8 @@ def _verify_jira_signature(request: HttpRequest, secret: str) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
-@router.post("/hubspot/", response={202: dict}, auth=None, summary="HubSpot webhook receiver")
-def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, dict]:
+@router.post("/hubspot/", response={202: HubSpotWebhookResponse}, auth=None, summary="HubSpot webhook receiver")
+def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, HubSpotWebhookResponse]:
     """Receive and queue HubSpot CRM webhook events.
 
     Only events authenticated with the Judah app secret are recorded. Invalid
@@ -72,11 +75,11 @@ def hubspot_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tupl
 
 @router.post(
     "/hubspot/sandbox/",
-    response={202: dict},
+    response={202: HubSpotWebhookResponse},
     auth=None,
     summary="HubSpot sandbox webhook receiver",
 )
-def hubspot_sandbox_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, dict]:
+def hubspot_sandbox_webhook(request: HttpRequest, payload: list[dict[str, Any]]) -> tuple[int, HubSpotWebhookResponse]:
     """Receive sandbox events using the sandbox app's isolated HMAC secret."""
     from django.conf import settings
 
@@ -93,7 +96,7 @@ def _receive_hubspot_webhook(
     payload: list[dict[str, Any]],
     secret: str,
     environment: str,
-) -> tuple[int, dict]:
+) -> tuple[int, HubSpotWebhookResponse]:
     """Verify, record, and dispatch HubSpot events for one app environment."""
     from django.conf import settings
     from ninja.errors import HttpError
@@ -111,6 +114,7 @@ def _receive_hubspot_webhook(
         signature_ok = _is_valid_hubspot_request(request, secret)
 
     if not signature_ok:
+        emit_metric("hubspot_webhook_events_invalid_total", reason="invalid_signature", environment=environment)
         logger.warning(
             "hubspot_webhook_invalid_signature",
             environment=environment,
@@ -125,11 +129,34 @@ def _receive_hubspot_webhook(
         # as successfully delivered.
         raise HttpError(401, f"Invalid HubSpot {environment} webhook signature")
 
+    if len(request.body) > settings.HUBSPOT_WEBHOOK_MAX_BODY_BYTES:
+        emit_metric("hubspot_webhook_events_invalid_total", reason="body_too_large", environment=environment)
+        raise HttpError(413, "HubSpot webhook body exceeds the configured limit")
+    if len(payload) > settings.HUBSPOT_WEBHOOK_MAX_BATCH_SIZE:
+        emit_metric("hubspot_webhook_events_invalid_total", reason="batch_too_large", environment=environment)
+        raise HttpError(413, "HubSpot webhook batch exceeds the configured limit")
+
     events_queued = 0
-    from apps.webhooks.tasks import process_webhook_event_task
+    from apps.webhooks.tasks import hydrate_hubspot_message_event_task, process_webhook_event_task
 
     for item in payload:
         event_type = item.get("subscriptionType", "unknown")
+
+        if event_type == "conversation.newMessage":
+            result = record_hubspot_message_envelope(item)
+            if not result.ignored:
+                try:
+                    hydrate_hubspot_message_event_task.delay(result.event_id)
+                except Exception as exc:
+                    logger.warning(
+                        "hubspot_message_broker_dispatch_failed",
+                        event_id=result.event_id,
+                        idempotency_key=result.idempotency_key,
+                        error_type=type(exc).__name__,
+                        action="retain_ledger_for_reconciliation",
+                    )
+            events_queued += 1
+            continue
 
         # Only authenticated provider events enter the durable audit ledger.
         event = record_webhook_event(source="hubspot", event_type=event_type, payload=item)
@@ -137,7 +164,11 @@ def _receive_hubspot_webhook(
         process_webhook_event_task.delay(str(event.pk))
         events_queued += 1
 
-    return 202, {"status": "accepted", "events_queued": events_queued, "events_received": len(payload)}
+    return 202, HubSpotWebhookResponse(
+        status="accepted",
+        events_queued=events_queued,
+        events_received=len(payload),
+    )
 
 
 @router.post("/jira/", response={202: dict}, auth=None, summary="Jira webhook receiver")

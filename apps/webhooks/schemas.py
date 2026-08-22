@@ -38,6 +38,14 @@ class HubSpotWebhookPayload(Schema):
     subscription_type: str | None = Field(None, alias="subscriptionType")
 
 
+class HubSpotWebhookResponse(Schema):
+    """Acknowledgement for an authenticated HubSpot batch."""
+
+    status: str
+    events_queued: int
+    events_received: int
+
+
 class JiraWebhookPayload(Schema):
     """Incoming Jira webhook payload envelope."""
 

@@ -188,6 +188,10 @@ CELERY_WORKER_LOG_COLOR = False
 
 CELERY_TASK_ROUTES = {
     "webhooks.process_webhook_event_task": {"queue": "celery"},
+    "webhooks.hydrate_hubspot_message_event_task": {"queue": "celery"},
+    "webhooks.dispatch_n8n_outbox_event_task": {"queue": "celery"},
+    "webhooks.poll_n8n_outbox_task": {"queue": "celery"},
+    "webhooks.reconcile_hubspot_messages_task": {"queue": "celery"},
     "ai_agents.run_lifecycle_watchdog_task": {"queue": "ai_tasks"},
 }
 
@@ -366,6 +370,15 @@ SALOMAO_V1_MAX_ATTEMPTS = config("SALOMAO_V1_MAX_ATTEMPTS", default=3, cast=int)
 HUBSPOT_ACCESS_TOKEN = config("HUBSPOT_ACCESS_TOKEN", default="")
 HUBSPOT_APP_SECRET = config("HUBSPOT_APP_SECRET", default="")
 HUBSPOT_SANDBOX_APP_SECRET = config("HUBSPOT_SANDBOX_APP_SECRET", default="")
+HUBSPOT_CONVERSATIONS_CONNECT_TIMEOUT_SECONDS = config(
+    "HUBSPOT_CONVERSATIONS_CONNECT_TIMEOUT_SECONDS", default=5.0, cast=float
+)
+HUBSPOT_CONVERSATIONS_READ_TIMEOUT_SECONDS = config(
+    "HUBSPOT_CONVERSATIONS_READ_TIMEOUT_SECONDS", default=15.0, cast=float
+)
+HUBSPOT_CONVERSATIONS_MAX_ATTEMPTS = config("HUBSPOT_CONVERSATIONS_MAX_ATTEMPTS", default=3, cast=int)
+HUBSPOT_WEBHOOK_MAX_BODY_BYTES = config("HUBSPOT_WEBHOOK_MAX_BODY_BYTES", default=1_048_576, cast=int)
+HUBSPOT_WEBHOOK_MAX_BATCH_SIZE = config("HUBSPOT_WEBHOOK_MAX_BATCH_SIZE", default=100, cast=int)
 # Non-secret portal (account) ID. Required by the support conversation-cycle
 # contract to build deterministic cycle identities. Empty means the
 # cycle-opening writer must fail closed (identity_unavailable); reads are not
@@ -396,6 +409,25 @@ HUBSPOT_TICKET_CHURCH_PROPERTY = config(
     "HUBSPOT_TICKET_CHURCH_PROPERTY",
     default="codigo_de_igreja_local___ticket",
 )
+
+# Durable JUDAH -> n8n inbound gateway. Polling tasks are intentionally not
+# inserted into CELERY_BEAT_SCHEDULE by this feature; activation is an explicit
+# operational step after migrations and credential provisioning.
+N8N_BOT_INBOUND_REQUIRED = config("N8N_BOT_INBOUND_REQUIRED", default=False, cast=bool)
+N8N_BOT_INBOUND_URL = config("N8N_BOT_INBOUND_URL", default="")
+JUDAH_N8N_HMAC_SECRET = config("JUDAH_N8N_HMAC_SECRET", default="")
+N8N_BOT_CONNECT_TIMEOUT_SECONDS = config("N8N_BOT_CONNECT_TIMEOUT_SECONDS", default=5.0, cast=float)
+N8N_BOT_READ_TIMEOUT_SECONDS = config("N8N_BOT_READ_TIMEOUT_SECONDS", default=20.0, cast=float)
+N8N_BOT_MAX_DELIVERY_ATTEMPTS = config("N8N_BOT_MAX_DELIVERY_ATTEMPTS", default=8, cast=int)
+N8N_BOT_RETRY_BASE_SECONDS = config("N8N_BOT_RETRY_BASE_SECONDS", default=10.0, cast=float)
+N8N_BOT_RETRY_MAX_SECONDS = config("N8N_BOT_RETRY_MAX_SECONDS", default=900.0, cast=float)
+N8N_BOT_PROCESSING_STALE_SECONDS = config("N8N_BOT_PROCESSING_STALE_SECONDS", default=300, cast=int)
+N8N_BOT_RECONCILIATION_ENABLED = config("N8N_BOT_RECONCILIATION_ENABLED", default=False, cast=bool)
+N8N_BOT_RECONCILIATION_INTERVAL_SECONDS = config("N8N_BOT_RECONCILIATION_INTERVAL_SECONDS", default=60, cast=int)
+N8N_BOT_RECONCILIATION_LOOKBACK_SECONDS = config("N8N_BOT_RECONCILIATION_LOOKBACK_SECONDS", default=300, cast=int)
+N8N_BOT_RECONCILIATION_BATCH_SIZE = config("N8N_BOT_RECONCILIATION_BATCH_SIZE", default=25, cast=int)
+N8N_BOT_OUTBOX_BATCH_SIZE = config("N8N_BOT_OUTBOX_BATCH_SIZE", default=50, cast=int)
+N8N_BOT_SENDER_ACTOR_ID = config("N8N_BOT_SENDER_ACTOR_ID", default="")
 INRADAR_FEATURE_SUBSCRIPTIONS_URL = config(
     "INRADAR_FEATURE_SUBSCRIPTIONS_URL",
     default="https://www.inradar.com.br/api/v1/webhook/operations/read_feature_subscriptions_list/",

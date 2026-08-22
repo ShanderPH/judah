@@ -32,6 +32,8 @@ class TestHubSpotWebhookAPI:
                 "appId": 45639385,
                 "eventId": 1,
                 "objectId": 77,
+                "portalId": 47354717,
+                "messageId": "message-1",
                 "subscriptionType": "conversation.newMessage",
             }
         ]
@@ -51,8 +53,8 @@ class TestHubSpotWebhookAPI:
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )
-    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
-    def test_each_endpoint_accepts_only_its_v1_secret(self, process_webhook_event) -> None:
+    @patch("apps.webhooks.tasks.hydrate_hubspot_message_event_task.delay")
+    def test_each_endpoint_accepts_only_its_v1_secret(self, hydrate_message) -> None:
         body = json.dumps(self.payload).encode("utf-8")
 
         production_response = self.client.post(
@@ -71,15 +73,15 @@ class TestHubSpotWebhookAPI:
         assert production_response.json()["status"] == "accepted"
         assert sandbox_response.status_code == 202
         assert sandbox_response.json()["status"] == "accepted"
-        assert process_webhook_event.call_count == 2
+        assert hydrate_message.call_count == 2
 
     @override_settings(
         HUBSPOT_APP_SECRET=production_secret,
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )
-    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
-    def test_sandbox_rejects_production_secret(self, process_webhook_event) -> None:
+    @patch("apps.webhooks.tasks.hydrate_hubspot_message_event_task.delay")
+    def test_sandbox_rejects_production_secret(self, hydrate_message) -> None:
         body = json.dumps(self.payload).encode("utf-8")
 
         response = self.client.post(
@@ -91,11 +93,11 @@ class TestHubSpotWebhookAPI:
 
         assert response.status_code == 401
         assert not WebhookEvent.objects.filter(event_type="conversation.newMessage").exists()
-        process_webhook_event.assert_not_called()
+        hydrate_message.assert_not_called()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret, DEBUG=False)
-    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
-    def test_sandbox_accepts_current_v3_signature(self, process_webhook_event) -> None:
+    @patch("apps.webhooks.tasks.hydrate_hubspot_message_event_task.delay")
+    def test_sandbox_accepts_current_v3_signature(self, hydrate_message) -> None:
         body = json.dumps(self.payload).encode("utf-8")
         timestamp = str(int(time.time() * 1000))
         uri = "http://testserver/api/v1/webhooks/hubspot/sandbox/"
@@ -113,11 +115,11 @@ class TestHubSpotWebhookAPI:
 
         assert response.status_code == 202
         assert response.json()["status"] == "accepted"
-        process_webhook_event.assert_called_once()
+        hydrate_message.assert_called_once()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret, DEBUG=False)
-    @patch("apps.webhooks.tasks.process_webhook_event_task.delay")
-    def test_sandbox_rejects_expired_v3_signature(self, process_webhook_event) -> None:
+    @patch("apps.webhooks.tasks.hydrate_hubspot_message_event_task.delay")
+    def test_sandbox_rejects_expired_v3_signature(self, hydrate_message) -> None:
         body = json.dumps(self.payload).encode("utf-8")
         timestamp = str(int(time.time() * 1000) - 301_000)
         uri = "http://testserver/api/v1/webhooks/hubspot/sandbox/"
@@ -135,7 +137,7 @@ class TestHubSpotWebhookAPI:
 
         assert response.status_code == 401
         assert not WebhookEvent.objects.filter(event_type="conversation.newMessage").exists()
-        process_webhook_event.assert_not_called()
+        hydrate_message.assert_not_called()
 
     @override_settings(HUBSPOT_SANDBOX_APP_SECRET="", DEBUG=False)
     def test_sandbox_fails_closed_without_secret(self) -> None:
