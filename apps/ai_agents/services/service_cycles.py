@@ -22,7 +22,7 @@ _TERMINAL_STATES = {
 
 @dataclass(frozen=True)
 class ServiceCycleContext:
-    """Typed context exposed to metrics and the Salomão Supervisor."""
+    """Typed context exposed to operational metrics and lifecycle consumers."""
 
     cycle_id: str
     idempotency_key: str
@@ -190,7 +190,7 @@ def close_current_service_cycle(
 
 
 def service_cycle_context(instance: ConversationInstance) -> ServiceCycleContext:
-    """Return the current/latest cycle as typed Supervisor context."""
+    """Return the current/latest cycle as typed operational context."""
     cycle = ensure_current_service_cycle(instance)
     return ServiceCycleContext(
         cycle_id=str(cycle.pk),

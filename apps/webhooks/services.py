@@ -54,8 +54,6 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
 
 def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
     """Dispatch exactly one executable path from the deterministic route."""
-    from django.conf import settings
-
     from apps.webhooks.handlers.hubspot_handler import handle_hubspot_event
 
     decision = lifecycle.decision
@@ -65,59 +63,9 @@ def _dispatch_hubspot_lifecycle(event: WebhookEvent, lifecycle) -> None:
         handle_hubspot_event(event)
         return
 
-    if route in {"AI_TRIAGE", "HUMAN_HANDOFF", "MESSAGE_VERIFY"}:
-        from apps.ai_agents.tasks import (
-            request_human_handoff_task,
-            run_salomao_v1_thread_pipeline_task,
-            run_supervisor_pipeline_task,
-            schedule_salomao_thread_customer_turn,
-            schedule_supervisor_customer_turn,
-        )
-
-        thread_id = lifecycle.instance.hubspot_thread_id
-        ticket_id = lifecycle.instance.hubspot_ticket_id
-        ai_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
-        supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_enabled))
-        if route == "HUMAN_HANDOFF" or not ai_enabled or not supervisor_enabled:
-            request_human_handoff_task.delay(
-                thread_id=thread_id,
-                ticket_id=ticket_id,
-                reason=(
-                    decision.reason
-                    if route == "HUMAN_HANDOFF"
-                    else "Salomao execution is disabled; deterministic human fallback applied."
-                ),
-            )
-        elif route == "MESSAGE_VERIFY":
-            if not thread_id:
-                raise ValueError("MESSAGE_VERIFY route has no thread identifier.")
-            schedule_salomao_thread_customer_turn(thread_id)
-        else:
-            event_type = str(event.event_type or "").lower()
-            is_customer_message = event_type == "conversation.newmessage" or (
-                event_type == "ticket.propertychange"
-                and str(event.property_name or "") == "hs_last_message_from_visitor"
-                and str(event.property_value or "").lower() == "true"
-            )
-            if thread_id and is_customer_message:
-                schedule_salomao_thread_customer_turn(thread_id)
-            elif ticket_id and is_customer_message:
-                schedule_supervisor_customer_turn(
-                    ticket_id,
-                    is_off_hours=False,
-                    enforce_ai_pipeline=True,
-                )
-            elif thread_id:
-                run_salomao_v1_thread_pipeline_task.delay(thread_id)
-            elif ticket_id:
-                run_supervisor_pipeline_task.delay(ticket_id, False)
-            else:
-                raise ValueError(f"Route {route} has no thread or ticket identifier.")
-        return
-
     # Operational HubSpot events outside the conversation workflow still use
     # their focused deterministic handlers (owner/status changes, etc.).
-    if route == "IGNORE" and not event.event_type.lower().startswith("conversation."):
+    if route == "IGNORE":
         handle_hubspot_event(event)
 
 
@@ -126,7 +74,7 @@ def process_webhook_event(event_id) -> bool:
 
     Routes by event_type prefix:
       - ``ticket.*`` / ``contact.*`` / ``deal.*`` / ``company.*``  → HubSpot handler
-      - ``conversation.*``  → HubSpot Conversations handler (legacy)
+      - ``conversation.*``  -> durable lifecycle ingestion without bot dispatch
 
     Args:
         event_id: Primary key of the WebhookEvent to process.
@@ -175,7 +123,7 @@ def process_webhook_event(event_id) -> bool:
                         action="continue_without_lifecycle_projection",
                     )
                     # Lifecycle observability must never suppress the
-                    # deterministic support/AI webhook handler.
+                    # deterministic support webhook handler.
                     handle_hubspot_event(event)
                 else:
                     logger.info(

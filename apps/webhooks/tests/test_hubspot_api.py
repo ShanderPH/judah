@@ -75,39 +75,6 @@ class TestHubSpotWebhookAPI:
 
     @override_settings(
         HUBSPOT_APP_SECRET=production_secret,
-        AI_ROUTING_ENABLED=True,
-        SALOMAO_V1_BASE_URL="https://salomao.local",
-        HUBSPOT_N1_NEW_STAGE_ID="ai-new",
-        DEBUG=False,
-    )
-    def test_production_triage_stage_queues_canonical_processing(self) -> None:
-        payload = [
-            {
-                "eventId": "event-triage",
-                "objectId": "ticket-triage",
-                "subscriptionType": "ticket.propertyChange",
-                "propertyName": "hs_pipeline_stage",
-                "propertyValue": "ai-new",
-            }
-        ]
-        body = json.dumps(payload).encode("utf-8")
-
-        with (
-            patch("apps.webhooks.tasks.process_webhook_event_task.delay") as process_task,
-        ):
-            response = self.client.post(
-                self.production_url,
-                data=body,
-                content_type="application/json",
-                headers={"X-HubSpot-Signature": self._v1_signature(self.production_secret, body)},
-            )
-
-        assert response.status_code == 202
-        assert response.json()["status"] == "accepted"
-        process_task.assert_called_once()
-
-    @override_settings(
-        HUBSPOT_APP_SECRET=production_secret,
         HUBSPOT_SANDBOX_APP_SECRET=sandbox_secret,
         DEBUG=False,
     )

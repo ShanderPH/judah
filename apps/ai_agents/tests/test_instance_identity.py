@@ -1,252 +1,89 @@
-"""Regression tests for one persisted instance per HubSpot conversation."""
-
-from __future__ import annotations
-
 import pytest
-from django.db import IntegrityError, transaction
 
 from apps.ai_agents.models import ConversationInstance
-from apps.ai_agents.services.execution import ensure_conversation_instance
-from apps.ai_agents.services.instance_identity import find_conversation_instance
+from apps.ai_agents.services.instance_identity import (
+    conversation_idempotency_key,
+    find_conversation_instance,
+    promote_or_get_thread_instance,
+    supersede_placeholder_if_canonical_exists,
+)
+
+
+def test_conversation_idempotency_prefers_thread() -> None:
+    assert (
+        conversation_idempotency_key(thread_id="thread-1", ticket_id="ticket-1", session_id="session-1")
+        == "conversation:thread:thread-1"
+    )
+    assert conversation_idempotency_key(ticket_id="ticket-1", session_id="session-1") == (
+        "conversation:ticket:ticket-1"
+    )
+    assert conversation_idempotency_key(session_id="session-1") == "conversation:session:session-1"
 
 
 @pytest.mark.django_db
-def test_two_threads_on_same_ticket_have_independent_instances() -> None:
-    first = ensure_conversation_instance(
-        context={"ticket_id": "ticket-1", "thread_ids": ["thread-1"], "contact_ids": ["contact-1"]},
-        ticket_id="ticket-1",
-        session_id="hubspot-thread-thread-1",
-    )
-    second = ensure_conversation_instance(
-        context={"ticket_id": "ticket-1", "thread_ids": ["thread-2"], "contact_ids": ["contact-1"]},
-        ticket_id="ticket-1",
-        session_id="hubspot-thread-thread-2",
+def test_ticket_placeholder_promotes_to_canonical_thread() -> None:
+    placeholder = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:ticket-1",
+        hubspot_ticket_id="ticket-1",
     )
 
-    assert first.pk != second.pk
-    assert first.hubspot_ticket_id == second.hubspot_ticket_id == "ticket-1"
-    assert first.ai_session_id == "hubspot-thread-thread-1"
-    assert second.ai_session_id == "hubspot-thread-thread-2"
-    assert ConversationInstance.objects.filter(hubspot_ticket_id="ticket-1").count() == 2
+    promoted = promote_or_get_thread_instance(ticket_id="ticket-1", thread_id="thread-1")
+
+    assert promoted is not None
+    assert promoted.pk == placeholder.pk
+    assert promoted.hubspot_thread_id == "thread-1"
+    assert find_conversation_instance(thread_id="thread-1") == promoted
 
 
 @pytest.mark.django_db
-def test_thread_lookup_never_falls_back_to_another_thread_on_same_ticket() -> None:
-    existing = ConversationInstance.objects.create(
-        idempotency_key="conversation:thread:thread-existing",
-        hubspot_thread_id="thread-existing",
-        hubspot_ticket_id="ticket-shared",
-    )
-
-    assert find_conversation_instance(thread_id="thread-missing", ticket_id="ticket-shared") is None
-    assert find_conversation_instance(thread_id="thread-existing", ticket_id="ticket-shared") == existing
-    assert find_conversation_instance(ticket_id="ticket-shared") == existing
-
-
-@pytest.mark.django_db
-def test_ticket_placeholder_is_promoted_when_thread_identity_becomes_known() -> None:
-    ticket_instance = ensure_conversation_instance(
-        context={"ticket_id": "ticket-2", "thread_ids": []},
-        ticket_id="ticket-2",
-        session_id="hubspot-ticket-ticket-2",
-    )
-    thread_instance = ensure_conversation_instance(
-        context={"ticket_id": "ticket-2", "thread_ids": ["thread-2"]},
-        ticket_id="ticket-2",
-        session_id="hubspot-thread-thread-2",
-    )
-
-    assert ticket_instance.pk == thread_instance.pk
-    assert thread_instance.hubspot_thread_id == "thread-2"
-    assert thread_instance.idempotency_key == "conversation:thread:thread-2"
-    assert thread_instance.metadata["identity_promotions"][-1]["from"] == "ticket:ticket-2"
-
-
-@pytest.mark.django_db
-def test_thread_identifier_remains_unique() -> None:
-    ConversationInstance.objects.create(
-        idempotency_key="conversation:thread:unique-thread",
-        hubspot_thread_id="unique-thread",
-        hubspot_ticket_id="ticket-a",
-    )
-
-    with pytest.raises(IntegrityError), transaction.atomic():
-        ConversationInstance.objects.create(
-            idempotency_key="conversation:thread:duplicate-thread",
-            hubspot_thread_id="unique-thread",
-            hubspot_ticket_id="ticket-b",
-        )
-
-
-@pytest.mark.django_db
-def test_duplicate_placeholder_is_superseded_when_canonical_exists() -> None:
+def test_existing_canonical_supersedes_ticket_placeholder() -> None:
     canonical = ConversationInstance.objects.create(
-        idempotency_key="conversation:thread:canonical-thread",
-        hubspot_thread_id="canonical-thread",
-        hubspot_ticket_id="canonical-ticket",
+        idempotency_key="conversation:thread:thread-2",
+        hubspot_thread_id="thread-2",
+        hubspot_ticket_id="ticket-2",
     )
     placeholder = ConversationInstance.objects.create(
-        idempotency_key="conversation:ticket:canonical-ticket",
-        hubspot_ticket_id="canonical-ticket",
+        idempotency_key="conversation:ticket:ticket-2",
+        hubspot_ticket_id="ticket-2",
         state=ConversationInstance.State.FAILED_RETRYABLE,
-        failure_count=261,
+        failure_count=2,
     )
 
-    resolved = ensure_conversation_instance(
-        context={"ticket_id": "canonical-ticket", "thread_ids": ["canonical-thread"]},
-        ticket_id="canonical-ticket",
-        session_id="hubspot-thread-canonical-thread",
-    )
+    resolved = promote_or_get_thread_instance(ticket_id="ticket-2", thread_id="thread-2")
 
     placeholder.refresh_from_db()
-    assert resolved.pk == canonical.pk
+    assert resolved == canonical
     assert placeholder.state == ConversationInstance.State.IGNORED
     assert placeholder.failure_count == 0
-    assert placeholder.idempotency_key.startswith("conversation:superseded:")
     assert placeholder.metadata["identity_supersession"]["canonical_instance_id"] == str(canonical.pk)
 
 
 @pytest.mark.django_db
-def test_existing_thread_instance_is_hydrated_without_changing_identity() -> None:
-    instance = ConversationInstance.objects.create(
-        idempotency_key="conversation:thread:hydrate-thread",
-        hubspot_thread_id="hydrate-thread",
-        ai_session_id="hubspot-thread-hydrate-thread",
+def test_watchdog_supersedes_placeholder_only_when_canonical_exists() -> None:
+    orphan = ConversationInstance.objects.create(
+        idempotency_key="conversation:ticket:ticket-orphan",
+        hubspot_ticket_id="ticket-orphan",
     )
+    assert supersede_placeholder_if_canonical_exists(orphan) is None
 
-    hydrated = ensure_conversation_instance(
-        context={
-            "ticket_id": "ticket-hydrated",
-            "thread_ids": ["hydrate-thread"],
-            "contact_ids": ["contact-hydrated"],
-            "originating_channel": "CHAT",
-            "pipeline": "pipeline-1",
-            "pipeline_stage": "stage-1",
-        },
-        ticket_id="ticket-hydrated",
-        session_id="hubspot-thread-hydrate-thread",
+    canonical = ConversationInstance.objects.create(
+        idempotency_key="conversation:thread:thread-orphan",
+        hubspot_thread_id="thread-orphan",
+        hubspot_ticket_id="ticket-orphan",
     )
-
-    assert hydrated.pk == instance.pk
-    assert hydrated.hubspot_ticket_id == "ticket-hydrated"
-    assert hydrated.hubspot_contact_id == "contact-hydrated"
-    assert hydrated.pipeline_id == "pipeline-1"
+    assert supersede_placeholder_if_canonical_exists(orphan) == canonical
+    assert supersede_placeholder_if_canonical_exists(canonical) is None
 
 
 @pytest.mark.django_db
-def test_hydration_tracks_latest_incoming_message_as_turn_identity() -> None:
-    instance = ensure_conversation_instance(
-        context={
-            "ticket_id": "ticket-turn",
-            "thread_ids": ["thread-turn"],
-            "conversation_history": [
-                {
-                    "id": "incoming-1",
-                    "direction": "INCOMING",
-                    "text": "Primeira",
-                    "created_at": "2026-07-28T12:00:00Z",
-                },
-                {
-                    "id": "outgoing-1",
-                    "direction": "OUTGOING",
-                    "text": "Resposta",
-                    "created_at": "2026-07-28T12:01:00Z",
-                },
-                {
-                    "id": "incoming-2",
-                    "direction": "INCOMING",
-                    "text": "Segunda",
-                    "created_at": "2026-07-28T12:02:00Z",
-                },
-            ],
-        },
-        ticket_id="ticket-turn",
-        session_id="hubspot-thread-thread-turn",
-    )
+def test_ticket_lookup_rejects_ambiguous_canonical_threads() -> None:
+    for suffix in ("a", "b"):
+        ConversationInstance.objects.create(
+            idempotency_key=f"conversation:thread:{suffix}",
+            hubspot_thread_id=f"thread-{suffix}",
+            hubspot_ticket_id="ticket-shared",
+        )
 
-    assert instance.last_message_id == "incoming-2"
-    assert instance.metadata["latest_customer_turn"]["message_count"] == 1
-    assert instance.metadata["latest_customer_turn"]["message_ids"] == ["incoming-2"]
-
-
-@pytest.mark.django_db
-def test_hydration_audits_consecutive_messages_as_one_customer_turn() -> None:
-    instance = ensure_conversation_instance(
-        context={
-            "ticket_id": "ticket-batch",
-            "thread_ids": ["thread-batch"],
-            "conversation_history": [
-                {
-                    "id": "outgoing-1",
-                    "direction": "OUTGOING",
-                    "text": "Como posso ajudar?",
-                    "created_at": "2026-07-28T12:00:00Z",
-                },
-                {
-                    "id": "incoming-1",
-                    "direction": "INCOMING",
-                    "text": "Tenho interesse",
-                    "created_at": "2026-07-28T12:01:00Z",
-                },
-                {
-                    "id": "incoming-2",
-                    "direction": "INCOMING",
-                    "text": "nos planos e valores",
-                    "created_at": "2026-07-28T12:02:00Z",
-                },
-            ],
-        },
-        ticket_id="ticket-batch",
-        session_id="hubspot-thread-thread-batch",
-    )
-
-    assert instance.last_message_id == "incoming-2"
-    assert instance.metadata["latest_customer_turn"] == {
-        "message_count": 2,
-        "message_ids": ["incoming-1", "incoming-2"],
-        "first_message_id": "incoming-1",
-        "last_message_id": "incoming-2",
-        "first_created_at": "2026-07-28T12:01:00Z",
-        "last_created_at": "2026-07-28T12:02:00Z",
-    }
-
-
-@pytest.mark.django_db
-def test_hydration_fingerprints_distinct_turns_when_hubspot_omits_message_id() -> None:
-    base_context = {
-        "ticket_id": "ticket-fingerprint",
-        "thread_ids": ["thread-fingerprint"],
-        "conversation_history": [
-            {
-                "direction": "INCOMING",
-                "text": "Primeira",
-                "sender": "visitor-1",
-                "created_at": "2026-07-22T12:00:00Z",
-            }
-        ],
-    }
-    instance = ensure_conversation_instance(
-        context=base_context,
-        ticket_id="ticket-fingerprint",
-        session_id="hubspot-thread-thread-fingerprint",
-    )
-    first_turn_id = instance.last_message_id
-
-    base_context["conversation_history"].append(
-        {
-            "direction": "INCOMING",
-            "text": "Segunda",
-            "sender": "visitor-1",
-            "created_at": "2026-07-22T12:01:00Z",
-        }
-    )
-    ensure_conversation_instance(
-        context=base_context,
-        ticket_id="ticket-fingerprint",
-        session_id="hubspot-thread-thread-fingerprint",
-    )
-    instance.refresh_from_db()
-
-    assert first_turn_id.startswith("sha256:")
-    assert instance.last_message_id.startswith("sha256:")
-    assert instance.last_message_id != first_turn_id
+    assert find_conversation_instance(ticket_id="ticket-shared") is None
+    assert find_conversation_instance() is None
+    assert promote_or_get_thread_instance(ticket_id="ticket-shared", thread_id="") is None

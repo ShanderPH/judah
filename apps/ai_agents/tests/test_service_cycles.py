@@ -112,7 +112,7 @@ def test_cycle_correlates_transition_agent_run_and_tool_audit() -> None:
     )
     run = engine.record_agent_run(
         instance=instance,
-        agent_name="SalomaoSupervisor",
+        agent_name="LifecycleWorker",
         input_snapshot={"message": "fingerprint"},
     )
     audit = engine.record_tool_call(

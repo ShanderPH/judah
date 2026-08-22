@@ -12,7 +12,6 @@ class AgentSession(models.Model):
 
     class AgentType(models.TextChoices):
         SALOMAO = "salomao", "Salomão"
-        HEIMDALL = "heimdall", "Heimdall"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session_id = models.CharField(max_length=255, unique=True, db_index=True)
@@ -83,8 +82,8 @@ class AgentTrace(models.Model):
 class TokenTrackingLog(models.Model):
     """Registro de consumo de tokens e custo por execução do pipeline.
 
-    Alimentado ao fim de cada `run_pipeline_async()` do Supervisor para que o
-    time de FinOps consiga agregar custo por ticket/sessão/modelo. Decimal
+    Alimentado por capacidades de IA independentes para que o time de FinOps
+    consiga agregar custo por ticket/sessão/modelo. Decimal
     com 6 casas é suficiente para representar frações de centavo no custo
     por token dos modelos configurados.
     """
@@ -125,11 +124,6 @@ class ConversationInstance(models.Model):
         NORMALIZED = "NORMALIZED", "Normalized"
         CONTEXT_HYDRATING = "CONTEXT_HYDRATING", "Context Hydrating"
         CONTEXT_READY = "CONTEXT_READY", "Context Ready"
-        CONTACT_REQUIRED = "CONTACT_REQUIRED", "Contact Required"
-        CONTACT_COLLECTING = "CONTACT_COLLECTING", "Contact Collecting"
-        CONTACT_ASSOCIATING = "CONTACT_ASSOCIATING", "Contact Associating"
-        TRIAGE_PENDING = "TRIAGE_PENDING", "Triage Pending"
-        TRIAGE_RUNNING = "TRIAGE_RUNNING", "Triage Running"
         AI_SERVICE_PENDING = "AI_SERVICE_PENDING", "AI Service Pending"
         AI_SERVICE_RUNNING = "AI_SERVICE_RUNNING", "AI Service Running"
         WAITING_FOR_CUSTOMER = "WAITING_FOR_CUSTOMER", "Waiting for Customer"

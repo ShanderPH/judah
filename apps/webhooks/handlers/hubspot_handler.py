@@ -20,7 +20,6 @@ _PROP_STAGE_NOVO = f"hs_v2_date_entered_{_STAGE_NOVO_ID}"
 _PROP_STAGE_CLOSED = f"hs_v2_date_entered_{_STAGE_FECHADO_ID}"
 _PROP_PIPELINE_STAGE = "hs_pipeline_stage"
 _PROP_OWNER_ID = "hubspot_owner_id"  # Ticket owner (agent) assignment
-_PROP_LAST_VISITOR_MESSAGE = "hs_last_message_from_visitor"
 
 
 def handle_hubspot_event(event) -> None:
@@ -41,7 +40,7 @@ def handle_hubspot_event(event) -> None:
     elif et_lower.startswith("contact."):
         _handle_contact_event(event_type, payload)
     elif et_lower.startswith("conversation."):
-        _handle_conversation_event(event_type, payload)
+        logger.debug("hubspot_conversation_event_recorded", event_type=event_type)
     elif et_lower.startswith(("deal.", "company.")):
         logger.debug("hubspot_crm_event_logged", event_type=event_type, object_id=payload.get("objectId"))
     else:
@@ -67,32 +66,14 @@ def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str
         if property_name == _PROP_STAGE_NOVO:
             _handle_ticket_entered_novo(object_id, property_value, source_event_id=source_event_id)
 
-        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_N1_NEW_STAGE_ID', '')}":
-            _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage_entered")
-
         elif property_name == _PROP_STAGE_CLOSED:
             _handle_ticket_entered_closed(object_id, property_value, payload)
-
-        elif property_name == f"hs_v2_date_entered_{getattr(settings, 'HUBSPOT_CLOSED_STAGE_ID', '')}":
-            logger.info("hubspot_ai_ticket_entered_closed", ticket_id=object_id)
 
         elif property_name == _PROP_PIPELINE_STAGE:
             _handle_pipeline_stage_change(object_id, property_value, payload)
 
         elif property_name == _PROP_OWNER_ID:
             _handle_ticket_owner_change(object_id, property_value, payload)
-
-        elif property_name == _PROP_LAST_VISITOR_MESSAGE:
-            if str(property_value).lower() == "true":
-                _dispatch_salomao_ticket_pipeline(object_id, trigger="customer_message")
-            else:
-                logger.info(
-                    "hubspot_ticket_customer_message_flag_cleared",
-                    ticket_id=object_id,
-                    property_value=str(property_value),
-                    reason="property_value_is_not_true",
-                    action="no_supervisor_dispatch",
-                )
 
         else:
             logger.info(
@@ -164,100 +145,21 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict | None = None) -> None:
-    """Route configured stage transitions without changing unrelated tickets."""
+    """Handle support-stage transitions without duplicating closure effects."""
     payload = payload or {}
     new_stage = str(new_stage or "")
-    support_new_stage = str(getattr(settings, "HUBSPOT_SUPPORT_NEW_STAGE_ID", ""))
-    support_closed_stage = str(getattr(settings, "HUBSPOT_SUPPORT_CLOSED_STAGE_ID", ""))
-    ai_new_stage = str(getattr(settings, "HUBSPOT_N1_NEW_STAGE_ID", ""))
-    ai_triage_stage = str(getattr(settings, "HUBSPOT_AI_TRIAGE_STAGE_ID", ""))
-    ai_closed_stage = str(getattr(settings, "HUBSPOT_CLOSED_STAGE_ID", ""))
-
-    logger.info("hubspot_ticket_pipeline_stage_changed", ticket_id=object_id, new_stage=new_stage)
+    support_new_stage = str(settings.HUBSPOT_SUPPORT_NEW_STAGE_ID)
+    support_closed_stage = str(settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID)
 
     if new_stage == support_new_stage:
         entered_at_ms = payload.get("occurredAt") or payload.get("occurred_at")
         _handle_ticket_entered_novo(object_id, str(entered_at_ms) if entered_at_ms else None)
-        return
-
-    if new_stage == ai_new_stage:
-        _dispatch_salomao_ticket_pipeline(object_id, trigger="ai_new_stage")
-        return
-
-    if new_stage == ai_triage_stage:
-        logger.info("hubspot_ticket_ai_triage_stage_recorded", ticket_id=object_id)
-        return
-
-    if new_stage == support_closed_stage:
-        # Closure remains owned by the calculated closed-stage event.
+    elif new_stage == support_closed_stage:
         logger.info(
             "hubspot_ticket_pipeline_stage_fechado_logged",
             ticket_id=object_id,
             note=f"closure dispatched by {_PROP_STAGE_CLOSED} handler, not here",
         )
-        return
-
-    if new_stage == ai_closed_stage:
-        logger.info("hubspot_ai_ticket_closed_stage_recorded", ticket_id=object_id)
-        return
-
-    logger.info(
-        "hubspot_ticket_pipeline_stage_recorded_without_action",
-        ticket_id=object_id,
-        new_stage=new_stage,
-    )
-
-
-def _dispatch_salomao_ticket_pipeline(hubspot_ticket_id: str, *, trigger: str) -> None:
-    """Dispatch the ticket Supervisor for a new AI ticket or customer reply."""
-    ai_routing_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
-    supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_routing_enabled))
-    if not ai_routing_enabled or not supervisor_enabled:
-        from apps.ai_agents.tasks import request_human_handoff_task
-
-        request_human_handoff_task.delay(
-            ticket_id=hubspot_ticket_id,
-            thread_id=None,
-            reason=f"Salomao unavailable for {trigger}; deterministic human fallback applied.",
-        )
-        logger.info(
-            "hubspot_ticket_salomao_disabled_handoff_dispatched",
-            ticket_id=hubspot_ticket_id,
-            trigger=trigger,
-        )
-        return
-
-    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
-
-    if not is_ai_rollout_enabled(hubspot_ticket_id):
-        from apps.ai_agents.tasks import request_human_handoff_task
-
-        request_human_handoff_task.delay(
-            ticket_id=hubspot_ticket_id,
-            thread_id=None,
-            reason=f"Ticket is outside Salomao rollout for {trigger}; deterministic human fallback applied.",
-        )
-        logger.info("hubspot_ticket_ai_rollout_handoff", ticket_id=hubspot_ticket_id, trigger=trigger)
-        return
-
-    from apps.ai_agents.tasks import run_supervisor_pipeline_task, schedule_supervisor_customer_turn
-    from apps.support.agent_sync_service import is_business_hours
-
-    is_off_hours = not is_business_hours()
-    if trigger == "customer_message":
-        schedule_supervisor_customer_turn(
-            hubspot_ticket_id,
-            is_off_hours=is_off_hours,
-            enforce_ai_pipeline=True,
-        )
-    else:
-        run_supervisor_pipeline_task.delay(hubspot_ticket_id, is_off_hours, True)
-    logger.info(
-        "hubspot_ticket_supervisor_dispatched",
-        ticket_id=hubspot_ticket_id,
-        trigger=trigger,
-        is_off_hours=is_off_hours,
-    )
 
 
 def _handle_ticket_owner_change(
@@ -278,106 +180,6 @@ def _handle_ticket_owner_change(
     from apps.support.tasks import task_handle_owner_change
 
     task_handle_owner_change.delay(hubspot_ticket_id, new_owner_id, payload)
-
-
-def _handle_conversation_event(event_type: str, payload: dict) -> None:
-    """Process HubSpot Conversations events (legacy).
-
-    These events come from the HubSpot Conversations API and include:
-      - conversation.creation
-      - conversation.deletion
-      - conversation.privacyDeletion
-      - conversation.propertyChange
-      - conversation.newMessage
-
-    ``conversation.newMessage`` can trigger the AI Supervisor when AI routing
-    and the Salomao v1 adapter are enabled. The task re-fetches the thread and
-    skips non-incoming messages, protecting against loops caused by Judah's own
-    outgoing replies.
-    """
-    object_id = str(payload.get("objectId", ""))
-    logger.debug(
-        "hubspot_conversation_event",
-        event_type=event_type,
-        object_id=object_id,
-        message_id=payload.get("messageId"),
-    )
-
-    if event_type != "conversation.newMessage" or not object_id:
-        return
-
-    message_type = str(payload.get("messageType") or "").upper()
-    if message_type and message_type != "MESSAGE":
-        logger.info(
-            "hubspot_conversation_non_customer_message_skipped",
-            object_id=object_id,
-            message_id=payload.get("messageId"),
-            message_type=message_type,
-            reason="only_message_events_can_start_customer_turns",
-            action="safe_noop",
-        )
-        return
-
-    direction = str(payload.get("direction") or payload.get("messageDirection") or "").upper()
-    if direction and direction != "INCOMING":
-        logger.debug("hubspot_conversation_outgoing_skipped", object_id=object_id, direction=direction)
-        return
-
-    from apps.ai_agents.services.channel_capabilities import can_send_automated_reply, normalize_channel
-
-    channel = normalize_channel(
-        payload.get("channel") or payload.get("channelType") or payload.get("source") or payload.get("sourceType")
-    )
-    if not can_send_automated_reply(channel):
-        from apps.ai_agents.tasks import request_human_handoff_task
-
-        request_human_handoff_task.delay(
-            ticket_id=None,
-            thread_id=object_id,
-            reason=f"Channel {channel} does not support automatic replies.",
-        )
-        logger.info("hubspot_conversation_auto_reply_unsupported_handoff", object_id=object_id, channel=channel)
-        return
-
-    from django.conf import settings
-
-    ai_routing_enabled = bool(getattr(settings, "AI_ROUTING_ENABLED", False))
-    supervisor_enabled = bool(getattr(settings, "SALOMAO_SUPERVISOR_ENABLED", ai_routing_enabled))
-    if not ai_routing_enabled or not supervisor_enabled:
-        from apps.ai_agents.tasks import request_human_handoff_task
-
-        request_human_handoff_task.delay(
-            ticket_id=None,
-            thread_id=object_id,
-            reason="Salomao Supervisor is disabled; deterministic human fallback applied.",
-        )
-        logger.info("hubspot_conversation_supervisor_disabled_handoff", object_id=object_id)
-        return
-
-    from apps.ai_agents.services.rollout import is_ai_rollout_enabled
-
-    if not is_ai_rollout_enabled(str(object_id)):
-        from apps.ai_agents.tasks import request_human_handoff_task
-
-        request_human_handoff_task.delay(
-            ticket_id=None,
-            thread_id=object_id,
-            reason="Conversation is outside Salomao rollout; deterministic human fallback applied.",
-        )
-        logger.info("hubspot_conversation_ai_rollout_handoff", object_id=object_id)
-        return
-
-    from apps.ai_agents.tasks import schedule_salomao_thread_customer_turn
-
-    thread_id = (
-        payload.get("threadId")
-        or payload.get("conversationThreadId")
-        or payload.get("conversationsThreadId")
-        or object_id
-    )
-
-    schedule_salomao_thread_customer_turn(str(thread_id))
-    logger.info("hubspot_conversation_supervisor_dispatched", thread_id=str(thread_id), object_id=object_id)
 
 
 def _handle_contact_event(event_type: str, payload: dict) -> None:

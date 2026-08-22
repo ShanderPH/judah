@@ -1,7 +1,7 @@
 """BaseInChurchAgent — Agente fundacional do sistema multi-agente Salomão.
 
 Decisão arquitetural: herdar de agno.agent.Agent (em vez de composição) permite
-que o supervisor reutilize toda a infra do Agno (tool-calling, streaming, tracing,
+para que agentes independentes reutilizem a infra do Agno (tool-calling, streaming, tracing,
 session management) sem reimplementar nada. O padrão adotado é um `__init_subclass__`
 mínimo que injeta Redis, fallback e logging antes de repassar ao `Agent.__init__`.
 """
@@ -22,7 +22,7 @@ from django.conf import settings
 
 # ---------------------------------------------------------------------------
 # Configuração de modelos via variáveis de ambiente.
-# - DEFAULT_MODEL: modelo principal para raciocínio complexo (supervisor, RAG).
+# - DEFAULT_MODEL: modelo principal para raciocínio complexo e RAG.
 # - DEFAULT_MINI_MODEL: modelo usado em tarefas de alta frequência e fallback.
 # Mantê-los como módulo-level constants permite trocar o provedor/modelo
 # em um só lugar sem tocar no corpo dos agentes.
@@ -64,7 +64,7 @@ def build_primary_model() -> OpenAIResponses:
 
 
 def build_mini_model() -> OpenAIResponses:
-    """Modelo compacto para triagem e tarefas de alta frequência."""
+    """Modelo compacto para tarefas de alta frequência."""
     return OpenAIResponses(
         id=DEFAULT_MINI_MODEL_ID,
         reasoning=_get_reasoning_config(),

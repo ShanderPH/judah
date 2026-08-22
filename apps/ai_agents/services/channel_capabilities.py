@@ -1,8 +1,6 @@
-"""Deterministic channel capability checks for AI/helpdesk routing."""
+"""Provider-neutral channel normalization for lifecycle records."""
 
 from __future__ import annotations
-
-from django.conf import settings
 
 
 def normalize_channel(value: str | None) -> str:
@@ -21,17 +19,4 @@ def normalize_channel(value: str | None) -> str:
     return channel
 
 
-def _disabled_auto_reply_channels() -> set[str]:
-    raw = getattr(settings, "HUBSPOT_AI_REPLY_DISABLED_CHANNELS", "")
-    return {normalize_channel(item) for item in str(raw).split(",") if item.strip()}
-
-
-def can_send_automated_reply(channel: str | None) -> bool:
-    """Return whether Judah is allowed to send automated replies on a channel."""
-    normalized = normalize_channel(channel)
-    if normalized in {"unknown", "whatsapp"}:
-        return True
-    return normalized not in _disabled_auto_reply_channels()
-
-
-__all__ = ["can_send_automated_reply", "normalize_channel"]
+__all__ = ["normalize_channel"]

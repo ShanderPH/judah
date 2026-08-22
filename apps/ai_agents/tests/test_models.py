@@ -18,8 +18,8 @@ class TestAgentSession:
         assert session.ended_at is None
 
     def test_str_contains_identifiers(self) -> None:
-        session = AgentSession.objects.create(session_id="sess-2", agent_type="heimdall")
-        assert "heimdall" in str(session)
+        session = AgentSession.objects.create(session_id="sess-2", agent_type="salomao")
+        assert "salomao" in str(session)
         assert "sess-2" in str(session)
 
     def test_unique_session_id(self) -> None:

@@ -10,9 +10,7 @@
       "requiredScopes": [
         "oauth",
         "tickets",
-        "crm.objects.contacts.read",
-        "conversations.read",
-        "conversations.visitor_identification.tokens.create"
+        "crm.objects.contacts.read"
       ],
       "optionalScopes": [],
       "conditionallyRequiredScopes": []
