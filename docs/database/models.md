@@ -243,7 +243,7 @@ Extende `AbstractUser`.
 | Campo | Tipo | Notas |
 |-------|------|-------|
 | `session_id` | CharField | único, indexado |
-| `agent_type` | CharField | salomao / heimdall |
+| `agent_type` | CharField | salomao |
 | `user_identifier`, `channel`, `hubspot_contact_id`, `church_external_id` | CharField | |
 | `is_active` | BooleanField | |
 | `ended_at` | DateTimeField | nullable |

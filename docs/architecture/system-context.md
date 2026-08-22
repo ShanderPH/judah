@@ -22,7 +22,7 @@ O JUDAH atua como hub central entre canais de atendimento (HubSpot, Jira), infra
 
 | Sistema | Protocolo | Uso no JUDAH | Arquivos principais |
 |---------|-----------|--------------|---------------------|
-| HubSpot | REST API + Webhooks (HMAC v1/v3) | CRM, tickets, pipelines, owners, availability | [`apps/integrations/hubspot/`](../../apps/integrations/hubspot/), [`apps/webhooks/handlers/hubspot_handler.py`](../../apps/webhooks/handlers/hubspot_handler.py), [`apps/ai_agents/mcp_servers/hubspot_server.py`](../../apps/ai_agents/mcp_servers/hubspot_server.py) |
+| HubSpot | REST API + Webhooks (HMAC v1/v3) | CRM, tickets, pipelines, owners, availability | [`apps/integrations/hubspot/`](../../apps/integrations/hubspot/), [`apps/webhooks/handlers/hubspot_handler.py`](../../apps/webhooks/handlers/hubspot_handler.py) |
 | Jira | REST API + Webhooks | Criação/escalonamento de issues técnicas | [`apps/integrations/jira/`](../../apps/integrations/jira/), [`apps/webhooks/handlers/jira_handler.py`](../../apps/webhooks/handlers/jira_handler.py) |
 | Pinecone | gRPC/REST | Busca semântica (RAG) | [`apps/integrations/pinecone_client/client.py`](../../apps/integrations/pinecone_client/client.py), [`apps/ai_agents/agents/rag.py`](../../apps/ai_agents/agents/rag.py) |
 | Supabase | PostgreSQL + REST | Persistência principal | [`apps/integrations/supabase_client/client.py`](../../apps/integrations/supabase_client/client.py) |

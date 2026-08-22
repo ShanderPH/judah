@@ -1,91 +1,23 @@
-# `apps.integrations` — Integrações Externas
+# Integrações
 
-## Resumo
+## HubSpot
 
-Módulo de clients tipados para sistemas externos. Cada integração tem seu próprio subpacote com client, schemas e services.
+O cliente compartilhado mantém tickets, owners, equipes, propriedades,
+associações e operações usadas por filas, atribuição e métricas. Os manifests
+versionados assinam somente eventos operacionais necessários; a publicação do
+manifest exige uma operação externa separada.
 
-## Contexto
+## Supabase/PostgreSQL
 
-Os clients são singletons lazy-initialized e usam circuit breaker (`common/circuit_breaker.py`) para proteger chamadas externas.
+É a persistência compartilhada de lifecycle, filas, agentes, calendário,
+auditoria e métricas. A remoção legada não apaga tabelas ou histórico.
 
-## Submódulos
+## Salomão, Pinecone e knowledge
 
-### `apps.integrations.hubspot`
+O cliente Salomão v1, o RAG e a base de conhecimento são capacidades
+independentes. Não são ponto de entrada para identificação ou triagem.
 
-- **Client:** `HubSpotClient` em [`client.py`](../../apps/integrations/hubspot/client.py).
-- **Services:** `sync_ticket_to_hubspot`.
-- **Schemas:** `HubSpotTicketSchema`, `HubSpotContactSchema`.
-- **Constantes:**
-  - Pipeline de suporte: `636459134`.
-  - Stage NOVO: `939275049`.
-  - Stage FECHADO: `939275052`.
-  - Time N1: `8`.
-- **Métodos principais:**
-  - `get_ticket`, `get_ticket_details`
-  - `create_ticket`, `assign_ticket_owner`
-  - `search_contact_by_email`, `get_contact_by_id`
-  - `get_team_members`, `get_owner_details`
-  - `search_tickets_in_novo_stage`
-  - `get_all_owners_availability`
-  - `count_active_tickets_by_owner`
+## Jira
 
-### `apps.integrations.jira`
-
-- **Client:** `JiraClient` em [`client.py`](../../apps/integrations/jira/client.py).
-- **Services:** `escalate_ticket_to_jira`.
-- **Schemas:** `JiraIssueSchema`, `CreateJiraIssueRequest`.
-- **Métodos principais:**
-  - `search_issues`
-  - `create_issue`
-
-### `apps.integrations.pinecone_client`
-
-- **Client:** `PineconeClient` em [`client.py`](../../apps/integrations/pinecone_client/client.py).
-- **Métodos principais:**
-  - `upsert`
-  - `search` (faz embedding via OpenAI)
-  - `delete`
-
-### `apps.integrations.supabase_client`
-
-- **Client:** `get_supabase_client()` em [`client.py`](../../apps/integrations/supabase_client/client.py).
-- Uso: acesso ao PostgreSQL/REST do Supabase. **TODO: confirmar** onde é usado ativamente; o banco principal é acessado via Django ORM.
-
-### `apps.integrations.salomao_v1`
-
-- **Client:** `SalomaoV1Client` em [`client.py`](../../apps/integrations/salomao_v1/client.py).
-- **Schemas:** `SalomaoV1ChatResult`, `SalomaoV1TokenUsage`.
-- **Uso:** client HTTP do adapter `SalomaoChatAgent`, que chama o servico standalone Salomao v1 enquanto o JUDAH atua como entrada canonica de HubSpot.
-- **Metodos principais:**
-  - `chat`
-  - `send_chat_to_salomao_v1`
-  - `is_salomao_v1_configured`
-
-## Regras de negócio
-
-- HubSpotClient é singleton; recriação só ocorre se `_hubspot_client` for None.
-- Chamadas ao HubSpot usam circuit breaker com 5 falhas e 60s de recovery.
-- `count_active_tickets_by_owner` retorna `-1` em erro; chamadores devem tratar.
-- Quando `SALOMAO_V1_BASE_URL` esta configurado, o Supervisor pode expor o servico externo Salomao v1 como membro interno `SalomaoChat`.
-- Erros sensiveis de provider retornados em texto pelo Salomao v1 sao mascarados antes de chegar ao HubSpot/usuario final.
-
-## Arquivos relacionados
-
-- [`apps/integrations/hubspot/client.py`](../../apps/integrations/hubspot/client.py)
-- [`apps/integrations/jira/client.py`](../../apps/integrations/jira/client.py)
-- [`apps/integrations/pinecone_client/client.py`](../../apps/integrations/pinecone_client/client.py)
-- [`apps/integrations/supabase_client/client.py`](../../apps/integrations/supabase_client/client.py)
-- [`apps/integrations/salomao_v1/client.py`](../../apps/integrations/salomao_v1/client.py)
-- [`common/circuit_breaker.py`](../../common/circuit_breaker.py)
-
-## Pontos de atenção
-
-- `_hubspot_client` é global; não há mecanismo de reset em caso de troca de token em runtime.
-- `PineconeClient.search` cria um cliente OpenAI a cada chamada.
-- O uso do Supabase client não é evidente na codebase analisada.
-
-## Recomendações
-
-- Adicionar retry com backoff nos clients.
-- Cachear cliente OpenAI no PineconeClient.
-- Documentar claramente o uso do Supabase client ou removê-lo se não for necessário.
+O webhook e o cliente Jira permanecem disponíveis aos fluxos de tickets que não
+dependem da implementação removida.
