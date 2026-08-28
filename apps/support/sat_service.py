@@ -1,10 +1,10 @@
 """SAT (Smart Agent Tracking) — real-time agent status and time tracking.
 
-The SAT service runs as a 20-second Celery Beat heartbeat during business
+The SAT service runs as a configurable Celery Beat heartbeat during business
 hours.  It consolidates agent availability polling and introduces:
 
 - Per-agent online/away time accumulation
-- Faster status detection (20s vs. previous 3-minute polling)
+- Fast status detection (30s by default vs. previous 3-minute polling)
 - On-demand load reconciliation with HubSpot ticket counts
 - Daily time log snapshots for productivity metrics
 
@@ -55,6 +55,23 @@ _SAT_AGENT_UPDATE_FIELDS = (
     "remote_out_of_office_hours",
     "remote_working_hours",
     "remote_timezone",
+    "status_enum",
+    "last_status_change_at",
+    "online_time_seconds_today",
+    "away_time_seconds_today",
+)
+
+_SAT_OFF_HOURS_UPDATE_FIELDS = (
+    "availability_revision",
+    "availability_fencing_token",
+    "availability_writer_id",
+    "availability_online_since",
+    "availability_sample_count",
+    "eligibility_state",
+    "eligibility_reason",
+    "eligibility_evaluated_at",
+    "sat_last_heartbeat_at",
+    "updated_at",
     "status_enum",
     "last_status_change_at",
     "online_time_seconds_today",
@@ -157,6 +174,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                 .exclude(hubspot_owner_id__isnull=True)
                 .order_by("id")
             )
+            agents_to_update = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -189,6 +207,12 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                     agent.is_active,
                 )
                 material_state_changed = new_material_state != old_material_state
+                heartbeat_refresh_due = agent.sat_last_heartbeat_at is None or (
+                    now - agent.sat_last_heartbeat_at
+                ).total_seconds() >= int(settings.SAT_OFF_HOURS_REFRESH_SECONDS)
+                runtime_cleanup_required = (
+                    agent.availability_online_since is not None or agent.availability_sample_count != 0
+                )
                 if material_state_changed:
                     agent.availability_revision += 1
                 agent.availability_fencing_token = fencing_token
@@ -220,7 +244,8 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                         },
                     )
 
-                agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
+                if material_state_changed or heartbeat_refresh_due or runtime_cleanup_required:
+                    agents_to_update.append(agent)
                 if material_state_changed:
                     AgentAvailabilityDecision.objects.create(
                         agent=agent,
@@ -239,6 +264,12 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                         runtime_environment=environment,
                         fencing_token=fencing_token,
                     )
+            if agents_to_update:
+                Agent.objects.bulk_update(
+                    agents_to_update,
+                    _SAT_OFF_HOURS_UPDATE_FIELDS,
+                    batch_size=50,
+                )
     finally:
         if not _release_reconciliation_lease(lease_token):
             logger.warning(
@@ -313,7 +344,8 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
             "agents_came_online": 0,
             "skipped_non_authoritative_runtime": True,
         }
-    if not is_business_hours():
+    within_business_hours = is_business_hours()
+    if not within_business_hours:
         return _materialize_off_hours_availability(task_id=task_id)
 
     lease = _acquire_reconciliation_lease()
@@ -361,6 +393,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 .exclude(hubspot_owner_id__isnull=True)
                 .order_by("id")
             )
+            agents_to_update = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -416,7 +449,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                         decision = evaluate_observation_signals(
                             observation,
                             now,
-                            within_working_hours=is_business_hours(now),
+                            within_working_hours=within_business_hours,
                         )
                     except AvailabilityParseError:
                         decision = EligibilityDecision(False, EligibilityReason.MALFORMED_REMOTE_DATA)
@@ -511,7 +544,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 # The SAT owns availability fields only. A full model save can
                 # rewrite legacy timestamp-without-time-zone columns such as
                 # last_assignment_at and corrupt the fair-queue ordering.
-                agent.save(update_fields=_SAT_AGENT_UPDATE_FIELDS)
+                agents_to_update.append(agent)
                 if material_state_changed:
                     AgentAvailabilityDecision.objects.create(
                         agent=agent,
@@ -528,6 +561,13 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                         runtime_environment=environment,
                         fencing_token=fencing_token,
                     )
+
+            if agents_to_update:
+                Agent.objects.bulk_update(
+                    agents_to_update,
+                    _SAT_AGENT_UPDATE_FIELDS,
+                    batch_size=50,
+                )
 
             if agents_came_online:
                 from apps.support.tasks import task_matchmaker_drain_queue

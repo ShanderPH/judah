@@ -6,6 +6,7 @@ from uuid import UUID
 
 import structlog
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from apps.support.models import Ticket
@@ -23,7 +24,7 @@ def get_ticket(ticket_id: UUID | str) -> Ticket:
     """
     try:
         return Ticket.objects.get(pk=ticket_id)
-    except (Ticket.DoesNotExist, ValueError, DjangoValidationError):
+    except Ticket.DoesNotExist, ValueError, DjangoValidationError:
         try:
             return Ticket.objects.get(ticket_id=str(ticket_id))
         except Ticket.DoesNotExist as err:
@@ -34,7 +35,7 @@ def list_tickets(
     status: str | None = None,
     church: str | None = None,
     priority: str | None = None,
-) -> list[Ticket]:
+) -> QuerySet[Ticket]:
     """Return tickets filtered by optional status, church, and priority."""
     qs = Ticket.objects.all()
     if status:
@@ -43,7 +44,7 @@ def list_tickets(
         qs = qs.filter(ticket_church=church)
     if priority:
         qs = qs.filter(priority=priority)
-    return list(qs.order_by("-created_at"))
+    return qs.order_by("-created_at")
 
 
 def create_ticket(payload: CreateTicketRequest) -> Ticket:

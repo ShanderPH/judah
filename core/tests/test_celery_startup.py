@@ -2,9 +2,20 @@
 
 from unittest.mock import patch
 
+from django.conf import settings
 from django.test import override_settings
 
 from core.celery import on_worker_ready
+
+
+def test_sat_and_database_scheduler_polling_are_bounded() -> None:
+    heartbeat = settings.CELERY_BEAT_SCHEDULE["sat-heartbeat"]
+
+    assert heartbeat["schedule"] == settings.SAT_HEARTBEAT_INTERVAL_SECONDS
+    assert heartbeat["options"]["expires"] == settings.SAT_HEARTBEAT_INTERVAL_SECONDS
+    assert settings.SAT_HEARTBEAT_INTERVAL_SECONDS >= 20
+    assert settings.SAT_OFF_HOURS_REFRESH_SECONDS >= settings.SAT_HEARTBEAT_INTERVAL_SECONDS
+    assert settings.CELERY_BEAT_MAX_LOOP_INTERVAL > 0
 
 
 @override_settings(NOVO_STAGE_SYNC_ENABLED=False)

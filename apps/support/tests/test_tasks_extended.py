@@ -130,7 +130,23 @@ def test_availability_reconciliation_error_is_cataloged() -> None:
     assert failure_log.kwargs["ticket_id"] == "ticket-provider-error"
 
 
+@pytest.mark.django_db
 def test_matchmaker_drain_task_paths() -> None:
+    with patch("apps.support.agent_sync_service.is_business_hours") as business_hours:
+        assert task_matchmaker_drain_queue.run() == {
+            "assigned": 0,
+            "remaining": 0,
+            "total_pending": 0,
+            "quarantined": 0,
+            "deferred": 0,
+        }
+    business_hours.assert_not_called()
+
+    NewConversation.objects.create(
+        hubspot_ticket_id="drain-task-pending",
+        entered_queue_at=timezone.now(),
+        automatic_assignment_eligible=True,
+    )
     with patch("apps.support.agent_sync_service.is_business_hours", return_value=False):
         assert task_matchmaker_drain_queue.run() == {"skipped_off_hours": True}
 

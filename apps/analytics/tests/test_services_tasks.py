@@ -20,7 +20,7 @@ def test_daily_report_queries_and_recent_ordering() -> None:
 
     assert get_daily_report(newer.date) == newer
     assert get_daily_report(date(2020, 1, 1)) is None
-    recent = get_recent_reports(days=10)
+    recent = list(get_recent_reports(days=10))
     assert recent == [newer, older]
     assert outside_window not in recent
 

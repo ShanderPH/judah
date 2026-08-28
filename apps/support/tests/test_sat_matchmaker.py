@@ -85,6 +85,7 @@ class TestSATHeartbeat:
 
         assert result["status_changes"] == 1
         assert result["agents_came_online"] == 1
+        mock_bh.assert_called_once()
 
         agent.refresh_from_db()
         assert agent.status_enum == "online"

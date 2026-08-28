@@ -3,7 +3,7 @@
 Tasks are organized into three groups:
 
 **SAT (Smart Agent Tracking):**
-  - ``task_sat_heartbeat`` — 20-second status sync heartbeat
+  - ``task_sat_heartbeat`` — configurable status sync heartbeat
   - ``task_sat_reset_daily_counters`` — midnight daily counter snapshot
 
 **Matchmaker (Async Assignment):**
@@ -49,7 +49,7 @@ logger = structlog.get_logger(__name__)
     name="support.task_sat_heartbeat",
 )
 def task_sat_heartbeat(self) -> dict:
-    """SAT heartbeat — sync agent availability from HubSpot every 20 seconds.
+    """SAT heartbeat — periodically sync agent availability from HubSpot.
 
     Skips execution during off-hours (returns immediately with no API calls).
     When agents transition to ONLINE, dispatches Matchmaker drain.
@@ -228,6 +228,29 @@ def task_matchmaker_drain_queue() -> dict:
     """
     from apps.support.agent_sync_service import is_business_hours
     from apps.support.matchmaker_service import matchmaker_drain_queue
+    from apps.support.models import NewConversation
+
+    # The safety-net task usually finds an empty queue. Read only one scalar
+    # before loading calendar rules and agent eligibility for that common case.
+    pending_id = (
+        NewConversation.objects.filter(
+            automatic_assignment_eligible=True,
+            queue_status__in=(
+                NewConversation.QueueStatus.PENDING,
+                NewConversation.QueueStatus.QUEUED,
+            ),
+        )
+        .values_list("pk", flat=True)
+        .first()
+    )
+    if pending_id is None:
+        return {
+            "assigned": 0,
+            "remaining": 0,
+            "total_pending": 0,
+            "quarantined": 0,
+            "deferred": 0,
+        }
 
     if not is_business_hours():
         return {"skipped_off_hours": True}

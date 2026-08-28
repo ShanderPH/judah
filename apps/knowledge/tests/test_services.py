@@ -16,33 +16,27 @@ def _published_status():
 
 def test_article_lookup_and_listing() -> None:
     article = SimpleNamespace()
-    get_qs = Mock()
-    get_qs.get.return_value = article
     list_qs = Mock()
-    selected_qs = Mock()
     filtered_qs = Mock()
     filtered_qs.order_by.return_value = [article]
-    list_qs.select_related.return_value = selected_qs
-    selected_qs.filter.return_value = filtered_qs
+    list_qs.filter.return_value = filtered_qs
 
     with (
         _published_status(),
-        patch("apps.knowledge.services.Article.objects.select_related", return_value=get_qs),
+        patch("apps.knowledge.services.Article.objects.get", return_value=article) as get,
         patch("apps.knowledge.services.Article.objects.filter", return_value=list_qs),
     ):
         assert get_article_by_slug("login") is article
-        assert list_published_articles("financeiro") == [article]
+        assert list(list_published_articles("financeiro")) == [article]
 
-    get_qs.get.assert_called_once_with(slug="login", status="PUBLISHED")
-    selected_qs.filter.assert_called_once_with(category__slug="financeiro")
+    get.assert_called_once_with(slug="login", status="PUBLISHED")
+    list_qs.filter.assert_called_once_with(category__slug="financeiro")
 
 
 def test_article_lookup_maps_not_found() -> None:
-    queryset = Mock()
-    queryset.get.side_effect = Article.DoesNotExist
     with (
         _published_status(),
-        patch("apps.knowledge.services.Article.objects.select_related", return_value=queryset),
+        patch("apps.knowledge.services.Article.objects.get", side_effect=Article.DoesNotExist),
         pytest.raises(NotFoundError),
     ):
         get_article_by_slug("missing")

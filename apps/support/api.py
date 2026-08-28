@@ -52,14 +52,12 @@ def get_helpdesk_calendar(
     view: str = "month",
 ) -> dict:
     """Return effective occurrences for a bounded local-date window."""
-    from apps.support.helpdesk_calendar.service import resolve_range, serialize_rule
+    from apps.support.helpdesk_calendar.service import get_active_rules, resolve_range, serialize_rule
 
     if view not in {"month", "week"}:
         raise ValueError("view must be month or week")
     schedule, occurrences, degraded = resolve_range(from_, to)
-    rules = (
-        schedule.rules.filter(is_active=True).prefetch_related("intervals", "absence_message") if schedule.pk else []
-    )
+    rules = get_active_rules(schedule)
     return {
         "timezone": schedule.timezone_name,
         "version": schedule.version,
@@ -80,7 +78,7 @@ def list_helpdesk_calendar_rules(request, active: bool = True) -> list[dict]:
     schedule = get_schedule()
     if not schedule.pk:
         return []
-    rules = schedule.rules.filter(is_active=active).prefetch_related("intervals", "absence_message")
+    rules = schedule.rules.filter(is_active=active).select_related("absence_message").prefetch_related("intervals")
     return [serialize_rule(rule) for rule in rules]
 
 
@@ -264,7 +262,7 @@ def list_assigned_conversations(
     """
     from apps.support.models import AssignedConversation
 
-    qs = AssignedConversation.objects.select_related("agent").order_by("-assigned_at")
+    qs = AssignedConversation.objects.order_by("-assigned_at")
     if agent_owner_id is not None:
         qs = qs.filter(hubspot_owner_id=agent_owner_id)
     if closed is True:

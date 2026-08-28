@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Avg, Count, Q, Sum
 from django.utils import timezone
 from ninja import Router
 
@@ -267,28 +267,31 @@ def list_all_agent_metrics(
 @require_manager_or_admin
 def agent_metrics_summary(request, days: int = 30) -> dict:
     """Aggregate the most recent snapshots into a single dashboard payload."""
-    cutoff = timezone.now() - timedelta(days=min(days, 365))
-    rows = list(AgentMetrics.objects.filter(last_time_updated__gte=cutoff))
+    period_days = min(days, 365)
+    cutoff = timezone.now() - timedelta(days=period_days)
+    summary = AgentMetrics.objects.filter(last_time_updated__gte=cutoff).aggregate(
+        total_agents_with_data=Count("agent_id", distinct=True),
+        total_chats=Sum("total_chats"),
+        total_chats_closed=Sum("chats_closed"),
+        # Preserve the previous contract, which excluded zero handle times.
+        avg_handle_time_min=Avg("average_ticket_time_min", filter=~Q(average_ticket_time_min=0)),
+        avg_first_response_min=Avg("first_response_time_avg_min"),
+        avg_resolution_rate=Avg("resolution_rate"),
+        avg_csat=Avg("customer_satisfaction_avg"),
+    )
 
-    total_chats = sum(r.total_chats for r in rows)
-    chats_closed = sum(r.chats_closed for r in rows)
-    handle_times = [float(r.average_ticket_time_min) for r in rows if r.average_ticket_time_min]
-    first_responses = [float(r.first_response_time_avg_min) for r in rows if r.first_response_time_avg_min is not None]
-    resolution_rates = [float(r.resolution_rate) for r in rows if r.resolution_rate is not None]
-    csats = [float(r.customer_satisfaction_avg) for r in rows if r.customer_satisfaction_avg is not None]
-
-    def _avg(values: list[float]) -> float:
-        return round(sum(values) / len(values), 2) if values else 0.0
+    def _rounded(value: object) -> float:
+        return round(float(value), 2) if value is not None else 0.0
 
     return {
-        "period_days": min(days, 365),
-        "total_agents_with_data": len({r.agent_id for r in rows}),
-        "total_chats": total_chats,
-        "total_chats_closed": chats_closed,
-        "avg_handle_time_min": _avg(handle_times),
-        "avg_first_response_min": _avg(first_responses),
-        "avg_resolution_rate": _avg(resolution_rates),
-        "avg_csat": _avg(csats),
+        "period_days": period_days,
+        "total_agents_with_data": summary["total_agents_with_data"],
+        "total_chats": summary["total_chats"] or 0,
+        "total_chats_closed": summary["total_chats_closed"] or 0,
+        "avg_handle_time_min": _rounded(summary["avg_handle_time_min"]),
+        "avg_first_response_min": _rounded(summary["avg_first_response_min"]),
+        "avg_resolution_rate": _rounded(summary["avg_resolution_rate"]),
+        "avg_csat": _rounded(summary["avg_csat"]),
     }
 
 

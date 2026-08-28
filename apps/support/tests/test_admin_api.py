@@ -121,7 +121,7 @@ def test_agent_update_inactivate_reactivate_and_validation() -> None:
 
 
 @pytest.mark.django_db
-def test_metrics_time_logs_and_reassignment_queries() -> None:
+def test_metrics_time_logs_and_reassignment_queries(django_assert_num_queries) -> None:
     request = _request()
     first = _agent("Ana", "ana@example.com", 10)
     second = _agent("Bia", "bia@example.com", 11)
@@ -163,7 +163,8 @@ def test_metrics_time_logs_and_reassignment_queries() -> None:
 
     assert len(list(_call(admin_api.list_agent_metrics, request, str(first.pk)))) == 1
     assert len(list(_call(admin_api.list_all_agent_metrics, request, days=999))) == 2
-    summary = _call(admin_api.agent_metrics_summary, request, days=30)
+    with django_assert_num_queries(1):
+        summary = _call(admin_api.agent_metrics_summary, request, days=30)
     assert summary["total_chats"] == 8
     assert summary["total_chats_closed"] == 6
     assert summary["avg_handle_time_min"] == 15.0

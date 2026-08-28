@@ -263,24 +263,16 @@ class TestAuthoritativeReconciliation:
         Agent.objects.filter(pk=agent.pk).update(last_assignment_at=assigned_at)
         mock_client_fn.return_value.get_all_owners_availability.return_value = [_hubspot_user()]
 
-        original_save = Agent.save
-        observed_update_fields: list[set[str] | None] = []
-
-        def save_with_capture(instance: Agent, *args, **kwargs) -> None:
-            update_fields = kwargs.get("update_fields")
-            observed_update_fields.append(set(update_fields) if update_fields is not None else None)
-            original_save(instance, *args, **kwargs)
-
         from apps.support.sat_service import sat_heartbeat
 
-        with patch.object(Agent, "save", new=save_with_capture):
+        with patch.object(Agent.objects, "bulk_update", wraps=Agent.objects.bulk_update) as bulk_update:
             sat_heartbeat(task_id="preserve-assignment-clock")
 
         agent.refresh_from_db()
         assert agent.last_assignment_at == assigned_at
-        assert observed_update_fields
-        assert all(fields is not None for fields in observed_update_fields)
-        assert all("last_assignment_at" not in fields for fields in observed_update_fields if fields is not None)
+        bulk_update.assert_called_once()
+        update_fields = set(bulk_update.call_args.args[1])
+        assert "last_assignment_at" not in update_fields
 
     @patch("apps.support.sat_service.is_business_hours", return_value=False)
     @patch("apps.integrations.hubspot.client.get_hubspot_client")
@@ -305,6 +297,32 @@ class TestAuthoritativeReconciliation:
         assert agent.availability_online_since is None
         assert agent.availability_sample_count == 0
         mock_client_fn.assert_not_called()
+
+    @override_settings(SAT_OFF_HOURS_REFRESH_SECONDS=300)
+    @patch("apps.support.sat_service.is_business_hours", return_value=False)
+    def test_unchanged_off_hours_state_is_not_rewritten_every_cycle(
+        self,
+        _mock_business_hours: MagicMock,
+    ) -> None:
+        agent = _agent(status="away")
+        heartbeat_at = timezone.now()
+        Agent.objects.filter(pk=agent.pk).update(
+            eligibility_state="ineligible",
+            eligibility_reason="outside_working_hours",
+            availability_online_since=None,
+            availability_sample_count=0,
+            sat_last_heartbeat_at=heartbeat_at,
+        )
+
+        from apps.support.sat_service import sat_heartbeat
+
+        with patch.object(Agent.objects, "bulk_update", wraps=Agent.objects.bulk_update) as bulk_update:
+            result = sat_heartbeat(task_id="unchanged-off-hours")
+
+        assert result["off_hours_materialized"] is True
+        bulk_update.assert_not_called()
+        agent.refresh_from_db()
+        assert agent.sat_last_heartbeat_at == heartbeat_at
 
 
 @pytest.mark.django_db
