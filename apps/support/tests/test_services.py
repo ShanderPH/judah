@@ -29,7 +29,7 @@ def test_ticket_create_get_list_and_update() -> None:
 
     assert get_ticket(ticket.pk) == ticket
     assert get_ticket("EXT-1") == ticket
-    assert list_tickets(status="open", church="Igreja", priority="high") == [ticket]
+    assert list(list_tickets(status="open", church="Igreja", priority="high")) == [ticket]
 
     updated = update_ticket(
         ticket.pk,

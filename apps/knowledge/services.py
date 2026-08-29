@@ -1,6 +1,7 @@
 """Business logic for knowledge base — CRUD and semantic search."""
 
 import structlog
+from django.db.models import QuerySet
 
 from apps.knowledge.models import Article
 from apps.knowledge.schemas import SearchResultItem
@@ -16,17 +17,17 @@ def get_article_by_slug(slug: str) -> Article:
         NotFoundError: If no published article with that slug exists.
     """
     try:
-        return Article.objects.select_related("category").get(slug=slug, status=Article.Status.PUBLISHED)
+        return Article.objects.get(slug=slug, status=Article.Status.PUBLISHED)
     except Article.DoesNotExist as err:
         raise NotFoundError(f"Article '{slug}' not found.") from err
 
 
-def list_published_articles(category_slug: str | None = None) -> list[Article]:
+def list_published_articles(category_slug: str | None = None) -> QuerySet[Article]:
     """Return published articles, optionally filtered by category."""
-    qs = Article.objects.filter(status=Article.Status.PUBLISHED).select_related("category")
+    qs = Article.objects.filter(status=Article.Status.PUBLISHED)
     if category_slug:
         qs = qs.filter(category__slug=category_slug)
-    return list(qs.order_by("-updated_at"))
+    return qs.order_by("-updated_at")
 
 
 def semantic_search(query: str, top_k: int = 5, category_slug: str | None = None) -> list[SearchResultItem]:

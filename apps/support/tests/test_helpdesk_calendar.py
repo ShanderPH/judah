@@ -5,7 +5,8 @@ from importlib import import_module
 
 import pytest
 from django.apps import apps as django_apps
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
+from django.test.utils import CaptureQueriesContext
 
 from apps.support.helpdesk_calendar.service import (
     deactivate_rule,
@@ -63,6 +64,18 @@ def test_range_uses_legacy_fallback_when_no_rules_exist() -> None:
     assert degraded is False
     assert len(occurrences) == 7
     assert occurrences[0]["state"] == "OPEN"
+
+
+@pytest.mark.django_db
+def test_range_query_count_is_constant_across_month() -> None:
+    """A longer range must reuse calendar and legacy fallback rows."""
+    HelpdeskSchedule.objects.all().delete()
+    with CaptureQueriesContext(connection) as captured:
+        _, occurrences, degraded = resolve_range(date(2026, 8, 1), date(2026, 8, 31))
+
+    assert degraded is False
+    assert len(occurrences) == 31
+    assert len(captured) <= 4
 
 
 @pytest.mark.django_db

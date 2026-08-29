@@ -175,6 +175,9 @@ CELERY_BROKER_POOL_LIMIT = config("CELERY_BROKER_POOL_LIMIT", default=2, cast=in
 CELERY_REDIS_MAX_CONNECTIONS = config("CELERY_REDIS_MAX_CONNECTIONS", default=4, cast=int)
 CELERY_TIMEZONE = "America/Sao_Paulo"
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Bound database-scheduler wakeups while retaining prompt propagation of
+# administrative schedule changes.
+CELERY_BEAT_MAX_LOOP_INTERVAL = config("CELERY_BEAT_MAX_LOOP_INTERVAL", default=15, cast=int)
 CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_SOFT_TIME_LIMIT = 300
 CELERY_TASK_TIME_LIMIT = 600
@@ -233,6 +236,14 @@ AVAILABILITY_FRESHNESS_SECONDS = config("AVAILABILITY_FRESHNESS_SECONDS", defaul
 AVAILABILITY_STABLE_SECONDS = config("AVAILABILITY_STABLE_SECONDS", default=30, cast=int)
 AVAILABILITY_REQUIRED_SAMPLES = config("AVAILABILITY_REQUIRED_SAMPLES", default=2, cast=int)
 AVAILABILITY_LEASE_TTL_SECONDS = config("AVAILABILITY_LEASE_TTL_SECONDS", default=25, cast=int)
+SAT_HEARTBEAT_INTERVAL_SECONDS = max(
+    20,
+    config("SAT_HEARTBEAT_INTERVAL_SECONDS", default=30, cast=int),
+)
+SAT_OFF_HOURS_REFRESH_SECONDS = max(
+    SAT_HEARTBEAT_INTERVAL_SECONDS,
+    config("SAT_OFF_HOURS_REFRESH_SECONDS", default=300, cast=int),
+)
 ASSIGNMENT_CLAIM_TTL_SECONDS = config("ASSIGNMENT_CLAIM_TTL_SECONDS", default=90, cast=int)
 ASSIGNMENT_STUCK_AFTER_SECONDS = config("ASSIGNMENT_STUCK_AFTER_SECONDS", default=120, cast=int)
 
@@ -249,11 +260,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "support.task_aggregate_queue_metrics",
         "schedule": crontab(hour=0, minute=5),
     },
-    # SAT heartbeat — sync agent availability every 20 seconds (skips off-hours)
+    # SAT heartbeat — 30 seconds by default, configurable down to 20 seconds.
     "sat-heartbeat": {
         "task": "support.task_sat_heartbeat",
-        "schedule": 20,  # seconds
-        "options": {"expires": 20},
+        "schedule": SAT_HEARTBEAT_INTERVAL_SECONDS,
+        "options": {"expires": SAT_HEARTBEAT_INTERVAL_SECONDS},
     },
     # SAT daily counter reset at midnight
     "sat-reset-daily-counters": {

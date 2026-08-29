@@ -3,6 +3,7 @@
 from datetime import date, timedelta
 
 import structlog
+from django.db.models import QuerySet
 
 from apps.analytics.models import DailyReport
 
@@ -24,7 +25,7 @@ def get_daily_report(report_date: date) -> DailyReport | None:
         return None
 
 
-def get_recent_reports(days: int = 30) -> list[DailyReport]:
+def get_recent_reports(days: int = 30) -> QuerySet[DailyReport]:
     """Return the most recent N days of daily reports.
 
     Args:
@@ -34,7 +35,7 @@ def get_recent_reports(days: int = 30) -> list[DailyReport]:
         List of DailyReport instances ordered by date descending.
     """
     start_date = date.today() - timedelta(days=days)
-    return list(DailyReport.objects.filter(date__gte=start_date).order_by("-date"))
+    return DailyReport.objects.filter(date__gte=start_date).order_by("-date")
 
 
 def compute_daily_report(report_date: date) -> DailyReport:

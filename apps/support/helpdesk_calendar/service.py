@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -24,6 +25,29 @@ from common.exceptions import ConflictError, NotFoundError, ValidationError
 DEFAULT_TIMEZONE = "America/Sao_Paulo"
 
 
+@dataclass(slots=True)
+class _LegacyResolutionContext:
+    """Lazily load legacy calendar rows once for a bounded resolution cycle."""
+
+    start: date
+    end: date
+    loaded: bool = False
+    specials_by_date: dict[date, Any] = field(default_factory=dict)
+    business_hours_config: BusinessHoursConfig | None = None
+
+    def load(self) -> None:
+        """Load legacy fallbacks only if a native rule does not match."""
+        if self.loaded:
+            return
+        from apps.support.models import SpecialSchedule
+
+        self.specials_by_date = {
+            item.date: item for item in SpecialSchedule.objects.filter(date__range=(self.start, self.end))
+        }
+        self.business_hours_config = BusinessHoursConfig.objects.filter(is_active=True).first()
+        self.loaded = True
+
+
 def _tz(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
@@ -41,6 +65,25 @@ def get_schedule(*, create: bool = False) -> HelpdeskSchedule:
     # UUID defaults are assigned at construction time; force ``id=None`` so
     # callers can reliably distinguish this read-only fallback from persistence.
     return HelpdeskSchedule(id=None, timezone_name=DEFAULT_TIMEZONE)
+
+
+def get_active_rules(schedule: HelpdeskSchedule) -> list[HelpdeskScheduleRule]:
+    """Return active rules with all relations needed by calendar resolution.
+
+    The cache lives only on the schedule instance, so one request or heartbeat
+    cycle cannot repeatedly fetch the same rules and intervals.
+    """
+    cached = getattr(schedule, "_active_rules_cache", None)
+    if cached is not None:
+        return cached
+    if not schedule.pk:
+        rules: list[HelpdeskScheduleRule] = []
+    else:
+        rules = list(
+            schedule.rules.filter(is_active=True).select_related("absence_message").prefetch_related("intervals")
+        )
+    schedule._active_rules_cache = rules
+    return rules
 
 
 def _rule_matches(rule: HelpdeskScheduleRule, day: date) -> bool:
@@ -69,12 +112,22 @@ def _intervals_for(rule: HelpdeskScheduleRule, day: date) -> list[dict[str, str]
     return [{"start": item.start.strftime("%H:%M"), "end": item.end.strftime("%H:%M")} for item in selected]
 
 
-def _legacy_resolution(day: date) -> tuple[list[dict[str, str]], str | None]:
+def _legacy_resolution(
+    day: date,
+    *,
+    context: _LegacyResolutionContext | None = None,
+) -> tuple[list[dict[str, str]], str | None]:
     """Resolve the legacy tables while the native calendar is rolling out."""
     from apps.ai_agents.utils.business_rules import HOLIDAYS, WEEKLY_BUSINESS_HOURS
     from apps.support.models import SpecialSchedule
 
-    special = SpecialSchedule.objects.filter(date=day).first()
+    if context is None:
+        special = SpecialSchedule.objects.filter(date=day).first()
+        config = BusinessHoursConfig.objects.filter(is_active=True).first()
+    else:
+        context.load()
+        special = context.specials_by_date.get(day)
+        config = context.business_hours_config
     if special:
         if special.schedule_type == SpecialSchedule.ScheduleType.CLOSED:
             return [], special.reason or "special_schedule_closed"
@@ -88,7 +141,6 @@ def _legacy_resolution(day: date) -> tuple[list[dict[str, str]], str | None]:
     if day in HOLIDAYS:
         return [], f"holiday:{HOLIDAYS[day]}"
 
-    config = BusinessHoursConfig.objects.filter(is_active=True).first()
     configured = config.get_hours_for_weekday(day.weekday()) if config else None
     if configured:
         start, end = time(configured[0]), time(configured[1])
@@ -118,31 +170,34 @@ def _plain_message(markdown: str) -> str:
     return value.strip()
 
 
-def resolve_day(day: date, *, schedule: HelpdeskSchedule | None = None) -> dict[str, Any]:
+def resolve_day(
+    day: date,
+    *,
+    schedule: HelpdeskSchedule | None = None,
+    rules: list[HelpdeskScheduleRule] | None = None,
+    legacy_context: _LegacyResolutionContext | None = None,
+) -> dict[str, Any]:
     """Resolve one local calendar date using absence then priority precedence."""
     current = schedule or get_schedule()
-    rules = (
-        list(current.rules.filter(is_active=True).prefetch_related("intervals", "absence_message"))
-        if current.pk
-        else []
-    )
-    matching = [rule for rule in rules if _rule_matches(rule, day)]
+    active_rules = rules if rules is not None else get_active_rules(current)
+    matching = [rule for rule in active_rules if _rule_matches(rule, day)]
     absences = [rule for rule in matching if rule.rule_type == HelpdeskScheduleRule.RuleType.ABSENCE]
     chosen = sorted(absences or matching, key=lambda item: (-item.priority, str(item.id)))
     if chosen:
         rule = chosen[0]
         message = getattr(getattr(rule, "absence_message", None), "rich_text", None)
+        intervals = [] if rule.rule_type == HelpdeskScheduleRule.RuleType.ABSENCE else _intervals_for(rule, day)
         return {
             "date": day,
-            "state": "ABSENCE" if rule.rule_type == "absence" else ("OPEN" if _intervals_for(rule, day) else "CLOSED"),
-            "intervals": [] if rule.rule_type == "absence" else _intervals_for(rule, day),
+            "state": "ABSENCE" if rule.rule_type == "absence" else ("OPEN" if intervals else "CLOSED"),
+            "intervals": intervals,
             "reason": rule.name,
             "message": message,
             "source_rule_id": rule.id,
             "source_rule_name": rule.name,
             "priority": rule.priority,
         }
-    intervals, reason = _legacy_resolution(day)
+    intervals, reason = _legacy_resolution(day, context=legacy_context)
     return {
         "date": day,
         "state": "OPEN" if intervals else "CLOSED",
@@ -162,10 +217,17 @@ def resolve_range(start: date, end: date) -> tuple[HelpdeskSchedule, list[dict[s
     schedule = get_schedule()
     try:
         _tz(schedule.timezone_name)
+        rules = get_active_rules(schedule)
+        legacy_context = _LegacyResolutionContext(start=start, end=end)
         return (
             schedule,
             [
-                resolve_day(start + timedelta(days=offset), schedule=schedule)
+                resolve_day(
+                    start + timedelta(days=offset),
+                    schedule=schedule,
+                    rules=rules,
+                    legacy_context=legacy_context,
+                )
                 for offset in range((end - start).days + 1)
             ],
             False,
