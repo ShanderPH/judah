@@ -12,7 +12,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from apps.webhooks.models import OutboxEvent, WebhookEvent
-from apps.webhooks.n8n_inbound import ingest_hubspot_message
+from apps.webhooks.n8n_inbound import ingest_hubspot_message, record_hubspot_message_envelope
 from apps.webhooks.n8n_outbox import claim_outbox_event
 
 pytestmark = [
@@ -54,6 +54,98 @@ def test_equal_messages_from_two_workers_create_one_outbox() -> None:
         event_ids = list(executor.map(ingest, ["webhook", "reconciliation"]))
 
     assert event_ids[0] == event_ids[1]
+    assert WebhookEvent.objects.count() == 1
+    assert OutboxEvent.objects.count() == 1
+
+
+@override_settings(N8N_BOT_MAX_DELIVERY_ATTEMPTS=3)
+def test_two_hydrations_of_one_envelope_create_one_outbox() -> None:
+    first = record_hubspot_message_envelope(
+        {
+            "portalId": "portal-1",
+            "objectId": "thread-hydration",
+            "messageId": "message-hydration",
+            "eventId": "provider-1",
+        }
+    )
+    barrier = Barrier(2)
+    thread = {"id": "thread-hydration", "status": "OPEN"}
+    message = {
+        "id": "message-hydration",
+        "type": "MESSAGE",
+        "direction": "INCOMING",
+        "text": "hello",
+        "createdAt": "2026-08-22T15:00:00Z",
+        "senders": [{"actorId": "V-1"}],
+    }
+
+    def hydrate(_index: int) -> str:
+        close_old_connections()
+        barrier.wait()
+        try:
+            return ingest_hubspot_message(
+                portal_id="portal-1",
+                thread=thread,
+                message=message,
+                delivery_method="webhook",
+                existing_event_id=first.event_id,
+            ).event_id
+        finally:
+            close_old_connections()
+
+    with (
+        patch("apps.webhooks.tasks.dispatch_n8n_outbox_event_task.delay"),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        event_ids = list(executor.map(hydrate, [1, 2]))
+
+    assert event_ids == [first.event_id, first.event_id]
+    assert WebhookEvent.objects.count() == 1
+    assert OutboxEvent.objects.count() == 1
+
+
+@override_settings(N8N_BOT_MAX_DELIVERY_ATTEMPTS=3)
+def test_hydration_and_reconciliation_converge_on_existing_envelope() -> None:
+    first = record_hubspot_message_envelope(
+        {
+            "portalId": "portal-1",
+            "objectId": "thread-race",
+            "messageId": "message-race",
+            "eventId": "provider-1",
+        }
+    )
+    barrier = Barrier(2)
+    thread = {"id": "thread-race", "status": "OPEN"}
+    message = {
+        "id": "message-race",
+        "type": "MESSAGE",
+        "direction": "INCOMING",
+        "text": "hello",
+        "createdAt": "2026-08-22T15:00:00Z",
+        "senders": [{"actorId": "V-1"}],
+    }
+
+    def ingest(existing_event_id: str | None) -> str:
+        close_old_connections()
+        barrier.wait()
+        try:
+            return ingest_hubspot_message(
+                portal_id="portal-1",
+                thread=thread,
+                message=message,
+                delivery_method="webhook" if existing_event_id else "reconciliation",
+                existing_event_id=existing_event_id,
+            ).event_id
+        finally:
+            close_old_connections()
+
+    with (
+        patch("apps.webhooks.tasks.dispatch_n8n_outbox_event_task.delay"),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        event_ids = list(executor.map(ingest, [first.event_id, None]))
+
+    assert event_ids == [first.event_id, first.event_id]
     assert WebhookEvent.objects.count() == 1
     assert OutboxEvent.objects.count() == 1
 

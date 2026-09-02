@@ -5,7 +5,9 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 
 from apps.webhooks.models import OutboxEvent, WebhookEvent
 from apps.webhooks.n8n_inbound import (
@@ -66,6 +68,7 @@ def test_webhook_and_reconciliation_converge_to_one_ledger_and_outbox() -> None:
             message=_message(),
             delivery_method="webhook",
             raw_payload=envelope,
+            existing_event_id=first.event_id,
         )
         reconciled = ingest_hubspot_message(
             portal_id="47354717",
@@ -85,6 +88,115 @@ def test_webhook_and_reconciliation_converge_to_one_ledger_and_outbox() -> None:
     assert payload["data"]["metadata"]["idempotency_key"] == OutboxEvent.objects.get().idempotency_key
     assert "triage" not in payload["data"]
     assert "customer_identity" not in payload["data"]
+
+
+@pytest.mark.django_db
+@override_settings(N8N_BOT_MAX_DELIVERY_ATTEMPTS=8)
+def test_existing_envelope_hydration_does_not_insert_another_ledger_row() -> None:
+    envelope = {
+        "portalId": "47354717",
+        "objectId": "thread-1",
+        "messageId": "message-1",
+        "eventId": "event-1",
+    }
+    first = record_hubspot_message_envelope(envelope)
+
+    with (
+        patch("apps.webhooks.tasks.dispatch_n8n_outbox_event_task.delay"),
+        CaptureQueriesContext(connection) as queries,
+    ):
+        result = ingest_hubspot_message(
+            portal_id="47354717",
+            thread=_thread(),
+            message=_message(),
+            delivery_method="webhook",
+            raw_payload=envelope,
+            existing_event_id=first.event_id,
+        )
+
+    ledger_inserts = [
+        query["sql"] for query in queries.captured_queries if 'INSERT INTO "webhook_events"' in query["sql"]
+    ]
+    assert ledger_inserts == []
+    assert result.event_id == first.event_id
+    assert WebhookEvent.objects.count() == 1
+    assert OutboxEvent.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_real_webhook_retry_reuses_the_existing_envelope() -> None:
+    envelope = {
+        "portalId": "47354717",
+        "objectId": "thread-1",
+        "messageId": "message-1",
+        "eventId": "event-1",
+    }
+
+    first = record_hubspot_message_envelope(envelope)
+    with CaptureQueriesContext(connection) as queries:
+        retried = record_hubspot_message_envelope(envelope)
+
+    assert retried.event_id == first.event_id
+    assert retried.duplicate is True
+    assert WebhookEvent.objects.count() == 1
+    insert_sql = [query["sql"] for query in queries.captured_queries if "webhook_events" in query["sql"]]
+    expected_conflict_clause = "ON CONFLICT" if connection.vendor == "postgresql" else "INSERT OR IGNORE"
+    assert any(expected_conflict_clause in sql for sql in insert_sql)
+
+
+@pytest.mark.django_db
+@override_settings(N8N_BOT_MAX_DELIVERY_ATTEMPTS=8)
+def test_event_update_rolls_back_when_outbox_creation_fails() -> None:
+    envelope = {
+        "portalId": "47354717",
+        "objectId": "thread-1",
+        "messageId": "message-1",
+        "eventId": "event-1",
+    }
+    first = record_hubspot_message_envelope(envelope)
+
+    with (
+        patch.object(OutboxEvent.objects, "get_or_create", side_effect=RuntimeError("outbox unavailable")),
+        pytest.raises(RuntimeError, match="outbox unavailable"),
+    ):
+        ingest_hubspot_message(
+            portal_id="47354717",
+            thread=_thread(),
+            message=_message(),
+            delivery_method="webhook",
+            raw_payload=envelope,
+            existing_event_id=first.event_id,
+        )
+
+    event = WebhookEvent.objects.get(pk=first.event_id)
+    assert event.processing_status == WebhookEvent.ProcessingStatus.RECEIVED
+    assert event.processed is False
+    assert OutboxEvent.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_hydration_rejects_an_envelope_with_a_different_canonical_key() -> None:
+    first = record_hubspot_message_envelope(
+        {
+            "portalId": "47354717",
+            "objectId": "thread-other",
+            "messageId": "message-other",
+            "eventId": "event-other",
+        }
+    )
+
+    with pytest.raises(ValueError, match="does not match the persisted envelope"):
+        ingest_hubspot_message(
+            portal_id="47354717",
+            thread=_thread(),
+            message=_message(),
+            delivery_method="webhook",
+            existing_event_id=first.event_id,
+        )
+
+    event = WebhookEvent.objects.get(pk=first.event_id)
+    assert event.processing_status == WebhookEvent.ProcessingStatus.RECEIVED
+    assert OutboxEvent.objects.count() == 0
 
 
 @pytest.mark.django_db
