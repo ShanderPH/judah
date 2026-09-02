@@ -14,6 +14,7 @@ import pytest
 from django.db import close_old_connections, connection, transaction
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from pytest_django import DjangoDbBlocker
 
 from apps.support.models import (
     Agent,
@@ -62,7 +63,7 @@ def _enum_values() -> tuple[str, ...]:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def legacy_agent_status_enum(django_db_setup: None, django_db_blocker: pytest.DjangoDbBlocker) -> Iterator[None]:
+def legacy_agent_status_enum(django_db_setup: None, django_db_blocker: DjangoDbBlocker) -> Iterator[None]:
     """Temporarily reproduce the production enum inside a disposable test DB."""
     del django_db_setup
     assert_safe_test_database(os.environ.get("DATABASE_URL", ""))
