@@ -23,6 +23,7 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
     """
     provider_event_id = str(payload.get("eventId", "") or "")
     defaults = {
+        "source": source,
         "object_id": str(payload.get("objectId", "") or payload.get("object_id", "") or ""),
         "property_name": payload.get("propertyName") or payload.get("property_name"),
         "property_value": payload.get("propertyValue") or payload.get("property_value"),
@@ -41,6 +42,10 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
             **defaults,
         },
     )
+    if created and not source.strip():
+        from apps.webhooks.metrics import emit_metric
+
+        emit_metric("webhook_events_empty_source_total")
     logger.info(
         "webhook_event_recorded",
         event_id=event.pk,
