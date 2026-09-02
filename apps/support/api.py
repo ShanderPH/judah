@@ -291,7 +291,7 @@ def get_queue_health(request) -> dict:
     """
     from django.utils import timezone
 
-    from apps.support.assignment_readiness import evaluate_assignment_readiness
+    from apps.support.assignment_readiness import emit_assignment_readiness_metrics, evaluate_assignment_readiness
     from apps.support.models import Agent, AssignmentLog, NewConversation
     from apps.support.queue_service import get_eligible_agents, get_last_assigned_owner_id
 
@@ -368,6 +368,8 @@ def get_queue_health(request) -> dict:
         names = ", ".join(a.name for a in away_with_chats)
         warnings.append(f"Agentes ausentes com chats abertos: {names}")
 
+    readiness = evaluate_assignment_readiness()
+    emit_assignment_readiness_metrics(readiness)
     return {
         "timestamp": now,
         "summary": {
@@ -392,7 +394,7 @@ def get_queue_health(request) -> dict:
         "eligible_agents": [_build_agent(a) for a in eligible_objs],
         "pending_tickets": pending_tickets,
         "last_assignments": last_assignments,
-        "readiness": evaluate_assignment_readiness(),
+        "readiness": readiness,
     }
 
 

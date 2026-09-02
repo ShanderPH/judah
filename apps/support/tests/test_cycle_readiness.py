@@ -8,7 +8,8 @@ PostgreSQL because its pre-existing introspection SQL is PostgreSQL-only.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from django.db import connection
@@ -17,6 +18,7 @@ from django.utils import timezone
 
 from apps.support.assignment_readiness import (
     _conversation_cycle_checks,
+    emit_assignment_readiness_metrics,
     evaluate_assignment_readiness,
 )
 from apps.support.conversation_cycle_service import build_cycle_key
@@ -190,6 +192,72 @@ class TestFullReadinessPath:
         assert "conversation_cycle_legacy_rows" in readiness["reasons"]
         assert "conversation_cycle_dispatch_missing" in readiness["reasons"]
 
+    @override_settings(ASSIGNMENT_STUCK_AFTER_SECONDS=120)
+    def test_all_stale_non_terminal_attempt_states_are_visible_without_ids(self) -> None:
+        agent = _agent()
+        stale_at = timezone.now() - timedelta(minutes=5)
+        expected_states = {
+            AssignmentAttempt.State.RESERVED,
+            AssignmentAttempt.State.EXTERNAL_APPLIED,
+            AssignmentAttempt.State.COMPENSATING,
+            AssignmentAttempt.State.RETRYABLE,
+            AssignmentAttempt.State.REPAIR_REQUIRED,
+        }
+        for index, state in enumerate(sorted(expected_states)):
+            attempt = AssignmentAttempt.objects.create(
+                idempotency_key=f"00000000-0000-0000-0000-0000000002{index:02d}",
+                ticket_id=f"sensitive-ticket-{index}",
+                selected_agent=agent,
+                eligibility_revision=1,
+                desired_hubspot_owner_id=agent.hubspot_owner_id,
+                decision_reason="test",
+                state=state,
+                reserved_at=stale_at,
+            )
+            AssignmentAttempt.objects.filter(pk=attempt.pk).update(updated_at=stale_at)
+        recent = AssignmentAttempt.objects.create(
+            idempotency_key="00000000-0000-0000-0000-000000000299",
+            ticket_id="recent-sensitive-ticket",
+            selected_agent=agent,
+            eligibility_revision=1,
+            desired_hubspot_owner_id=agent.hubspot_owner_id,
+            decision_reason="test",
+            state=AssignmentAttempt.State.EXTERNAL_APPLIED,
+            reserved_at=timezone.now(),
+        )
+
+        readiness = evaluate_assignment_readiness()
+
+        assert readiness["state"] == "unhealthy"
+        assert readiness["checks"]["stuck_attempts"] == len(expected_states)
+        assert set(readiness["checks"]["stuck_attempts_by_state"]) == expected_states
+        assert "assignment_attempts_stuck" in readiness["reasons"]
+        serialized = json.dumps(readiness)
+        assert "sensitive-ticket" not in serialized
+        assert str(recent.pk) not in serialized
+
+    @override_settings(
+        AUTO_ASSIGNMENT_ENABLED=False,
+        ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+        ABSENCE_SAFE_ELIGIBILITY_SHADOW=False,
+    )
+    def test_disabled_assignment_is_informational_degradation(self) -> None:
+        agent = _agent()
+        now = timezone.now()
+        Agent.objects.filter(pk=agent.pk).update(
+            availability_observed_at=now,
+            sat_last_heartbeat_at=now,
+        )
+
+        readiness = evaluate_assignment_readiness()
+
+        assert readiness["state"] == "degraded"
+        assert "automatic_assignment_disabled" in readiness["reasons"]
+        assert readiness["checks"]["sat_last_success_age_seconds"] == 0
+        assert readiness["checks"]["attempts_by_state"] == {}
+        assert readiness["checks"]["capacity_drift_agents"] == 0
+        assert readiness["checks"]["integration_metrics_available"] is True
+
 
 def test_full_readiness_contract_without_postgresql_server(monkeypatch) -> None:
     """Exercise the complete readiness contract on the fast local test lane."""
@@ -231,3 +299,35 @@ def test_full_readiness_contract_without_postgresql_server(monkeypatch) -> None:
     assert readiness["checks"]["writer_role"] == "test-role"
     assert readiness["checks"]["application_name_configured"] is True
     assert "conversation_cycles" in readiness["checks"]
+
+
+def test_readiness_metrics_have_bounded_labels_and_no_identifiers() -> None:
+    readiness = {
+        "state": "unhealthy",
+        "ready": False,
+        "reasons": ["assignment_attempts_stuck"],
+        "checks": {
+            "stale_sat_agents": 2,
+            "sat_last_success_age_seconds": 180,
+            "ready_queue_depth": 4,
+            "oldest_ready_age_seconds": 90,
+            "capacity_drift_agents": 1,
+            "attempts_by_state": {"reserved": 3},
+            "stuck_attempts_by_state": {"reserved": 1},
+            "integration_metrics_available": True,
+            "webhook_lag_seconds": 12,
+            "webhook_duplicate_events": 2,
+            "webhook_dlq_depth": 1,
+            "outbox_by_status": {"PENDING": 5},
+        },
+    }
+    with patch("apps.webhooks.metrics.emit_metric") as emit:
+        emit_assignment_readiness_metrics(readiness)
+
+    emitted = [call.args[0] for call in emit.call_args_list]
+    assert "assignment_ready" in emitted
+    assert "assignment_stuck_attempts" in emitted
+    assert "assignment_webhook_dlq_depth" in emitted
+    serialized = json.dumps([call.kwargs for call in emit.call_args_list])
+    assert "ticket" not in serialized
+    assert AGENT_EMAIL not in serialized

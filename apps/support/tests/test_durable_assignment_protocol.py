@@ -20,6 +20,7 @@ from apps.support.durable_assignment_service import (
     compensate_assignment_attempt,
     execute_assignment_attempt,
     finalize_assignment_attempt,
+    repair_assignment_attempts,
     reserve_manual_assignment,
     reserve_next_assignment,
 )
@@ -87,7 +88,10 @@ def test_finalize_and_redelivery_have_one_effect() -> None:
     _queue()
     attempt = _reserve(agent)
 
-    with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+    with (
+        patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory,
+        patch("apps.webhooks.metrics.emit_metric") as emit_metric,
+    ):
         client_factory.return_value.get_ticket_details.side_effect = [
             _eligible_ticket(),
             _eligible_ticket(owner_id=agent.hubspot_owner_id),
@@ -98,6 +102,16 @@ def test_finalize_and_redelivery_have_one_effect() -> None:
         }
         assert execute_assignment_attempt(attempt.pk) == "assigned"
         assert execute_assignment_attempt(attempt.pk) == "assigned"
+
+    provider_metrics = [
+        call for call in emit_metric.call_args_list if call.args[0] == "assignment_provider_latency_seconds"
+    ]
+    assert [call.kwargs["operation"] for call in provider_metrics] == [
+        "precondition_read",
+        "owner_patch",
+        "owner_readback",
+    ]
+    assert "9001" not in str(provider_metrics)
 
     agent.refresh_from_db()
     assert agent.current_simultaneous_chats == 1
@@ -157,6 +171,95 @@ def test_provider_success_crash_before_finalize_is_repairable() -> None:
     assert attempt.state == AssignmentAttempt.State.EXTERNAL_APPLIED
     finalize_assignment_attempt(attempt.pk)
     assert AssignedConversation.objects.filter(hubspot_ticket_id="9001").exists()
+
+
+def test_repair_external_applied_reads_back_and_never_repatches() -> None:
+    agent = _agent()
+    _queue()
+    attempt = _reserve(agent)
+    stale_at = timezone.now() - timedelta(minutes=5)
+    AssignmentAttempt.objects.filter(pk=attempt.pk).update(
+        state=AssignmentAttempt.State.EXTERNAL_APPLIED,
+        external_applied_at=stale_at,
+        updated_at=stale_at,
+    )
+
+    with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+        client_factory.return_value.get_ticket_details.return_value = _eligible_ticket(owner_id=agent.hubspot_owner_id)
+
+        first = repair_assignment_attempts(limit=1)
+        second = repair_assignment_attempts(limit=1)
+
+    attempt.refresh_from_db()
+    assert first["completed"] == 1
+    assert second["scanned"] == 0
+    assert attempt.state == AssignmentAttempt.State.COMPLETED
+    assert client_factory.return_value.get_ticket_details.call_count == 1
+    client_factory.return_value.assign_ticket_owner.assert_not_called()
+
+
+def test_execute_external_applied_reads_back_and_never_repatches() -> None:
+    agent = _agent()
+    _queue()
+    attempt = _reserve(agent)
+    AssignmentAttempt.objects.filter(pk=attempt.pk).update(
+        state=AssignmentAttempt.State.EXTERNAL_APPLIED,
+        external_applied_at=timezone.now(),
+    )
+
+    with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+        client_factory.return_value.get_ticket_details.return_value = _eligible_ticket(owner_id=agent.hubspot_owner_id)
+
+        assert execute_assignment_attempt(attempt.pk) == "assigned"
+
+    client_factory.return_value.get_ticket_details.assert_called_once_with("9001")
+    client_factory.return_value.assign_ticket_owner.assert_not_called()
+
+
+def test_repair_is_bounded_deterministic_and_skips_recent_attempts() -> None:
+    agent = _agent()
+    stale_at = timezone.now() - timedelta(minutes=5)
+    recent_at = timezone.now()
+    old_attempts = []
+    for index, state in enumerate(
+        (
+            AssignmentAttempt.State.RESERVED,
+            AssignmentAttempt.State.EXTERNAL_APPLIED,
+            AssignmentAttempt.State.REPAIR_REQUIRED,
+        )
+    ):
+        attempt = AssignmentAttempt.objects.create(
+            idempotency_key=f"00000000-0000-0000-0000-0000000001{index:02d}",
+            ticket_id=f"repair-old-{index}",
+            selected_agent=agent,
+            eligibility_revision=1,
+            desired_hubspot_owner_id=agent.hubspot_owner_id,
+            decision_reason="test",
+            state=state,
+            reserved_at=stale_at,
+        )
+        AssignmentAttempt.objects.filter(pk=attempt.pk).update(updated_at=stale_at + timedelta(seconds=index))
+        old_attempts.append(attempt)
+    recent = AssignmentAttempt.objects.create(
+        idempotency_key="00000000-0000-0000-0000-000000000199",
+        ticket_id="repair-recent",
+        selected_agent=agent,
+        eligibility_revision=1,
+        desired_hubspot_owner_id=agent.hubspot_owner_id,
+        decision_reason="test",
+        state=AssignmentAttempt.State.REPAIR_REQUIRED,
+        reserved_at=recent_at,
+    )
+
+    with patch(
+        "apps.support.durable_assignment_service.reconcile_ambiguous_attempt",
+        return_value="repair_required",
+    ) as reconcile:
+        counts = repair_assignment_attempts(limit=2)
+
+    assert counts["scanned"] == 2
+    assert [call.args[0] for call in reconcile.call_args_list] == [attempt.pk for attempt in old_attempts[:2]]
+    assert recent.pk not in [call.args[0] for call in reconcile.call_args_list]
 
 
 def test_not_found_quarantines_and_releases_capacity() -> None:

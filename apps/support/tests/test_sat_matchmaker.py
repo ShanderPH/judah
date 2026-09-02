@@ -149,6 +149,26 @@ class TestSATHeartbeat:
         assert agent.availability_revision == first_revision
         assert AgentAvailabilityDecision.objects.filter(agent=agent).count() == decision_count
 
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_provider_failure_emits_bounded_sat_metrics(self, mock_client_fn, mock_bh):
+        mock_client_fn.return_value.get_all_owners_availability.side_effect = RuntimeError(
+            "sensitive.person@example.test"
+        )
+
+        from apps.support.sat_service import sat_heartbeat
+
+        with patch("apps.webhooks.metrics.emit_metric") as emit:
+            result = sat_heartbeat()
+
+        assert result["error"] == "RuntimeError"
+        assert [call.args[0] for call in emit.call_args_list] == [
+            "sat_heartbeat_runs_total",
+            "sat_heartbeat_duration_seconds",
+        ]
+        assert all(call.kwargs["result"] == "provider_failure" for call in emit.call_args_list)
+        assert "sensitive.person" not in str(emit.call_args_list)
+
 
 @pytest.mark.django_db
 class TestSATAccumulateTime:

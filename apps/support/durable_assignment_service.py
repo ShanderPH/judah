@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,20 @@ from apps.support.models import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _emit_provider_latency(*, operation: str, result: str, started_at: float) -> None:
+    """Emit bounded provider latency/error classes without business identifiers."""
+    from apps.webhooks.metrics import emit_metric
+
+    emit_metric(
+        "assignment_provider_latency_seconds",
+        max(0.0, time.perf_counter() - started_at),
+        kind="histogram",
+        operation=operation,
+        result=result,
+    )
+
 
 LIVE_STATES = (
     AssignmentAttempt.State.RESERVED,
@@ -527,15 +542,16 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
         )
         return "skipped_stale_cycle"
     if attempt.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
-        finalize_assignment_attempt(attempt.pk)
-        return "assigned"
+        return reconcile_ambiguous_attempt(attempt.pk)
     if attempt.state != AssignmentAttempt.State.RESERVED:
         return attempt.state
 
     client = get_hubspot_client()
+    provider_started_at = time.perf_counter()
     try:
         ticket = client.get_ticket_details(attempt.ticket_id)
     except HubSpotResourceNotFoundError:
+        _emit_provider_latency(operation="precondition_read", result="not_found", started_at=provider_started_at)
         compensate_assignment_attempt(
             attempt.pk,
             retryable=False,
@@ -544,6 +560,7 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
         )
         return "stale_ticket"
     except Exception as exc:
+        _emit_provider_latency(operation="precondition_read", result="failure", started_at=provider_started_at)
         logger.warning(
             "assignment_precondition_read_failed",
             ticket_id=attempt.ticket_id,
@@ -558,6 +575,7 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
             error_code="hubspot_precondition_unreadable",
         )
         return "retryable_external_error"
+    _emit_provider_latency(operation="precondition_read", result="success", started_at=provider_started_at)
 
     pipeline = str(ticket.get("pipeline") or "")
     stage = str(ticket.get("stage") or "")
@@ -584,12 +602,14 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
         )
         return "converged_external_owner"
 
+    provider_started_at = time.perf_counter()
     try:
         client.assign_ticket_owner(
             attempt.ticket_id,
             attempt.desired_hubspot_owner_id,
         )
     except HubSpotResourceNotFoundError:
+        _emit_provider_latency(operation="owner_patch", result="not_found", started_at=provider_started_at)
         compensate_assignment_attempt(
             attempt.pk,
             retryable=False,
@@ -598,7 +618,10 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
         )
         return "stale_ticket"
     except HubSpotAPIError as exc:
+        _emit_provider_latency(operation="owner_patch", result="ambiguous", started_at=provider_started_at)
         return reconcile_ambiguous_attempt(attempt.pk, exc)
+
+    _emit_provider_latency(operation="owner_patch", result="success", started_at=provider_started_at)
 
     return reconcile_ambiguous_attempt(attempt.pk)
 
@@ -812,9 +835,11 @@ def reconcile_ambiguous_attempt(
     error_code = provider_error.error_code if provider_error else "ambiguous_provider_result"
     if provider_error is not None and error_code == "unknown" and provider_error.external_status is not None:
         error_code = f"hubspot_http_{provider_error.external_status}"
+    provider_started_at = time.perf_counter()
     try:
         ticket = get_hubspot_client().get_ticket_details(attempt.ticket_id)
     except Exception as exc:
+        _emit_provider_latency(operation="owner_readback", result="failure", started_at=provider_started_at)
         reconciliation_error_code = f"{error_code}_owner_unreadable"
         logger.exception(
             "assignment_provider_owner_read_failed",
@@ -834,6 +859,8 @@ def reconcile_ambiguous_attempt(
             error_code=reconciliation_error_code,
         )
         return "repair_required"
+
+    _emit_provider_latency(operation="owner_readback", result="success", started_at=provider_started_at)
 
     raw_owner = ticket.get("owner_id")
     current_owner = int(raw_owner) if str(raw_owner).isdigit() else None
@@ -918,7 +945,10 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
     stale_before = now - timedelta(seconds=int(getattr(settings, "ASSIGNMENT_STUCK_AFTER_SECONDS", 120)))
     attempts = list(
         AssignmentAttempt.objects.filter(
-            Q(state=AssignmentAttempt.State.EXTERNAL_APPLIED)
+            Q(
+                state=AssignmentAttempt.State.EXTERNAL_APPLIED,
+                updated_at__lte=stale_before,
+            )
             | Q(
                 state=AssignmentAttempt.State.RETRYABLE,
                 next_retry_at__lte=now,
@@ -927,8 +957,11 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
                 state=AssignmentAttempt.State.RESERVED,
                 reserved_at__lte=stale_before,
             )
-            | Q(state=AssignmentAttempt.State.REPAIR_REQUIRED)
-        ).order_by("updated_at")[:limit]
+            | Q(
+                state=AssignmentAttempt.State.REPAIR_REQUIRED,
+                updated_at__lte=stale_before,
+            )
+        ).order_by("updated_at", "pk")[:limit]
     )
     counts = {
         "scanned": len(attempts),
@@ -958,8 +991,7 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
                     counts["skipped_stale_cycle"] += 1
                     continue
                 if locked.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
-                    finalize_assignment_attempt(locked.pk)
-                    outcome = "completed"
+                    outcome = reconcile_ambiguous_attempt(locked.pk)
                 elif locked.state == AssignmentAttempt.State.RETRYABLE:
                     outcome = retry_assignment_attempt(locked.pk)
                 else:
