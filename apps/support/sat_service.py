@@ -35,6 +35,7 @@ from apps.support.agent_sync_service import is_business_hours
 
 if TYPE_CHECKING:
     from apps.support.eligibility_service import EligibilityDecision
+    from apps.support.models import Agent
 
 logger = structlog.get_logger(__name__)
 
@@ -55,7 +56,6 @@ _SAT_AGENT_UPDATE_FIELDS = (
     "remote_out_of_office_hours",
     "remote_working_hours",
     "remote_timezone",
-    "status_enum",
     "last_status_change_at",
     "online_time_seconds_today",
     "away_time_seconds_today",
@@ -72,11 +72,16 @@ _SAT_OFF_HOURS_UPDATE_FIELDS = (
     "eligibility_evaluated_at",
     "sat_last_heartbeat_at",
     "updated_at",
-    "status_enum",
     "last_status_change_at",
     "online_time_seconds_today",
     "away_time_seconds_today",
 )
+
+
+def _persist_status_enum_changes(agents: list[Agent]) -> None:
+    """Persist legacy enum transitions with scalar, type-compatible writes."""
+    for agent in agents:
+        agent.save(update_fields=("status_enum",))
 
 
 def _acquire_reconciliation_lease() -> tuple[str, int] | None:
@@ -175,6 +180,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                 .order_by("id")
             )
             agents_to_update = []
+            agents_with_status_changes = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -229,6 +235,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                     sat_accumulate_time(agent, old_status, new_status, now)
                     agent.status_enum = new_status
                     agent.last_status_change_at = now
+                    agents_with_status_changes.append(agent)
                     status_changes += 1
                     AgentStatusHistory.objects.create(
                         agent=agent,
@@ -264,6 +271,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                         runtime_environment=environment,
                         fencing_token=fencing_token,
                     )
+            _persist_status_enum_changes(agents_with_status_changes)
             if agents_to_update:
                 Agent.objects.bulk_update(
                     agents_to_update,
@@ -394,6 +402,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 .order_by("id")
             )
             agents_to_update = []
+            agents_with_status_changes = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -516,6 +525,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     sat_accumulate_time(agent, old_status, new_status, now)
                     agent.status_enum = new_status
                     agent.last_status_change_at = now
+                    agents_with_status_changes.append(agent)
                     status_changes += 1
                     AgentStatusHistory.objects.create(
                         agent=agent,
@@ -562,6 +572,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                         fencing_token=fencing_token,
                     )
 
+            _persist_status_enum_changes(agents_with_status_changes)
             if agents_to_update:
                 Agent.objects.bulk_update(
                     agents_to_update,
