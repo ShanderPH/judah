@@ -55,6 +55,8 @@ A primeira regressão consolidada terminou com 165 passes e uma falha em um test
 
 ## Gates externos e bloqueios atuais
 
+- PR #116 publicada; CI inicial totalmente verde: WebApp, lint/type check, Django system checks, Security Scan e testes Python 3.14.
+- Merge bloqueado pela proteção da `main`: `REVIEW_REQUIRED`, sem reviews registrados.
 - SP-06: concluído read-only; build remoto #20 corresponde semanticamente a `Judah HubSpot Integration/`.
 - INT-01: bloqueado porque a fonte operacional comprovada é drift não rastreado e o plano exige manifesto canônico versionado.
 - V-04: bloqueado por INT-01 e pela ausência do projeto `inchurch-sandbox` na conta autenticada.
