@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -30,6 +30,25 @@ class IngestionResult:
     ignored: bool
     ignored_reason: str | None
     outbox_id: str | None
+
+
+def _insert_event_if_absent(
+    candidate: WebhookEvent,
+    *,
+    lock: bool,
+) -> tuple[WebhookEvent, bool]:
+    """Insert one ledger row without raising on an idempotency conflict.
+
+    The caller must hold an atomic transaction when ``lock`` is true so the
+    selected row remains locked while its terminal state and outbox converge.
+    """
+    if not candidate.deduplication_key:
+        raise ValueError("WebhookEvent upsert requires a deduplication key.")
+
+    WebhookEvent.objects.bulk_create([candidate], ignore_conflicts=True)
+    queryset = WebhookEvent.objects.select_for_update() if lock else WebhookEvent.objects
+    event = queryset.get(deduplication_key=candidate.deduplication_key)
+    return event, event.pk == candidate.pk
 
 
 def canonical_hubspot_message_key(portal_id: str, thread_id: str, message_id: str) -> str:
@@ -56,46 +75,44 @@ def record_hubspot_message_envelope(payload: dict[str, Any]) -> IngestionResult:
     portal_id, thread_id, message_id = _required_message_identifiers(payload)
     if not portal_id or not thread_id or not message_id:
         fallback = canonical_event_key(source="hubspot", event_type="conversation.newMessage", payload=payload)
-        event, created = WebhookEvent.objects.get_or_create(
+        candidate = WebhookEvent(
             deduplication_key=fallback,
-            defaults={
-                "source": "hubspot",
-                "event_type": "conversation.newMessage",
-                "event_id": str(payload.get("eventId") or ""),
-                "object_id": thread_id,
-                "portal_id": portal_id,
-                "hubspot_thread_id": thread_id,
-                "message_id": message_id or None,
-                "delivery_method": WebhookEvent.DeliveryMethod.WEBHOOK,
-                "payload": payload,
-                "processing_status": WebhookEvent.ProcessingStatus.IGNORED,
-                "ignored_reason": "missing_canonical_identifier",
-                "processed": True,
-                "processed_at": timezone.now(),
-            },
+            source="hubspot",
+            event_type="conversation.newMessage",
+            event_id=str(payload.get("eventId") or ""),
+            object_id=thread_id,
+            portal_id=portal_id,
+            hubspot_thread_id=thread_id,
+            message_id=message_id or None,
+            delivery_method=WebhookEvent.DeliveryMethod.WEBHOOK,
+            payload=payload,
+            processing_status=WebhookEvent.ProcessingStatus.IGNORED,
+            ignored_reason="missing_canonical_identifier",
+            processed=True,
+            processed_at=timezone.now(),
         )
+        with transaction.atomic():
+            event, created = _insert_event_if_absent(candidate, lock=False)
         emit_metric("hubspot_messages_ignored_total", reason="missing_canonical_identifier")
         return IngestionResult(str(event.pk), None, not created, True, "missing_canonical_identifier", None)
 
     key = canonical_hubspot_message_key(portal_id, thread_id, message_id)
-    try:
-        with transaction.atomic():
-            event = WebhookEvent.objects.create(
-                source="hubspot",
-                event_type="conversation.newMessage",
-                event_id=str(payload.get("eventId") or ""),
-                object_id=thread_id,
-                portal_id=portal_id,
-                hubspot_thread_id=thread_id,
-                message_id=message_id,
-                deduplication_key=key,
-                delivery_method=WebhookEvent.DeliveryMethod.WEBHOOK,
-                payload=payload,
-            )
-        duplicate = False
-    except IntegrityError:
-        event = WebhookEvent.objects.get(deduplication_key=key)
-        duplicate = True
+    candidate = WebhookEvent(
+        source="hubspot",
+        event_type="conversation.newMessage",
+        event_id=str(payload.get("eventId") or ""),
+        object_id=thread_id,
+        portal_id=portal_id,
+        hubspot_thread_id=thread_id,
+        message_id=message_id,
+        deduplication_key=key,
+        delivery_method=WebhookEvent.DeliveryMethod.WEBHOOK,
+        payload=payload,
+    )
+    with transaction.atomic():
+        event, created = _insert_event_if_absent(candidate, lock=False)
+    duplicate = not created
+    if duplicate:
         emit_metric("hubspot_messages_duplicate_total", delivery_method="webhook")
 
     emit_metric("hubspot_webhook_events_received_total", event_type="conversation.newMessage")
@@ -211,6 +228,7 @@ def ingest_hubspot_message(
     message: dict[str, Any],
     delivery_method: str,
     raw_payload: dict[str, Any] | None = None,
+    existing_event_id: str | None = None,
 ) -> IngestionResult:
     """Atomically converge webhook and reconciliation into ledger and outbox."""
     thread_id = str(thread.get("id") or message.get("conversationsThreadId") or "").strip()
@@ -220,28 +238,31 @@ def ingest_hubspot_message(
 
     key = canonical_hubspot_message_key(portal_id, thread_id, message_id)
     ignored_reason = _ignored_reason(message)
-    duplicate = False
     with transaction.atomic():
-        try:
-            with transaction.atomic():
-                event = WebhookEvent.objects.create(
-                    source="hubspot",
-                    event_type="conversation.newMessage",
-                    event_id="",
-                    object_id=thread_id,
-                    portal_id=portal_id,
-                    hubspot_thread_id=thread_id,
-                    message_id=message_id,
-                    deduplication_key=key,
-                    delivery_method=delivery_method,
-                    payload=raw_payload or message,
-                )
-        except IntegrityError:
-            event = WebhookEvent.objects.select_for_update().get(deduplication_key=key)
-            duplicate = event.processing_status in {
-                WebhookEvent.ProcessingStatus.READY,
-                WebhookEvent.ProcessingStatus.IGNORED,
-            }
+        if existing_event_id is not None:
+            event = WebhookEvent.objects.select_for_update().get(pk=existing_event_id)
+            if event.deduplication_key != key:
+                raise ValueError("Hydrated HubSpot message does not match the persisted envelope.")
+            created = False
+        else:
+            candidate = WebhookEvent(
+                source="hubspot",
+                event_type="conversation.newMessage",
+                event_id="",
+                object_id=thread_id,
+                portal_id=portal_id,
+                hubspot_thread_id=thread_id,
+                message_id=message_id,
+                deduplication_key=key,
+                delivery_method=delivery_method,
+                payload=raw_payload or message,
+            )
+            event, created = _insert_event_if_absent(candidate, lock=True)
+
+        duplicate = not created and event.processing_status in {
+            WebhookEvent.ProcessingStatus.READY,
+            WebhookEvent.ProcessingStatus.IGNORED,
+        }
 
         if duplicate:
             emit_metric("hubspot_messages_duplicate_total", delivery_method=delivery_method)

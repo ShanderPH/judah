@@ -48,9 +48,15 @@ def hydrate_webhook_message_event(event_id: str) -> bool:
             message=message,
             delivery_method=WebhookEvent.DeliveryMethod.WEBHOOK,
             raw_payload=event.payload,
+            existing_event_id=str(event.pk),
         )
     except Exception as exc:
-        WebhookEvent.objects.filter(pk=event.pk).update(
+        WebhookEvent.objects.filter(pk=event.pk).exclude(
+            processing_status__in={
+                WebhookEvent.ProcessingStatus.READY,
+                WebhookEvent.ProcessingStatus.IGNORED,
+            }
+        ).update(
             processing_status=WebhookEvent.ProcessingStatus.ERROR,
             error_message=f"{type(exc).__name__}: {exc}"[:2000],
         )

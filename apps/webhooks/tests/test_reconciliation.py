@@ -127,3 +127,35 @@ def test_webhook_hydration_records_provider_failure() -> None:
     event.refresh_from_db()
     assert event.processing_status == WebhookEvent.ProcessingStatus.ERROR
     assert "RuntimeError" in event.error_message
+
+
+@pytest.mark.django_db
+def test_webhook_hydration_failure_does_not_overwrite_terminal_state() -> None:
+    event = WebhookEvent.objects.create(
+        source="hubspot",
+        event_type="conversation.newMessage",
+        event_id="provider-1",
+        object_id="thread-1",
+        portal_id="47354717",
+        hubspot_thread_id="thread-1",
+        message_id="message-1",
+        deduplication_key=canonical_hubspot_message_key("47354717", "thread-1", "message-1"),
+        delivery_method="webhook",
+        payload={},
+    )
+    client = Mock()
+
+    def finish_elsewhere_then_fail(_thread_id: str) -> None:
+        WebhookEvent.objects.filter(pk=event.pk).update(
+            processing_status=WebhookEvent.ProcessingStatus.READY,
+            processed=True,
+        )
+        raise RuntimeError("provider down")
+
+    client.get_conversation_thread.side_effect = finish_elsewhere_then_fail
+    with patch("apps.webhooks.reconciliation.get_hubspot_client", return_value=client), pytest.raises(RuntimeError):
+        hydrate_webhook_message_event(str(event.pk))
+
+    event.refresh_from_db()
+    assert event.processing_status == WebhookEvent.ProcessingStatus.READY
+    assert event.error_message in {None, ""}
