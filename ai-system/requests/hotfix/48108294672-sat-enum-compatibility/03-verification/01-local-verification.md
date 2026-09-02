@@ -25,7 +25,9 @@ Antes de BE-01, os caminhos normal e off-hours falharam com PostgreSQL `Datatype
 - 30 testes BE-05 HubSpot/Jira/n8n.
 - 1 teste worker Celery real: overlap SAT + 9 deliveries concorrentes.
 - 40 testes integrados finais: worker, Redis locks, enum físico, saga concorrente, n8n locks e Beat config.
+- 166 testes na regressão consolidada final em PostgreSQL/Redis locais.
 - Ruff e pre-commit passaram em todos os commits.
+- Ruff global: 338 arquivos formatados e lint clean; `makemigrations --check --dry-run`: `No changes detected`.
 
 ## Provas de invariantes
 
@@ -47,6 +49,10 @@ Error constructing plugin instance of NewSemanalDjangoPlugin
 ```
 
 Isso é um blocker de tooling preexistente, não um erro de tipo emitido pelo código alterado. Deve ser corrigido antes do gate de merge.
+
+## Auditoria de flake concorrente
+
+A primeira regressão consolidada terminou com 165 passes e uma falha em um teste concorrente preexistente: um thread não encontrou o Agent entre duas leituras. Sem alterar código, o caso focal passou 3/3 e a regressão consolidada repetida passou 166/166. A evidência aponta isolamento/timing do harness; o risco residual fica registrado para CI, sem mascarar ou adicionar retry automático.
 
 ## Gates não executados
 

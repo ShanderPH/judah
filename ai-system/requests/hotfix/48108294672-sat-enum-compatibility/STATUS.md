@@ -2,7 +2,7 @@ request: hotfix/48108294672-sat-enum-compatibility
 cycle: M
 state: VERIFY
 opened_at: 2026-09-01T20:54:42-03:00
-last_update: 2026-09-01T22:27:22-03:00
+last_update: 2026-09-01T22:31:00-03:00
 agent_run_id: codex-local
 current_blockers:
   - "SP-06 requer autorização de leitura externa HubSpot e confirmação humana da fonte canônica"
@@ -11,7 +11,7 @@ current_blockers:
 next_action: "Felipe: autorizar SP-06 read-only; depois confirmar a fonte HubSpot canônica"
 artifacts_generated:
   - docs/plans/INCIDENT-48108294672-implementation-plan.md
-verification_runs: 23
+verification_runs: 27
 
 checklist:
   OPS-01: concluida
