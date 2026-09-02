@@ -9,6 +9,7 @@ import pytest
 from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
+from apps.integrations.hubspot.client import STAGE_NOVO_ID, SUPPORT_PIPELINE_ID
 from apps.support.models import (
     Agent,
     AgentAvailabilityDecision,
@@ -19,6 +20,29 @@ from apps.support.models import (
     AssignmentLog,
     NewConversation,
 )
+
+
+def _eligible_ticket(ticket_id: str) -> dict[str, str]:
+    return {
+        "id": ticket_id,
+        "pipeline": SUPPORT_PIPELINE_ID,
+        "stage": STAGE_NOVO_ID,
+        "owner_id": "",
+    }
+
+
+def _configure_assignment_client(mock_client: MagicMock) -> None:
+    owners: dict[str, int] = {}
+
+    def get_ticket(ticket_id: str) -> dict[str, str | int]:
+        return {**_eligible_ticket(ticket_id), "owner_id": owners.get(ticket_id, "")}
+
+    def assign_owner(ticket_id: str, owner_id: int) -> dict[str, str | int]:
+        owners[ticket_id] = owner_id
+        return {"id": ticket_id, "owner_id": owner_id}
+
+    mock_client.get_ticket_details.side_effect = get_ticket
+    mock_client.assign_ticket_owner.side_effect = assign_owner
 
 
 def _make_agent(
@@ -244,6 +268,7 @@ class TestMatchmakerAssignNext:
 
         mock_reconcile.return_value = 0  # Agent has 0 chats
         mock_client = MagicMock()
+        _configure_assignment_client(mock_client)
         mock_client_fn.return_value = mock_client
 
         from apps.support.matchmaker_service import matchmaker_assign_next
@@ -296,6 +321,7 @@ class TestMatchmakerDrainQueue:
 
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        _configure_assignment_client(mock_client)
         mock_client_fn.return_value = mock_client
 
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -324,6 +350,11 @@ class TestMatchmakerDrainQueue:
         _make_pending_ticket("VALID", minutes_ago=5)
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        mock_client.get_ticket_details.side_effect = [
+            _eligible_ticket("STALE"),
+            _eligible_ticket("VALID"),
+            {**_eligible_ticket("VALID"), "owner_id": 100},
+        ]
         mock_client.assign_ticket_owner.side_effect = [
             HubSpotResourceNotFoundError("ticket", "STALE"),
             {"id": "VALID", "owner_id": 100},
@@ -365,7 +396,7 @@ class TestMatchmakerDrainQueue:
             state=AssignmentAttempt.State.COMPLETED,
         )
         mock_reconcile.return_value = 0
-        mock_client_fn.return_value.assign_ticket_owner.return_value = {"id": "VALID", "owner_id": 100}
+        _configure_assignment_client(mock_client_fn.return_value)
 
         result = matchmaker_drain_queue()
 
@@ -389,6 +420,7 @@ class TestMatchmakerDrainQueue:
         _make_pending_ticket("RETRY", minutes_ago=10)
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        mock_client.get_ticket_details.return_value = _eligible_ticket("RETRY")
         mock_client.assign_ticket_owner.side_effect = HubSpotAPIError(
             "temporary outage",
             external_status=503,

@@ -15,7 +15,7 @@ from django.db.models import F, Q, Value
 from django.db.models.functions import Greatest
 from django.utils import timezone
 
-from apps.integrations.hubspot.client import get_hubspot_client
+from apps.integrations.hubspot.client import STAGE_NOVO_ID, SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.integrations.hubspot.exceptions import (
     HubSpotAPIError,
     HubSpotResourceNotFoundError,
@@ -136,6 +136,33 @@ def _verify_candidates() -> list[tuple[Agent, str]]:
             continue
         verified.append((agent, remote.reason.value))
     return verified
+
+
+def _mark_external_applied(attempt_id: uuid.UUID, *, classification: str) -> AssignmentAttempt:
+    """Record a confirmed provider owner without duplicating finalization."""
+    with transaction.atomic():
+        attempt = AssignmentAttempt.objects.select_for_update().get(pk=attempt_id)
+        if attempt.state == AssignmentAttempt.State.COMPLETED:
+            return attempt
+        if attempt.state not in (
+            AssignmentAttempt.State.RESERVED,
+            AssignmentAttempt.State.EXTERNAL_APPLIED,
+        ):
+            raise ValueError(f"attempt {attempt.pk} cannot record an external effect from {attempt.state}")
+        attempt.state = AssignmentAttempt.State.EXTERNAL_APPLIED
+        attempt.external_applied_at = attempt.external_applied_at or _database_now()
+        attempt.provider_result_classification = classification
+        attempt.last_error_code = ""
+        attempt.save(
+            update_fields=[
+                "state",
+                "external_applied_at",
+                "provider_result_classification",
+                "last_error_code",
+                "updated_at",
+            ]
+        )
+        return attempt
 
 
 def reserve_next_assignment(
@@ -505,8 +532,60 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     if attempt.state != AssignmentAttempt.State.RESERVED:
         return attempt.state
 
+    client = get_hubspot_client()
     try:
-        get_hubspot_client().assign_ticket_owner(
+        ticket = client.get_ticket_details(attempt.ticket_id)
+    except HubSpotResourceNotFoundError:
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=False,
+            error_code="hubspot_ticket_not_found",
+            quarantine=True,
+        )
+        return "stale_ticket"
+    except Exception as exc:
+        logger.warning(
+            "assignment_precondition_read_failed",
+            ticket_id=attempt.ticket_id,
+            attempt_id=str(attempt.pk),
+            cycle_id=str(attempt.cycle_id) if attempt.cycle_id else None,
+            exception_type=type(exc).__name__,
+            processing_stage="execute_assignment_attempt",
+        )
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=True,
+            error_code="hubspot_precondition_unreadable",
+        )
+        return "retryable_external_error"
+
+    pipeline = str(ticket.get("pipeline") or "")
+    stage = str(ticket.get("stage") or "")
+    raw_owner = str(ticket.get("owner_id") or "").strip()
+    if pipeline != str(SUPPORT_PIPELINE_ID) or stage != str(STAGE_NOVO_ID):
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=False,
+            error_code="stale_ticket",
+            quarantine=True,
+        )
+        return "stale_ticket"
+    if raw_owner:
+        current_owner = int(raw_owner) if raw_owner.isdigit() else None
+        if current_owner == attempt.desired_hubspot_owner_id:
+            _mark_external_applied(attempt.pk, classification="confirmed_before_write")
+            finalize_assignment_attempt(attempt.pk)
+            return "assigned"
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=False,
+            error_code="hubspot_manual_owner_observed",
+            quarantine=True,
+        )
+        return "converged_external_owner"
+
+    try:
+        client.assign_ticket_owner(
             attempt.ticket_id,
             attempt.desired_hubspot_owner_id,
         )
@@ -521,25 +600,7 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     except HubSpotAPIError as exc:
         return reconcile_ambiguous_attempt(attempt.pk, exc)
 
-    with transaction.atomic():
-        locked = AssignmentAttempt.objects.select_for_update().get(pk=attempt.pk)
-        if locked.state == AssignmentAttempt.State.RESERVED:
-            now = _database_now()
-            locked.state = AssignmentAttempt.State.EXTERNAL_APPLIED
-            locked.external_applied_at = now
-            locked.provider_result_classification = "success"
-            locked.last_error_code = ""
-            locked.save(
-                update_fields=[
-                    "state",
-                    "external_applied_at",
-                    "provider_result_classification",
-                    "last_error_code",
-                    "updated_at",
-                ]
-            )
-    finalize_assignment_attempt(attempt.pk)
-    return "assigned"
+    return reconcile_ambiguous_attempt(attempt.pk)
 
 
 def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
@@ -777,20 +838,7 @@ def reconcile_ambiguous_attempt(
     raw_owner = ticket.get("owner_id")
     current_owner = int(raw_owner) if str(raw_owner).isdigit() else None
     if current_owner == attempt.desired_hubspot_owner_id:
-        with transaction.atomic():
-            locked = AssignmentAttempt.objects.select_for_update().get(pk=attempt.pk)
-            if locked.state != AssignmentAttempt.State.COMPLETED:
-                locked.state = AssignmentAttempt.State.EXTERNAL_APPLIED
-                locked.external_applied_at = locked.external_applied_at or _database_now()
-                locked.provider_result_classification = "confirmed_by_read"
-                locked.save(
-                    update_fields=[
-                        "state",
-                        "external_applied_at",
-                        "provider_result_classification",
-                        "updated_at",
-                    ]
-                )
+        _mark_external_applied(attempt.pk, classification="confirmed_by_read")
         finalize_assignment_attempt(attempt.pk)
         return "assigned"
     if current_owner in (None, attempt.prior_observed_owner_id) and (

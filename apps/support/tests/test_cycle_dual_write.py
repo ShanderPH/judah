@@ -16,6 +16,7 @@ from django.db import IntegrityError
 from django.test import override_settings
 from django.utils import timezone
 
+from apps.integrations.hubspot.client import STAGE_NOVO_ID, SUPPORT_PIPELINE_ID
 from apps.support.conversation_cycle_service import (
     CycleClassification,
     build_cycle_key,
@@ -161,6 +162,20 @@ class TestDualWriteEnforcementOff:
         assert reservation.attempt.cycle_id == queue_row.cycle_id
 
         with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+            client_factory.return_value.get_ticket_details.side_effect = [
+                {
+                    "id": TICKET,
+                    "pipeline": SUPPORT_PIPELINE_ID,
+                    "stage": STAGE_NOVO_ID,
+                    "owner_id": "",
+                },
+                {
+                    "id": TICKET,
+                    "pipeline": SUPPORT_PIPELINE_ID,
+                    "stage": STAGE_NOVO_ID,
+                    "owner_id": agent.hubspot_owner_id,
+                },
+            ]
             client_factory.return_value.assign_ticket_owner.return_value = {
                 "id": TICKET,
                 "owner_id": agent.hubspot_owner_id,

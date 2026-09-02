@@ -174,6 +174,7 @@ def process_queue_item(
         )
     mapping = {
         "assigned": QueueItemOutcome.ASSIGNED_NEW_EFFECT,
+        "converged_external_owner": QueueItemOutcome.CONVERGED_EXTERNAL_OWNER,
         "stale_ticket": QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
         "skipped_stale_cycle": QueueItemOutcome.QUARANTINED_STALE_CYCLE,
         "retryable_external_error": QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT,
@@ -190,6 +191,7 @@ def process_queue_item(
         in {
             QueueItemOutcome.ASSIGNED_NEW_EFFECT,
             QueueItemOutcome.CONVERGED_COMPLETED,
+            QueueItemOutcome.CONVERGED_EXTERNAL_OWNER,
             QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
             QueueItemOutcome.QUARANTINED_STALE_CYCLE,
         },

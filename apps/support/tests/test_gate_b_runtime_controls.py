@@ -9,6 +9,7 @@ import pytest
 from django.test import override_settings
 from django.utils import timezone
 
+from apps.integrations.hubspot.client import STAGE_NOVO_ID, SUPPORT_PIPELINE_ID
 from apps.support.models import Agent, AssignedConversation, NewConversation
 
 
@@ -101,6 +102,20 @@ class TestQueueSafeControls:
             entered_queue_at=timezone.now(),
             automatic_assignment_eligible=True,
         )
+        mock_client_fn.return_value.get_ticket_details.side_effect = [
+            {
+                "id": "GATE-B-DRAIN",
+                "pipeline": SUPPORT_PIPELINE_ID,
+                "stage": STAGE_NOVO_ID,
+                "owner_id": "",
+            },
+            {
+                "id": "GATE-B-DRAIN",
+                "pipeline": SUPPORT_PIPELINE_ID,
+                "stage": STAGE_NOVO_ID,
+                "owner_id": agent.hubspot_owner_id,
+            },
+        ]
 
         from apps.support.matchmaker_service import matchmaker_drain_queue
 
