@@ -115,8 +115,6 @@ def process_webhook_event(event_id) -> bool:
                         object_id=event.object_id or None,
                         ticket_id=event.object_id if et.startswith("ticket.") else None,
                         property_name=event.property_name,
-                        property_value=event.property_value,
-                        error=str(exc),
                         error_type=type(exc).__name__,
                         lifecycle_recorded=False,
                         deterministic_handler_continues=True,
@@ -231,9 +229,18 @@ def process_webhook_event(event_id) -> bool:
                 event=event,
                 defaults={"failure_reason": str(exc)},
             )
-            logger.error("webhook_event_dead_letter", event_id=event.pk, error=str(exc))
+            logger.error(
+                "webhook_event_dead_letter",
+                event_id=event.pk,
+                error_type=type(exc).__name__,
+            )
         else:
-            logger.warning("webhook_event_failed", event_id=event.pk, retry=event.retry_count, error=str(exc))
+            logger.warning(
+                "webhook_event_failed",
+                event_id=event.pk,
+                retry=event.retry_count,
+                error_type=type(exc).__name__,
+            )
 
         event.save(update_fields=["retry_count", "error_message"])
         return False

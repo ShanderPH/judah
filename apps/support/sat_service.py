@@ -369,13 +369,16 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     try:
         availability_data = get_hubspot_client().get_all_owners_availability(force_refresh=force_refresh)
     except Exception as exc:
-        logger.warning("sat_heartbeat_availability_fetch_failed", error=str(exc))
+        logger.warning(
+            "sat_heartbeat_availability_fetch_failed",
+            exception_type=type(exc).__name__,
+        )
         _release_reconciliation_lease(lease_token)
         return {
             "agents_checked": 0,
             "status_changes": 0,
             "agents_came_online": 0,
-            "error": str(exc),
+            "error": type(exc).__name__,
         }
 
     now = timezone.now()
@@ -712,8 +715,8 @@ def sat_reconcile_agent_load(agent) -> int:
     except Exception as exc:
         logger.warning(
             "sat_reconcile_load_failed",
-            agent=agent.name,
-            error=str(exc),
+            agent_id=str(agent.pk),
+            exception_type=type(exc).__name__,
         )
         # Return local count as fallback — do not reset to zero on transient errors
         return agent.current_simultaneous_chats

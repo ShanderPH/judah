@@ -53,11 +53,15 @@ def _transition_lifecycle_best_effort(hubspot_ticket_id: str, states: list[str],
                     "support_lifecycle_transition_skipped",
                     ticket_id=hubspot_ticket_id,
                     target_state=state,
-                    reason=str(exc),
+                    exception_type=type(exc).__name__,
                 )
                 return
     except Exception as exc:
-        logger.warning("support_lifecycle_transition_failed", ticket_id=hubspot_ticket_id, error=str(exc))
+        logger.warning(
+            "support_lifecycle_transition_failed",
+            ticket_id=hubspot_ticket_id,
+            exception_type=type(exc).__name__,
+        )
 
 
 def _safe_parse_owner_id(value: str | int | None) -> int | None:
@@ -486,8 +490,17 @@ def sync_novo_stage_tickets() -> dict:
         client = get_hubspot_client()
         tickets = client.search_tickets_in_novo_stage()
     except ExternalServiceError as exc:
-        logger.error("sync_novo_stage_tickets_hubspot_fetch_failed", error=str(exc))
-        return {"created": 0, "skipped": 0, "already_assigned": 0, "total_from_hubspot": 0, "error": str(exc)}
+        logger.error(
+            "sync_novo_stage_tickets_hubspot_fetch_failed",
+            exception_type=type(exc).__name__,
+        )
+        return {
+            "created": 0,
+            "skipped": 0,
+            "already_assigned": 0,
+            "total_from_hubspot": 0,
+            "error": type(exc).__name__,
+        }
 
     created = 0
     skipped = 0

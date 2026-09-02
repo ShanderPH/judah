@@ -503,7 +503,6 @@ def manual_assign(request, payload: ManualAssignRequest) -> dict:
             "manual_assign_attendant_history_failed",
             ticket_id=payload.hubspot_ticket_id,
             agent_id=str(agent.pk),
-            error=str(exc),
             error_type=type(exc).__name__,
         )
 
@@ -628,7 +627,6 @@ def _force_reassign_internal(
             "force_reassign_attendant_history_failed",
             ticket_id=hubspot_ticket_id,
             agent_id=str(target_agent.pk),
-            error=str(exc),
             error_type=type(exc).__name__,
         )
 

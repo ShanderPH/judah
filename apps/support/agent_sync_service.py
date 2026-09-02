@@ -204,9 +204,9 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
         except Exception as exc:
             logger.warning(
                 "sync_agent_count_fetch_error",
-                agent=agent.name,
+                agent_id=str(agent.pk),
                 owner_id=agent.hubspot_owner_id,
-                error=str(exc),
+                exception_type=type(exc).__name__,
             )
             return None
 

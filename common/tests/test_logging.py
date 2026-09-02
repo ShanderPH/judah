@@ -1,5 +1,7 @@
 """Tests for structured logging helpers and filters."""
 
+import io
+import json
 import logging
 from unittest.mock import Mock, patch
 
@@ -74,6 +76,21 @@ def test_processors_scrub_nested_pii_and_add_context(monkeypatch) -> None:
     assert "token-secret" not in embedded["error"]
     assert "redis://default:[REDACTED]@redis.internal:6379/0" in embedded["error"]
 
+    injected = scrub_pii(
+        None,
+        "error",
+        {
+            "agent_name": "Sensitive Person",
+            "exception": "contact=sensitive.person@example.test\r\nforged=true Bearer token-value",
+        },
+    )
+    assert injected["agent_name"] == "[REDACTED]"
+    assert "sensitive.person" not in injected["exception"]
+    assert "token-value" not in injected["exception"]
+    assert "\r" not in injected["exception"]
+    assert "\n" not in injected["exception"]
+    assert r"\r\nforged=true" in injected["exception"]
+
     monkeypatch.setenv("DJANGO_ENV", "test")
     assert add_service_context(None, "info", {}) == {"service": "judah", "env": "test"}
     custom = add_service_context(None, "info", {"service": "custom", "env": "prod"})
@@ -130,9 +147,45 @@ def test_celery_failure_and_retry_logs_are_cataloged() -> None:
     assert failure.kwargs["error_catalog_code"] == "CELERY-TASK-001"
     assert failure.kwargs["message_error"].startswith("Erro catalogado [CELERY-TASK-001]:")
     assert failure.kwargs["error_type"] == "RuntimeError"
+    assert "error" not in failure.kwargs
 
     retry = logger.warning.call_args
     assert retry.args == ("celery_task_retry",)
     assert retry.kwargs["error_catalog_code"] == "CELERY-TASK-002"
     assert retry.kwargs["message_error"].startswith("Erro catalogado [CELERY-TASK-002]:")
     assert retry.kwargs["retryable"] is True
+    assert "reason" not in retry.kwargs
+
+
+def test_stdlib_json_sink_scrubs_rendered_traceback_and_log_injection() -> None:
+    stream = io.StringIO()
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.dict_tracebacks,
+            scrub_pii,
+            structlog.processors.JSONRenderer(),
+        ],
+        foreign_pre_chain=[add_service_context, scrub_pii],
+    )
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(formatter)
+    logger = logging.getLogger("test.security.sink")
+    logger.handlers = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.ERROR)
+
+    try:
+        raise RuntimeError("email=sink.marker@example.test\r\nforged=true token=sink-secret")
+    except RuntimeError:
+        logger.exception("sink_failure", extra={"agent_email": "nested.marker@example.test"})
+    finally:
+        logger.handlers = []
+
+    rendered = stream.getvalue()
+    payload = json.loads(rendered)
+    assert "sink.marker" not in rendered
+    assert "nested.marker" not in rendered
+    assert "sink-secret" not in rendered
+    assert "\nforged=true" not in rendered
+    assert payload["event"] == "sink_failure"

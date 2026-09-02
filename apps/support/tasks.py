@@ -204,7 +204,6 @@ def task_matchmaker_assign_single(
         logger.warning(
             "task_matchmaker_assign_single_retry",
             ticket_id=hubspot_ticket_id,
-            error=str(exc),
             exception_type=type(exc).__name__,
             retry_count=self.request.retries,
             max_retries=self.max_retries,
@@ -262,7 +261,6 @@ def task_matchmaker_drain_queue() -> dict:
         logger.exception(
             "task_matchmaker_drain_queue_failed",
             exception_type=type(exc).__name__,
-            error=str(exc),
             processing_stage="task_matchmaker_drain_queue",
             queue_preserved=True,
             **cataloged_error_context("queue_drain_unexpected"),
@@ -353,7 +351,7 @@ def task_handle_ticket_closed(
         logger.warning(
             "task_handle_ticket_closed_retry",
             ticket_id=hubspot_ticket_id,
-            error=str(exc),
+            exception_type=type(exc).__name__,
         )
         raise self.retry(exc=exc) from exc
 
@@ -445,7 +443,7 @@ def task_handle_owner_change(
         logger.warning(
             "task_handle_owner_change_retry",
             ticket_id=hubspot_ticket_id,
-            error=str(exc),
+            exception_type=type(exc).__name__,
         )
         raise self.retry(exc=exc) from exc
 
@@ -761,7 +759,11 @@ def task_sync_novo_stage_tickets(self) -> dict:
         logger.info("task_sync_novo_stage_tickets_done", **result)
         return result
     except Exception as exc:
-        logger.warning("task_sync_novo_stage_tickets_retry", error=str(exc), retry=self.request.retries)
+        logger.warning(
+            "task_sync_novo_stage_tickets_retry",
+            exception_type=type(exc).__name__,
+            retry=self.request.retries,
+        )
         raise self.retry(exc=exc) from exc
 
 
