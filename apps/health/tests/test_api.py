@@ -13,6 +13,16 @@ def test_liveness_returns_process_metadata() -> None:
     assert response["timestamp"]
 
 
+def test_assignment_failure_does_not_change_liveness() -> None:
+    with patch(
+        "apps.support.assignment_readiness.evaluate_assignment_readiness",
+        side_effect=RuntimeError("assignment unavailable"),
+    ):
+        response = health_check(None)
+
+    assert response["status"] == "alive"
+
+
 def test_readiness_returns_healthy_when_dependencies_pass() -> None:
     cursor = Mock()
     cursor.fetchone.side_effect = [(1,), ("auth_users", "token_blacklist_outstandingtoken")]

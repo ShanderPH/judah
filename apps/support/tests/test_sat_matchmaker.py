@@ -9,6 +9,7 @@ import pytest
 from django.utils import timezone
 
 from apps.ai_agents.models import ConversationInstance
+from apps.integrations.hubspot.client import STAGE_NOVO_ID, SUPPORT_PIPELINE_ID
 from apps.support.models import (
     Agent,
     AgentAvailabilityDecision,
@@ -19,6 +20,29 @@ from apps.support.models import (
     AssignmentLog,
     NewConversation,
 )
+
+
+def _eligible_ticket(ticket_id: str) -> dict[str, str]:
+    return {
+        "id": ticket_id,
+        "pipeline": SUPPORT_PIPELINE_ID,
+        "stage": STAGE_NOVO_ID,
+        "owner_id": "",
+    }
+
+
+def _configure_assignment_client(mock_client: MagicMock) -> None:
+    owners: dict[str, int] = {}
+
+    def get_ticket(ticket_id: str) -> dict[str, str | int]:
+        return {**_eligible_ticket(ticket_id), "owner_id": owners.get(ticket_id, "")}
+
+    def assign_owner(ticket_id: str, owner_id: int) -> dict[str, str | int]:
+        owners[ticket_id] = owner_id
+        return {"id": ticket_id, "owner_id": owner_id}
+
+    mock_client.get_ticket_details.side_effect = get_ticket
+    mock_client.assign_ticket_owner.side_effect = assign_owner
 
 
 def _make_agent(
@@ -124,6 +148,26 @@ class TestSATHeartbeat:
         assert agent.availability_observed_at >= first_observed_at
         assert agent.availability_revision == first_revision
         assert AgentAvailabilityDecision.objects.filter(agent=agent).count() == decision_count
+
+    @patch("apps.support.sat_service.is_business_hours", return_value=True)
+    @patch("apps.integrations.hubspot.client.get_hubspot_client")
+    def test_provider_failure_emits_bounded_sat_metrics(self, mock_client_fn, mock_bh):
+        mock_client_fn.return_value.get_all_owners_availability.side_effect = RuntimeError(
+            "sensitive.person@example.test"
+        )
+
+        from apps.support.sat_service import sat_heartbeat
+
+        with patch("apps.webhooks.metrics.emit_metric") as emit:
+            result = sat_heartbeat()
+
+        assert result["error"] == "RuntimeError"
+        assert [call.args[0] for call in emit.call_args_list] == [
+            "sat_heartbeat_runs_total",
+            "sat_heartbeat_duration_seconds",
+        ]
+        assert all(call.kwargs["result"] == "provider_failure" for call in emit.call_args_list)
+        assert "sensitive.person" not in str(emit.call_args_list)
 
 
 @pytest.mark.django_db
@@ -244,6 +288,7 @@ class TestMatchmakerAssignNext:
 
         mock_reconcile.return_value = 0  # Agent has 0 chats
         mock_client = MagicMock()
+        _configure_assignment_client(mock_client)
         mock_client_fn.return_value = mock_client
 
         from apps.support.matchmaker_service import matchmaker_assign_next
@@ -296,6 +341,7 @@ class TestMatchmakerDrainQueue:
 
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        _configure_assignment_client(mock_client)
         mock_client_fn.return_value = mock_client
 
         from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -324,6 +370,11 @@ class TestMatchmakerDrainQueue:
         _make_pending_ticket("VALID", minutes_ago=5)
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        mock_client.get_ticket_details.side_effect = [
+            _eligible_ticket("STALE"),
+            _eligible_ticket("VALID"),
+            {**_eligible_ticket("VALID"), "owner_id": 100},
+        ]
         mock_client.assign_ticket_owner.side_effect = [
             HubSpotResourceNotFoundError("ticket", "STALE"),
             {"id": "VALID", "owner_id": 100},
@@ -365,7 +416,7 @@ class TestMatchmakerDrainQueue:
             state=AssignmentAttempt.State.COMPLETED,
         )
         mock_reconcile.return_value = 0
-        mock_client_fn.return_value.assign_ticket_owner.return_value = {"id": "VALID", "owner_id": 100}
+        _configure_assignment_client(mock_client_fn.return_value)
 
         result = matchmaker_drain_queue()
 
@@ -389,6 +440,7 @@ class TestMatchmakerDrainQueue:
         _make_pending_ticket("RETRY", minutes_ago=10)
         mock_reconcile.return_value = 0
         mock_client = MagicMock()
+        mock_client.get_ticket_details.return_value = _eligible_ticket("RETRY")
         mock_client.assign_ticket_owner.side_effect = HubSpotAPIError(
             "temporary outage",
             external_status=503,

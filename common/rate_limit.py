@@ -49,7 +49,11 @@ class RateLimitMiddleware:
         except Exception as exc:
             # Cache backend down → fail-open so a Redis outage cannot brick
             # the entire API surface (auth, health, etc).
-            logger.warning("rate_limit_cache_unavailable", error=str(exc), path=request.path)
+            logger.warning(
+                "rate_limit_cache_unavailable",
+                exception_type=type(exc).__name__,
+                path=request.path,
+            )
             return self.get_response(request)
 
         if current_count >= rate:
@@ -79,7 +83,11 @@ class RateLimitMiddleware:
                     cache.set(cache_key, 1, window)
                     cache.set(pipe_key, 1, window)
         except Exception as exc:
-            logger.warning("rate_limit_counter_failed", error=str(exc), path=request.path)
+            logger.warning(
+                "rate_limit_counter_failed",
+                exception_type=type(exc).__name__,
+                path=request.path,
+            )
 
         response = self.get_response(request)
         response["X-RateLimit-Limit"] = str(rate)

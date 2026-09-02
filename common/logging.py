@@ -171,7 +171,6 @@ def log_external_call(
             url=url,
             duration_ms=duration_ms,
             error_type=type(exc).__name__,
-            error=str(exc),
             **_extra,
         )
         raise
@@ -210,6 +209,23 @@ _PII_FIELDS: frozenset[str] = frozenset(
         "cpf",
         "cnpj",
         "ssn",
+        "email",
+        "agent_email",
+        "contact_email",
+        "name",
+        "agent",
+        "agent_name",
+        "contact_name",
+        "owner_name",
+        "actor",
+        "requested_by",
+        "assigned_by",
+        "property_value",
+        "payload",
+        "request_body",
+        "response_body",
+        "exc_value",
+        "exception_message",
     }
 )
 
@@ -225,6 +241,8 @@ _SENSITIVE_REPR_VALUE = re.compile(
     r"(?P<prefix>\b(?:access_token|api_?key|password|secret|token)\s*=\s*)[^,\s>]+",
     flags=re.IGNORECASE,
 )
+_EMAIL_ADDRESS = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+_BEARER_TOKEN = re.compile(r"\bBearer\s+[^\s,;]+", flags=re.IGNORECASE)
 
 
 def _scrub_sensitive_text(value: str) -> str:
@@ -237,9 +255,12 @@ def _scrub_sensitive_text(value: str) -> str:
         username, _password = userinfo.rsplit(":", maxsplit=1)
         return f"{match.group('scheme')}{username}:[REDACTED]@"
 
+    value = value.replace("\r", r"\r").replace("\n", r"\n")
     value = _URI_CREDENTIALS.sub(_redact_uri, value)
     value = _SENSITIVE_QUERY_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", value)
-    return _SENSITIVE_REPR_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", value)
+    value = _SENSITIVE_REPR_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", value)
+    value = _BEARER_TOKEN.sub("Bearer [REDACTED]", value)
+    return _EMAIL_ADDRESS.sub("[REDACTED]", value)
 
 
 def scrub_pii(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
@@ -384,7 +405,6 @@ def connect_celery_signals() -> None:
             "celery_task_failure",
             task_id=task_id,
             error_type=type(exception).__name__,
-            error=str(exception),
             error_catalog_code="CELERY-TASK-001",
             message_error=(
                 "Erro catalogado [CELERY-TASK-001]: a tarefa assíncrona terminou com uma exceção não tratada."
@@ -402,7 +422,6 @@ def connect_celery_signals() -> None:
         _logger.warning(
             "celery_task_retry",
             task_id=task_id,
-            reason=str(reason),
             error_type=type(reason).__name__,
             error_catalog_code="CELERY-TASK-002",
             message_error="Erro catalogado [CELERY-TASK-002]: a tarefa solicitou uma nova tentativa.",

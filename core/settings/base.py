@@ -482,6 +482,8 @@ if SENTRY_DSN:
         traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.05, cast=float),
         profiles_sample_rate=config("SENTRY_PROFILES_SAMPLE_RATE", default=0.01, cast=float),
         send_default_pii=False,
+        include_local_variables=False,
+        max_request_body_size="never",
         environment=os.environ.get("DJANGO_ENV", "development"),
         release=config("GIT_SHA", default=""),
     )
@@ -544,6 +546,8 @@ LOGGING: dict = {
             "()": structlog.stdlib.ProcessorFormatter,
             "processors": [
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.processors.ExceptionRenderer(),
+                scrub_pii,
                 structlog.dev.ConsoleRenderer(colors=True, sort_keys=False),
             ],
             "foreign_pre_chain": _STRUCTLOG_PRE_CHAIN,

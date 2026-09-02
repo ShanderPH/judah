@@ -23,6 +23,7 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
     """
     provider_event_id = str(payload.get("eventId", "") or "")
     defaults = {
+        "source": source,
         "object_id": str(payload.get("objectId", "") or payload.get("object_id", "") or ""),
         "property_name": payload.get("propertyName") or payload.get("property_name"),
         "property_value": payload.get("propertyValue") or payload.get("property_value"),
@@ -41,6 +42,10 @@ def record_webhook_event(source: str, event_type: str, payload: dict) -> Webhook
             **defaults,
         },
     )
+    if created and not source.strip():
+        from apps.webhooks.metrics import emit_metric
+
+        emit_metric("webhook_events_empty_source_total")
     logger.info(
         "webhook_event_recorded",
         event_id=event.pk,
@@ -115,8 +120,6 @@ def process_webhook_event(event_id) -> bool:
                         object_id=event.object_id or None,
                         ticket_id=event.object_id if et.startswith("ticket.") else None,
                         property_name=event.property_name,
-                        property_value=event.property_value,
-                        error=str(exc),
                         error_type=type(exc).__name__,
                         lifecycle_recorded=False,
                         deterministic_handler_continues=True,
@@ -231,9 +234,18 @@ def process_webhook_event(event_id) -> bool:
                 event=event,
                 defaults={"failure_reason": str(exc)},
             )
-            logger.error("webhook_event_dead_letter", event_id=event.pk, error=str(exc))
+            logger.error(
+                "webhook_event_dead_letter",
+                event_id=event.pk,
+                error_type=type(exc).__name__,
+            )
         else:
-            logger.warning("webhook_event_failed", event_id=event.pk, retry=event.retry_count, error=str(exc))
+            logger.warning(
+                "webhook_event_failed",
+                event_id=event.pk,
+                retry=event.retry_count,
+                error_type=type(exc).__name__,
+            )
 
         event.save(update_fields=["retry_count", "error_message"])
         return False

@@ -585,6 +585,17 @@ class AssignmentAttempt(models.Model):
         return f"AssignmentAttempt ticket={self.ticket_id} state={self.state}"
 
 
+ASSIGNMENT_ATTEMPT_TERMINAL_STATES = frozenset(
+    {
+        AssignmentAttempt.State.COMPLETED,
+        AssignmentAttempt.State.COMPENSATED,
+    }
+)
+ASSIGNMENT_ATTEMPT_NON_TERMINAL_STATES = frozenset(
+    state for state, _label in AssignmentAttempt.State.choices if state not in ASSIGNMENT_ATTEMPT_TERMINAL_STATES
+)
+
+
 class ClosedConversation(models.Model):
     """Ticket that was closed after being handled by an agent.
 

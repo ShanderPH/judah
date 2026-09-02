@@ -75,7 +75,6 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
                         ticket_id=hubspot_ticket_id,
                         conversation_instance_id=str(instance.pk),
                         agent_id=str(agent.pk),
-                        error=str(exc),
                         error_type=type(exc).__name__,
                     )
             except InvalidStateTransitionError as exc:
@@ -83,14 +82,13 @@ def _transition_assigned_lifecycle(hubspot_ticket_id: str, agent: Agent) -> None
                     "matchmaker_lifecycle_transition_skipped",
                     ticket_id=hubspot_ticket_id,
                     conversation_instance_id=str(instance.pk),
-                    error=str(exc),
+                    exception_type=type(exc).__name__,
                 )
     except Exception as exc:
         logger.warning(
             "matchmaker_lifecycle_transition_failed",
             ticket_id=hubspot_ticket_id,
             exception_type=type(exc).__name__,
-            error=str(exc),
             processing_stage="transition_assigned_lifecycle",
             **cataloged_error_context("lifecycle_transition_failed"),
         )
@@ -174,6 +172,7 @@ def process_queue_item(
         )
     mapping = {
         "assigned": QueueItemOutcome.ASSIGNED_NEW_EFFECT,
+        "converged_external_owner": QueueItemOutcome.CONVERGED_EXTERNAL_OWNER,
         "stale_ticket": QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
         "skipped_stale_cycle": QueueItemOutcome.QUARANTINED_STALE_CYCLE,
         "retryable_external_error": QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT,
@@ -190,6 +189,7 @@ def process_queue_item(
         in {
             QueueItemOutcome.ASSIGNED_NEW_EFFECT,
             QueueItemOutcome.CONVERGED_COMPLETED,
+            QueueItemOutcome.CONVERGED_EXTERNAL_OWNER,
             QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR,
             QueueItemOutcome.QUARANTINED_STALE_CYCLE,
         },
@@ -338,7 +338,6 @@ def enqueue_new_ticket(
             ticket_id=hubspot_ticket_id,
             provider=getattr(exc, "service", "HubSpot"),
             exception_type=type(exc).__name__,
-            error=str(exc),
             processing_stage="enqueue_new_ticket",
             **cataloged_error_context("hubspot_ticket_fetch_failed"),
         )

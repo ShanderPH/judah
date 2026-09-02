@@ -153,3 +153,31 @@ def test_lifecycle_watchdog_command_formats_result() -> None:
 
     watchdog.assert_called_once_with(limit=10, max_failures=4)
     assert "scanned=3" in stdout.getvalue()
+
+
+def test_repair_assignment_attempts_command_is_bounded_and_aggregate_only() -> None:
+    stdout = io.StringIO()
+    result = {
+        "scanned": 1000,
+        "completed": 3,
+        "retryable": 2,
+        "repair_required": 1,
+        "conflict": 0,
+        "failed_unexpected": 0,
+        "skipped_stale_cycle": 0,
+    }
+    with (
+        patch(
+            "apps.support.management.commands.repair_assignment_attempts.require_routing_writer_authority"
+        ) as authority,
+        patch(
+            "apps.support.management.commands.repair_assignment_attempts.repair_assignment_attempts",
+            return_value=result,
+        ) as repair,
+    ):
+        call_command("repair_assignment_attempts", limit=50_000, stdout=stdout)
+
+    authority.assert_called_once_with("repair_assignment_attempts_command")
+    repair.assert_called_once_with(limit=1000)
+    assert "'completed': 3" in stdout.getvalue()
+    assert "ticket_id" not in stdout.getvalue()

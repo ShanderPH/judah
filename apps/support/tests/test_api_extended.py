@@ -123,6 +123,7 @@ def test_queue_health_builds_diagnostics() -> None:
         patch("apps.support.queue_service.get_eligible_agents", return_value=[online]),
         patch("apps.support.queue_service.get_last_assigned_owner_id", return_value=10),
         patch("apps.support.assignment_readiness.evaluate_assignment_readiness", return_value={}),
+        patch("apps.support.assignment_readiness.emit_assignment_readiness_metrics") as emit_metrics,
     ):
         result = api.get_queue_health(request)
 
@@ -131,6 +132,7 @@ def test_queue_health_builds_diagnostics() -> None:
     assert result["summary"]["system_ok"] is False
     assert result["eligible_agents"][0]["is_last_assigned"] is True
     assert result["absent_agents"][0]["open_chats"] == 2
+    emit_metrics.assert_called_once_with({})
 
 
 @pytest.mark.django_db

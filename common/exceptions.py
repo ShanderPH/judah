@@ -135,7 +135,6 @@ def register_exception_handlers(api: object) -> None:
         logger.exception(
             "unhandled_api_exception",
             error_type=type(exc).__name__,
-            error=str(exc),
             path=getattr(request, "path", None),
             method=getattr(request, "method", None),
             request_id=getattr(request, "META", {}).get("X_REQUEST_ID"),

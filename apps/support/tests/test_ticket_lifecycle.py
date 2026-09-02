@@ -352,6 +352,20 @@ class TestMatchmakerRetryReconciliation:
         # FirstAgent is actually at capacity per HubSpot (5); SecondAgent is not (1).
         mock_reconcile.return_value = [(second_agent, "eligible")]
         mock_client = MagicMock()
+        mock_client.get_ticket_details.side_effect = [
+            {
+                "id": "T020",
+                "pipeline": "636459134",
+                "stage": "939275049",
+                "owner_id": "",
+            },
+            {
+                "id": "T020",
+                "pipeline": "636459134",
+                "stage": "939275049",
+                "owner_id": second_agent.hubspot_owner_id,
+            },
+        ]
         mock_client_fn.return_value = mock_client
 
         from apps.support.matchmaker_service import matchmaker_assign_next

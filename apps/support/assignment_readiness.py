@@ -8,7 +8,7 @@ from typing import Any
 from django.conf import settings
 from django.db import connection
 from django.db.migrations.recorder import MigrationRecorder
-from django.db.models import Count, Q
+from django.db.models import Count, F, Max, Q
 from django.utils import timezone
 
 from apps.support.availability_runtime import (
@@ -16,7 +16,12 @@ from apps.support.availability_runtime import (
     is_authoritative_availability_runtime,
     may_assign,
 )
-from apps.support.models import Agent, AssignmentAttempt, NewConversation
+from apps.support.models import (
+    ASSIGNMENT_ATTEMPT_NON_TERMINAL_STATES,
+    Agent,
+    AssignmentAttempt,
+    NewConversation,
+)
 
 # (label, model name, ticket column) of every projection that can reference a
 # conversation cycle after migration 0020.
@@ -126,33 +131,59 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     if not applied:
         reasons.append("durable_migration_missing")
 
-    freshness_cutoff = timezone.now() - timedelta(seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS))
+    now = timezone.now()
+    freshness_cutoff = now - timedelta(seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS))
     active_agents = Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
     stale_agents = (
         active_agents.filter(availability_observed_at__lt=freshness_cutoff).count()
         + active_agents.filter(availability_observed_at__isnull=True).count()
     )
     checks["stale_sat_agents"] = stale_agents
+    last_sat_success = active_agents.aggregate(last=Max("sat_last_heartbeat_at"))["last"]
+    checks["sat_last_success_at"] = last_sat_success.isoformat() if last_sat_success else None
+    checks["sat_last_success_age_seconds"] = (
+        max(0, int((now - last_sat_success).total_seconds())) if last_sat_success else None
+    )
     if stale_agents:
         reasons.append("sat_observations_stale")
 
     stuck_cutoff = timezone.now() - timedelta(seconds=int(getattr(settings, "ASSIGNMENT_STUCK_AFTER_SECONDS", 120)))
-    stuck_attempts = (
-        AssignmentAttempt.objects.filter(
-            state__in=(
-                AssignmentAttempt.State.RESERVED,
-                AssignmentAttempt.State.REPAIR_REQUIRED,
-            ),
-            updated_at__lte=stuck_cutoff,
-        ).count()
+    stuck_by_state = (
+        {
+            row["state"]: row["count"]
+            for row in AssignmentAttempt.objects.filter(
+                state__in=ASSIGNMENT_ATTEMPT_NON_TERMINAL_STATES,
+                updated_at__lte=stuck_cutoff,
+            )
+            .values("state")
+            .annotate(count=Count("id"))
+        }
         if applied
-        else 0
+        else {}
     )
+    stuck_attempts = sum(stuck_by_state.values())
     checks["stuck_attempts"] = stuck_attempts
+    checks["stuck_attempts_by_state"] = stuck_by_state
     if stuck_attempts:
         reasons.append("assignment_attempts_stuck")
 
-    now = timezone.now()
+    attempts_by_state = (
+        {row["state"]: row["count"] for row in AssignmentAttempt.objects.values("state").annotate(count=Count("id"))}
+        if applied
+        else {}
+    )
+    checks["attempts_by_state"] = attempts_by_state
+    oldest_non_terminal = (
+        AssignmentAttempt.objects.filter(state__in=ASSIGNMENT_ATTEMPT_NON_TERMINAL_STATES)
+        .order_by("updated_at")
+        .values_list("updated_at", flat=True)
+        .first()
+        if applied
+        else None
+    )
+    checks["oldest_non_terminal_age_seconds"] = (
+        max(0, int((now - oldest_non_terminal).total_seconds())) if oldest_non_terminal else 0
+    )
     ready_queue = NewConversation.objects.filter(
         automatic_assignment_eligible=True,
         queue_status__in=(NewConversation.QueueStatus.PENDING, NewConversation.QueueStatus.QUEUED),
@@ -178,6 +209,9 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
         state=AssignmentAttempt.State.COMPLETED,
         queue_row__isnull=False,
     ).count()
+    checks["capacity_drift_agents"] = active_agents.filter(
+        current_simultaneous_chats__gt=F("max_simultaneous_chats")
+    ).count()
     if checks["poisoned_queue_rows"]:
         reasons.append("assignment_queue_poisoned_rows")
 
@@ -187,6 +221,7 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     checks["writer_role"] = role
     checks["application_name_configured"] = bool(application_name)
     checks["writer_id"] = availability_writer_id()
+    checks["release_sha"] = str(getattr(settings, "GIT_SHA", ""))
     if not application_name:
         reasons.append("database_application_name_missing")
 
@@ -200,6 +235,30 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
         reasons.append("conversation_cycle_dispatch_missing")
     if cycle_checks.get("enforced") and not cycle_checks.get("enforcement_ready"):
         reasons.append("conversation_cycle_enforcement_unsafe")
+
+    try:
+        from apps.webhooks.models import DeadLetterQueue, OutboxEvent, WebhookEvent
+
+        oldest_unprocessed = (
+            WebhookEvent.objects.filter(processed=False)
+            .order_by("received_at")
+            .values_list("received_at", flat=True)
+            .first()
+        )
+        checks["webhook_lag_seconds"] = (
+            max(0, int((now - oldest_unprocessed).total_seconds())) if oldest_unprocessed else 0
+        )
+        checks["webhook_duplicate_events"] = WebhookEvent.objects.filter(
+            processing_status=WebhookEvent.ProcessingStatus.IGNORED,
+            ignored_reason__icontains="duplicate",
+        ).count()
+        checks["webhook_dlq_depth"] = DeadLetterQueue.objects.count()
+        checks["outbox_by_status"] = {
+            row["status"]: row["count"] for row in OutboxEvent.objects.values("status").annotate(count=Count("id"))
+        }
+        checks["integration_metrics_available"] = True
+    except Exception:
+        checks["integration_metrics_available"] = False
 
     state = "healthy"
     if reasons:
@@ -222,3 +281,32 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
         "reasons": reasons,
         "checks": checks,
     }
+
+
+def emit_assignment_readiness_metrics(readiness: dict[str, Any]) -> None:
+    """Emit bounded-cardinality metrics from one PII-free readiness snapshot."""
+    from apps.webhooks.metrics import emit_metric
+
+    checks = readiness["checks"]
+    state = str(readiness["state"])
+    emit_metric("assignment_ready", int(bool(readiness["ready"])), kind="gauge", state=state)
+    emit_metric("assignment_sat_stale_agents", checks["stale_sat_agents"], kind="gauge")
+    if checks["sat_last_success_age_seconds"] is not None:
+        emit_metric(
+            "assignment_sat_last_success_age_seconds",
+            checks["sat_last_success_age_seconds"],
+            kind="gauge",
+        )
+    emit_metric("assignment_queue_ready_depth", checks["ready_queue_depth"], kind="gauge")
+    emit_metric("assignment_queue_oldest_age_seconds", checks["oldest_ready_age_seconds"], kind="gauge")
+    emit_metric("assignment_capacity_drift_agents", checks["capacity_drift_agents"], kind="gauge")
+    for attempt_state, count in checks["attempts_by_state"].items():
+        emit_metric("assignment_attempts", count, kind="gauge", state=attempt_state)
+    for attempt_state, count in checks["stuck_attempts_by_state"].items():
+        emit_metric("assignment_stuck_attempts", count, kind="gauge", state=attempt_state)
+    if checks["integration_metrics_available"]:
+        emit_metric("assignment_webhook_lag_seconds", checks["webhook_lag_seconds"], kind="gauge")
+        emit_metric("assignment_webhook_duplicates", checks["webhook_duplicate_events"], kind="gauge")
+        emit_metric("assignment_webhook_dlq_depth", checks["webhook_dlq_depth"], kind="gauge")
+        for outbox_status, count in checks["outbox_by_status"].items():
+            emit_metric("assignment_outbox_events", count, kind="gauge", state=outbox_status)

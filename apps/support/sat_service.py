@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -35,8 +36,23 @@ from apps.support.agent_sync_service import is_business_hours
 
 if TYPE_CHECKING:
     from apps.support.eligibility_service import EligibilityDecision
+    from apps.support.models import Agent
 
 logger = structlog.get_logger(__name__)
+
+
+def _emit_sat_run_metric(*, result: str, started_at: float) -> None:
+    """Emit one bounded SAT result and duration without agent identifiers."""
+    from apps.webhooks.metrics import emit_metric
+
+    emit_metric("sat_heartbeat_runs_total", result=result)
+    emit_metric(
+        "sat_heartbeat_duration_seconds",
+        max(0.0, time.perf_counter() - started_at),
+        kind="histogram",
+        result=result,
+    )
+
 
 _SAT_AGENT_UPDATE_FIELDS = (
     "availability_revision",
@@ -55,7 +71,6 @@ _SAT_AGENT_UPDATE_FIELDS = (
     "remote_out_of_office_hours",
     "remote_working_hours",
     "remote_timezone",
-    "status_enum",
     "last_status_change_at",
     "online_time_seconds_today",
     "away_time_seconds_today",
@@ -72,11 +87,16 @@ _SAT_OFF_HOURS_UPDATE_FIELDS = (
     "eligibility_evaluated_at",
     "sat_last_heartbeat_at",
     "updated_at",
-    "status_enum",
     "last_status_change_at",
     "online_time_seconds_today",
     "away_time_seconds_today",
 )
+
+
+def _persist_status_enum_changes(agents: list[Agent]) -> None:
+    """Persist legacy enum transitions with scalar, type-compatible writes."""
+    for agent in agents:
+        agent.save(update_fields=("status_enum",))
 
 
 def _acquire_reconciliation_lease() -> tuple[str, int] | None:
@@ -175,6 +195,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                 .order_by("id")
             )
             agents_to_update = []
+            agents_with_status_changes = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -229,6 +250,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                     sat_accumulate_time(agent, old_status, new_status, now)
                     agent.status_enum = new_status
                     agent.last_status_change_at = now
+                    agents_with_status_changes.append(agent)
                     status_changes += 1
                     AgentStatusHistory.objects.create(
                         agent=agent,
@@ -264,6 +286,7 @@ def _materialize_off_hours_availability(*, task_id: str) -> dict[str, Any]:
                         runtime_environment=environment,
                         fencing_token=fencing_token,
                     )
+            _persist_status_enum_changes(agents_with_status_changes)
             if agents_to_update:
                 Agent.objects.bulk_update(
                     agents_to_update,
@@ -304,7 +327,9 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
         force_refresh: Bypass the HubSpot availability cache. Ticket-triggered
             reconciliation uses this before attempting an assignment.
     """
+    metric_started_at = time.perf_counter()
     if not settings.AGENT_STATUS_SYNC_ENABLED:
+        _emit_sat_run_metric(result="disabled", started_at=metric_started_at)
         logger.debug("sat_heartbeat_status_sync_disabled")
         return {
             "agents_checked": 0,
@@ -337,6 +362,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     )
 
     if not is_authoritative_availability_runtime():
+        _emit_sat_run_metric(result="non_authoritative", started_at=metric_started_at)
         log_runtime_rejection("sat_heartbeat")
         return {
             "agents_checked": 0,
@@ -346,10 +372,13 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
         }
     within_business_hours = is_business_hours()
     if not within_business_hours:
-        return _materialize_off_hours_availability(task_id=task_id)
+        result = _materialize_off_hours_availability(task_id=task_id)
+        _emit_sat_run_metric(result="off_hours_success", started_at=metric_started_at)
+        return result
 
     lease = _acquire_reconciliation_lease()
     if lease is None:
+        _emit_sat_run_metric(result="lease_contended", started_at=metric_started_at)
         return {
             "agents_checked": 0,
             "status_changes": 0,
@@ -361,13 +390,17 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
     try:
         availability_data = get_hubspot_client().get_all_owners_availability(force_refresh=force_refresh)
     except Exception as exc:
-        logger.warning("sat_heartbeat_availability_fetch_failed", error=str(exc))
+        logger.warning(
+            "sat_heartbeat_availability_fetch_failed",
+            exception_type=type(exc).__name__,
+        )
         _release_reconciliation_lease(lease_token)
+        _emit_sat_run_metric(result="provider_failure", started_at=metric_started_at)
         return {
             "agents_checked": 0,
             "status_changes": 0,
             "agents_came_online": 0,
-            "error": str(exc),
+            "error": type(exc).__name__,
         }
 
     now = timezone.now()
@@ -394,6 +427,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                 .order_by("id")
             )
             agents_to_update = []
+            agents_with_status_changes = []
             for agent in agents:
                 if agent.availability_fencing_token > fencing_token:
                     logger.warning(
@@ -516,6 +550,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                     sat_accumulate_time(agent, old_status, new_status, now)
                     agent.status_enum = new_status
                     agent.last_status_change_at = now
+                    agents_with_status_changes.append(agent)
                     status_changes += 1
                     AgentStatusHistory.objects.create(
                         agent=agent,
@@ -562,6 +597,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
                         fencing_token=fencing_token,
                     )
 
+            _persist_status_enum_changes(agents_with_status_changes)
             if agents_to_update:
                 Agent.objects.bulk_update(
                     agents_to_update,
@@ -589,6 +625,7 @@ def sat_heartbeat(task_id: str = "", *, force_refresh: bool = False) -> dict:
         writer_id=writer_id,
         fencing_token=fencing_token,
     )
+    _emit_sat_run_metric(result="success", started_at=metric_started_at)
     return {
         "agents_checked": agents_checked,
         "status_changes": status_changes,
@@ -701,8 +738,8 @@ def sat_reconcile_agent_load(agent) -> int:
     except Exception as exc:
         logger.warning(
             "sat_reconcile_load_failed",
-            agent=agent.name,
-            error=str(exc),
+            agent_id=str(agent.pk),
+            exception_type=type(exc).__name__,
         )
         # Return local count as fallback — do not reset to zero on transient errors
         return agent.current_simultaneous_chats

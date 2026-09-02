@@ -107,6 +107,10 @@ def test_poisoned_repair_item_does_not_block_batch() -> None:
         )
         for index in range(2)
     ]
+    for index, attempt in enumerate(attempts):
+        AssignmentAttempt.objects.filter(pk=attempt.pk).update(
+            updated_at=now - timedelta(minutes=5) + timedelta(seconds=index)
+        )
     with patch(
         "apps.support.durable_assignment_service.reconcile_ambiguous_attempt",
         side_effect=[RuntimeError("poison"), "repair_required"],

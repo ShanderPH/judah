@@ -34,3 +34,18 @@ def test_unknown_error_is_still_cataloged_without_raw_payload() -> None:
     assert context["error_catalog_code"] == "SUP-UNKNOWN-001"
     assert context["failure_code"] == "database_driver_surprise"
     assert "não classificada" in str(context["message_error"])
+
+
+def test_pre_effect_failures_have_stable_catalog_entries() -> None:
+    expected_codes = {
+        "stale_ticket": "SUP-HUBSPOT-006",
+        "hubspot_manual_owner_observed": "SUP-HUBSPOT-007",
+        "hubspot_precondition_unreadable": "SUP-HUBSPOT-008",
+    }
+
+    for failure_code, catalog_code in expected_codes.items():
+        context = cataloged_error_context(failure_code)
+
+        assert context["error_catalog_code"] == catalog_code
+        assert context["failure_code"] == failure_code
+        assert context["error_category"] != "unclassified"
