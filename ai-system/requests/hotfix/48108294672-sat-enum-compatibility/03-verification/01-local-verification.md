@@ -28,6 +28,8 @@ Antes de BE-01, os caminhos normal e off-hours falharam com PostgreSQL `Datatype
 - 166 testes na regressão consolidada final em PostgreSQL/Redis locais.
 - Ruff e pre-commit passaram em todos os commits.
 - Ruff global: 338 arquivos formatados e lint clean; `makemigrations --check --dry-run`: `No changes detected`.
+- Mypy 2.1.0: `Success: no issues found in 339 source files`, usando o mesmo ambiente de teste definido na CI.
+- Suíte PostgreSQL completa após o ajuste de tipagem: 789 passed, 4 skipped, cobertura 90,71%; os 9 testes do enum físico passaram.
 
 ## Provas de invariantes
 
@@ -39,24 +41,21 @@ Antes de BE-01, os caminhos normal e off-hours falharam com PostgreSQL `Datatype
 - Readiness e métricas contêm apenas agregados e labels de enum controlado.
 - Liveness não chama readiness de assignment e permanece `alive` diante de falha do domínio.
 
-## Limitação do type check
+## Gate de type check
 
-O comando focal `uv run mypy ...` termina antes de analisar os arquivos:
+O erro inicial de construção do plugin foi reproduzido com traceback e causado pela ausência local de `DJANGO_ENV=test` e das variáveis placeholder que a CI já fornece. Com o ambiente equivalente ao workflow, o plugin analisou o projeto e revelou uma única anotação incorreta no teste novo. A anotação passou a importar o tipo público `pytest_django.DjangoDbBlocker`; depois disso, o gate ficou verde:
 
 ```text
-mypy 2.1.0 INTERNAL ERROR
-Error constructing plugin instance of NewSemanalDjangoPlugin
+Success: no issues found in 339 source files
 ```
-
-Isso é um blocker de tooling preexistente, não um erro de tipo emitido pelo código alterado. Deve ser corrigido antes do gate de merge.
 
 ## Auditoria de flake concorrente
 
 A primeira regressão consolidada terminou com 165 passes e uma falha em um teste concorrente preexistente: um thread não encontrou o Agent entre duas leituras. Sem alterar código, o caso focal passou 3/3 e a regressão consolidada repetida passou 166/166. A evidência aponta isolamento/timing do harness; o risco residual fica registrado para CI, sem mascarar ou adicionar retry automático.
 
-## Gates não executados
+## Gates externos e bloqueios atuais
 
-- SP-06: leitura externa HubSpot não autorizada.
-- INT-01: bloqueada por SP-06 e confirmação humana da fonte canônica.
-- V-04: staging/sandbox não autorizado.
-- Push, PR, merge, deploy, migrations externas, flags e recovery: não executados.
+- SP-06: concluído read-only; build remoto #20 corresponde semanticamente a `Judah HubSpot Integration/`.
+- INT-01: bloqueado porque a fonte operacional comprovada é drift não rastreado e o plano exige manifesto canônico versionado.
+- V-04: bloqueado por INT-01 e pela ausência do projeto `inchurch-sandbox` na conta autenticada.
+- Push, PR, merge, deploy, migrations externas, flags e recovery continuam não executados.

@@ -2,16 +2,16 @@ request: hotfix/48108294672-sat-enum-compatibility
 cycle: M
 state: VERIFY
 opened_at: 2026-09-01T20:54:42-03:00
-last_update: 2026-09-01T22:31:00-03:00
+last_update: 2026-09-02T00:35:21-03:00
 agent_run_id: codex-local
 current_blockers:
-  - "SP-06 requer autorização de leitura externa HubSpot e confirmação humana da fonte canônica"
-  - "V-04 requer autorização específica de staging/sandbox HubSpot"
-  - "mypy 2.1.0 falha ao construir NewSemanalDjangoPlugin antes da análise"
-next_action: "Felipe: autorizar SP-06 read-only; depois confirmar a fonte HubSpot canônica"
+  - "INT-01: build #20 corresponde ao diretório não rastreado; falta decisão de governança para um manifesto canônico versionado"
+  - "V-04 depende de INT-01 e de um app sandbox canônico; inchurch-sandbox não existe na conta autenticada"
+next_action: "Manter INT-01/config HubSpot parados até aprovar o path versionado canônico"
 artifacts_generated:
   - docs/plans/INCIDENT-48108294672-implementation-plan.md
-verification_runs: 27
+  - ai-system/requests/hotfix/48108294672-sat-enum-compatibility/00-context/01-hubspot-canonical-source.md
+verification_runs: 35
 
 checklist:
   OPS-01: concluida
@@ -25,15 +25,15 @@ checklist:
   SEC-01: concluida
   OBS-01: concluida
   BE-05: concluida
-  SP-06: aguardando_autorizacao
+  SP-06: concluida
   INT-01: bloqueada
   V-03: concluida
-  V-04: aguardando_autorizacao
+  V-04: bloqueada
   DOC-01: bloqueada
-  OPS-02: aguardando_autorizacao
-  OPS-03: aguardando_autorizacao
-  OPS-04: aguardando_autorizacao
-  OPS-05: aguardando_autorizacao
-  REC-01: aguardando_autorizacao
+  OPS-02: bloqueada
+  OPS-03: bloqueada
+  OPS-04: bloqueada
+  OPS-05: bloqueada
+  REC-01: pendente
   REC-02: bloqueada
-  REC-03: aguardando_autorizacao
+  REC-03: bloqueada
