@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.db import connection, transaction
+from django.db import close_old_connections, connection, transaction
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 
-from apps.support.models import Agent, AgentAvailabilityDecision, AgentStatusHistory
+from apps.support.models import (
+    Agent,
+    AgentAvailabilityDecision,
+    AgentStatusHistory,
+    AvailabilityReconciliationLease,
+)
 from common.database_safety import assert_safe_test_database
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.integration]
@@ -108,11 +117,11 @@ def legacy_agent_status_enum(django_db_setup: None, django_db_blocker: pytest.Dj
             assert _column_type() == (original_format_type, original_udt_name)
 
 
-def _agent(*, status: str) -> Agent:
+def _agent(*, status: str, index: int = 0) -> Agent:
     return Agent.objects.create(
-        name="SAT Enum Contract Agent",
-        agent_email="sat.enum.contract@example.com",
-        hubspot_owner_id=48108294672,
+        name=f"SAT Enum Contract Agent {index}",
+        agent_email=f"sat.enum.contract.{index}@example.com",
+        hubspot_owner_id=48108294672 + index,
         status_enum=status,
         auto_assign_enabled=True,
         is_active=True,
@@ -121,11 +130,11 @@ def _agent(*, status: str) -> Agent:
     )
 
 
-def _available_hubspot_user() -> dict[str, str]:
+def _hubspot_user(*, index: int = 0, availability: str = "available") -> dict[str, str]:
     return {
-        "user_id": "48108294672",
-        "email": "sat.enum.contract@example.com",
-        "availability_status": "available",
+        "user_id": str(48108294672 + index),
+        "email": f"sat.enum.contract.{index}@example.com",
+        "availability_status": availability,
         "out_of_office_hours": "[]",
         "working_hours": json.dumps([{"days": "EVERY_DAY", "startMinute": 0, "endMinute": 1440}]),
         "timezone": "America/Sao_Paulo",
@@ -147,7 +156,7 @@ def test_normal_heartbeat_commits_status_against_legacy_enum(
 ) -> None:
     assert _column_type() == (_ENUM_TYPE, _ENUM_TYPE)
     agent = _agent(status=Agent.StatusEnum.AWAY)
-    mock_client_factory.return_value.get_all_owners_availability.return_value = [_available_hubspot_user()]
+    mock_client_factory.return_value.get_all_owners_availability.return_value = [_hubspot_user()]
 
     from apps.support.sat_service import sat_heartbeat
 
@@ -181,3 +190,155 @@ def test_off_hours_heartbeat_commits_status_against_legacy_enum(
     assert AgentStatusHistory.objects.filter(agent=agent, old_status="online", new_status="away").count() == 1
     assert AgentAvailabilityDecision.objects.filter(agent=agent, new_status="away").count() == 1
     mock_client_factory.assert_not_called()
+
+
+@override_settings(
+    ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+    AVAILABILITY_REQUIRED_SAMPLES=1,
+    AVAILABILITY_STABLE_SECONDS=0,
+)
+@patch("apps.support.sat_service.is_business_hours", return_value=True)
+@patch("apps.integrations.hubspot.client.get_hubspot_client")
+def test_unchanged_status_does_not_issue_scalar_enum_write(
+    mock_client_factory: MagicMock,
+    _mock_business_hours: MagicMock,
+) -> None:
+    agent = _agent(status=Agent.StatusEnum.AWAY)
+    mock_client_factory.return_value.get_all_owners_availability.return_value = [_hubspot_user(availability="away")]
+
+    from apps.support.sat_service import sat_heartbeat
+
+    with CaptureQueriesContext(connection) as queries:
+        result = sat_heartbeat(task_id="enum-contract-unchanged")
+
+    assert result["status_changes"] == 0
+    assert not any('UPDATE "agents" SET "status_enum"' in query["sql"] for query in queries)
+    agent.refresh_from_db()
+    assert agent.status_enum == Agent.StatusEnum.AWAY
+
+
+@override_settings(
+    ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+    AVAILABILITY_REQUIRED_SAMPLES=1,
+    AVAILABILITY_STABLE_SECONDS=0,
+)
+@pytest.mark.parametrize("agent_count", [8, 50, 500])
+@patch("apps.support.sat_service.is_business_hours", return_value=True)
+@patch("apps.integrations.hubspot.client.get_hubspot_client")
+@patch("apps.support.tasks.task_matchmaker_drain_queue.delay")
+def test_status_transition_query_and_time_budget(
+    mock_drain: MagicMock,
+    mock_client_factory: MagicMock,
+    _mock_business_hours: MagicMock,
+    agent_count: int,
+) -> None:
+    for index in range(agent_count):
+        _agent(status=Agent.StatusEnum.AWAY, index=index)
+    mock_client_factory.return_value.get_all_owners_availability.return_value = [
+        _hubspot_user(index=index) for index in range(agent_count)
+    ]
+
+    from apps.support.sat_service import sat_heartbeat
+
+    started_at = time.perf_counter()
+    with CaptureQueriesContext(connection) as queries:
+        result = sat_heartbeat(task_id=f"enum-contract-scale-{agent_count}")
+    duration_seconds = time.perf_counter() - started_at
+
+    scalar_status_writes = [query for query in queries if 'UPDATE "agents" SET "status_enum"' in query["sql"]]
+    assert result["status_changes"] == agent_count
+    assert len(scalar_status_writes) == agent_count
+    assert len(queries) <= (3 * agent_count) + 40
+    assert duration_seconds < 12
+    assert Agent.objects.filter(status_enum=Agent.StatusEnum.ONLINE).count() == agent_count
+    mock_drain.assert_called_once_with()
+
+
+@override_settings(
+    ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+    AVAILABILITY_REQUIRED_SAMPLES=1,
+    AVAILABILITY_STABLE_SECONDS=0,
+)
+@patch("apps.support.sat_service.is_business_hours", return_value=True)
+@patch("apps.integrations.hubspot.client.get_hubspot_client")
+@patch("apps.support.tasks.task_matchmaker_drain_queue.delay")
+def test_failure_after_scalar_status_write_rolls_back_everything(
+    mock_drain: MagicMock,
+    mock_client_factory: MagicMock,
+    _mock_business_hours: MagicMock,
+) -> None:
+    agent = _agent(status=Agent.StatusEnum.AWAY)
+    mock_client_factory.return_value.get_all_owners_availability.return_value = [_hubspot_user()]
+
+    from apps.support.sat_service import sat_heartbeat
+
+    with (
+        patch.object(Agent.objects, "bulk_update", side_effect=RuntimeError("injected batch failure")),
+        pytest.raises(RuntimeError, match="injected batch failure"),
+    ):
+        sat_heartbeat(task_id="enum-contract-rollback")
+
+    agent.refresh_from_db()
+    assert agent.status_enum == Agent.StatusEnum.AWAY
+    assert agent.availability_revision == 0
+    assert not AgentStatusHistory.objects.filter(agent=agent).exists()
+    assert not AgentAvailabilityDecision.objects.filter(agent=agent).exists()
+    mock_drain.assert_not_called()
+
+
+def test_concurrent_lease_has_one_writer_and_monotonic_generation() -> None:
+    from apps.support.sat_service import _acquire_reconciliation_lease, _release_reconciliation_lease
+
+    AvailabilityReconciliationLease.objects.all().delete()
+    barrier = threading.Barrier(2)
+
+    def acquire_concurrently() -> tuple[str, int] | None:
+        close_old_connections()
+        try:
+            barrier.wait(timeout=5)
+            return _acquire_reconciliation_lease()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: acquire_concurrently(), range(2)))
+
+    acquired = [result for result in results if result is not None]
+    assert len(acquired) == 1
+    assert results.count(None) == 1
+    owner_token, first_generation = acquired[0]
+    assert _release_reconciliation_lease(owner_token) is True
+
+    next_lease = _acquire_reconciliation_lease()
+    assert next_lease is not None
+    next_token, next_generation = next_lease
+    assert next_generation == first_generation + 1
+    assert _release_reconciliation_lease(next_token) is True
+
+
+@override_settings(
+    ABSENCE_SAFE_ELIGIBILITY_ENFORCED=True,
+    AVAILABILITY_REQUIRED_SAMPLES=1,
+    AVAILABILITY_STABLE_SECONDS=0,
+)
+@patch("apps.support.sat_service.is_business_hours", return_value=True)
+@patch("apps.integrations.hubspot.client.get_hubspot_client")
+def test_stale_fencing_token_cannot_write_agent(
+    mock_client_factory: MagicMock,
+    _mock_business_hours: MagicMock,
+) -> None:
+    agent = _agent(status=Agent.StatusEnum.AWAY)
+    Agent.objects.filter(pk=agent.pk).update(availability_fencing_token=9999)
+    mock_client_factory.return_value.get_all_owners_availability.return_value = [_hubspot_user()]
+
+    from apps.support.sat_service import sat_heartbeat
+
+    result = sat_heartbeat(task_id="enum-contract-stale-fence")
+
+    agent.refresh_from_db()
+    assert result["agents_checked"] == 0
+    assert result["status_changes"] == 0
+    assert agent.status_enum == Agent.StatusEnum.AWAY
+    assert agent.availability_fencing_token == 9999
+    assert not AgentStatusHistory.objects.filter(agent=agent).exists()
+    assert not AgentAvailabilityDecision.objects.filter(agent=agent).exists()
