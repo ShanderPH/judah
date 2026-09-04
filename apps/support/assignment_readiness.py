@@ -21,6 +21,7 @@ from apps.support.models import (
     Agent,
     AssignmentAttempt,
     NewConversation,
+    OpeningAssignmentCohort,
 )
 
 # (label, model name, ticket column) of every projection that can reference a
@@ -131,7 +132,36 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     if not applied:
         reasons.append("durable_migration_missing")
 
+    cohort_migration_applied = (
+        MigrationRecorder(connection).migration_qs.filter(app="support", name="0030_opening_assignment_cohort").exists()
+    )
+    checks["opening_cohort_mode"] = str(settings.OPENING_COHORT_BARRIER_MODE)
+    checks["opening_cohort_migration_applied"] = cohort_migration_applied
+
     now = timezone.now()
+    active_cohort = (
+        OpeningAssignmentCohort.objects.filter(state=OpeningAssignmentCohort.State.ACTIVE)
+        .order_by("deadline_at")
+        .first()
+        if cohort_migration_applied
+        else None
+    )
+    checks["opening_cohort_active"] = active_cohort is not None
+    checks["opening_cohort_age_seconds"] = (
+        max(0, int((now - active_cohort.cohort_observed_at).total_seconds())) if active_cohort else 0
+    )
+    checks["opening_cohort_deadline_expired"] = bool(active_cohort and active_cohort.deadline_at <= now)
+    checks["opening_cohort_deferred_backlog"] = (
+        NewConversation.objects.filter(
+            automatic_assignment_eligible=True,
+            next_assignment_attempt_at=active_cohort.recheck_at,
+            entered_queue_at__lt=active_cohort.window_started_at,
+        ).count()
+        if active_cohort
+        else 0
+    )
+    if checks["opening_cohort_deadline_expired"] and checks["opening_cohort_deferred_backlog"]:
+        reasons.append("opening_cohort_deadline_expired")
     freshness_cutoff = now - timedelta(seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS))
     active_agents = Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
     stale_agents = (
@@ -300,6 +330,12 @@ def emit_assignment_readiness_metrics(readiness: dict[str, Any]) -> None:
     emit_metric("assignment_queue_ready_depth", checks["ready_queue_depth"], kind="gauge")
     emit_metric("assignment_queue_oldest_age_seconds", checks["oldest_ready_age_seconds"], kind="gauge")
     emit_metric("assignment_capacity_drift_agents", checks["capacity_drift_agents"], kind="gauge")
+    emit_metric(
+        "assignment_cohort_active",
+        int(bool(checks.get("opening_cohort_active", False))),
+        kind="gauge",
+        mode=str(checks.get("opening_cohort_mode", "off")),
+    )
     for attempt_state, count in checks["attempts_by_state"].items():
         emit_metric("assignment_attempts", count, kind="gauge", state=attempt_state)
     for attempt_state, count in checks["stuck_attempts_by_state"].items():

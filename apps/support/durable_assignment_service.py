@@ -12,7 +12,7 @@ from enum import StrEnum
 import structlog
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import F, Q, Value
+from django.db.models import F, Q, QuerySet, Value
 from django.db.models.functions import Greatest
 from django.utils import timezone
 
@@ -67,6 +67,7 @@ class ReservationReason(StrEnum):
     QUEUE_EMPTY_OR_CLAIMED = "queue_empty_or_claimed"
     NO_ELIGIBLE_CANDIDATE = "no_eligible_candidate"
     CANDIDATE_CHANGED = "candidate_changed"
+    DEFERRED_STABILIZING_COHORT = "deferred_stabilizing_cohort"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +154,27 @@ def _verify_candidates() -> list[tuple[Agent, str]]:
     return verified
 
 
+def _ready_queue(
+    now: datetime,
+    ticket_id: str | None,
+    excluded: set[uuid.UUID] | None,
+) -> QuerySet[NewConversation]:
+    """Build the canonical ready queue selection for both barrier checks."""
+    ready = (
+        NewConversation.objects.filter(
+            automatic_assignment_eligible=True,
+            queue_status__in=(NewConversation.QueueStatus.PENDING, NewConversation.QueueStatus.QUEUED),
+        )
+        .filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=now))
+        .filter(Q(claim_expires_at__isnull=True) | Q(claim_expires_at__lte=now))
+    )
+    if ticket_id is not None:
+        ready = ready.filter(hubspot_ticket_id=ticket_id)
+    if excluded:
+        ready = ready.exclude(pk__in=excluded)
+    return ready
+
+
 def _mark_external_applied(attempt_id: uuid.UUID, *, classification: str) -> AssignmentAttempt:
     """Record a confirmed provider owner without duplicating finalization."""
     with transaction.atomic():
@@ -187,25 +209,26 @@ def reserve_next_assignment(
 ) -> Reservation:
     """Claim the oldest ready row and reserve one verified agent atomically."""
     from apps.support.eligibility_service import evaluate_persisted_agent
+    from apps.support.opening_cohort_service import evaluate_opening_cohort_barrier
 
-    now = timezone.now()
-    ready = (
-        NewConversation.objects.filter(
-            automatic_assignment_eligible=True,
-            queue_status__in=(
-                NewConversation.QueueStatus.PENDING,
-                NewConversation.QueueStatus.QUEUED,
-            ),
+    with transaction.atomic():
+        database_now = _database_now()
+        precheck_row = (
+            _ready_queue(database_now, ticket_id, exclude_queue_row_ids)
+            .select_for_update(skip_locked=True)
+            .order_by("entered_queue_at", "id")
+            .first()
         )
-        .filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=now))
-        .filter(Q(claim_expires_at__isnull=True) | Q(claim_expires_at__lte=now))
-    )
-    if ticket_id is not None:
-        ready = ready.filter(hubspot_ticket_id=ticket_id)
-    if exclude_queue_row_ids:
-        ready = ready.exclude(pk__in=exclude_queue_row_ids)
-    if not ready.exists():
-        return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
+        if precheck_row is None:
+            return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
+        precheck = evaluate_opening_cohort_barrier(precheck_row, now=database_now)
+        if precheck.deferred:
+            return Reservation(
+                None,
+                ReservationReason.DEFERRED_STABILIZING_COHORT,
+                precheck_row.pk,
+                precheck_row.cycle_id,
+            )
 
     candidates = _verify_candidates()
     if not candidates:
@@ -215,24 +238,19 @@ def reserve_next_assignment(
     for candidate, reason in candidates:
         with transaction.atomic():
             database_now = _database_now()
-            ready = (
-                NewConversation.objects.filter(
-                    automatic_assignment_eligible=True,
-                    queue_status__in=(
-                        NewConversation.QueueStatus.PENDING,
-                        NewConversation.QueueStatus.QUEUED,
-                    ),
-                )
-                .filter(Q(next_assignment_attempt_at__isnull=True) | Q(next_assignment_attempt_at__lte=database_now))
-                .filter(Q(claim_expires_at__isnull=True) | Q(claim_expires_at__lte=database_now))
-            )
-            if ticket_id is not None:
-                ready = ready.filter(hubspot_ticket_id=ticket_id)
-            if exclude_queue_row_ids:
-                ready = ready.exclude(pk__in=exclude_queue_row_ids)
+            ready = _ready_queue(database_now, ticket_id, exclude_queue_row_ids)
             queue_row = ready.select_for_update(skip_locked=True).order_by("entered_queue_at", "id").first()
             if queue_row is None:
                 return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
+
+            locked_barrier = evaluate_opening_cohort_barrier(queue_row, now=database_now)
+            if locked_barrier.deferred:
+                return Reservation(
+                    None,
+                    ReservationReason.DEFERRED_STABILIZING_COHORT,
+                    queue_row.pk,
+                    queue_row.cycle_id,
+                )
 
             if queue_row.cycle_id is not None and _lock_assignable_cycle(queue_row) is None:
                 queue_row.queue_status = NewConversation.QueueStatus.FAILED

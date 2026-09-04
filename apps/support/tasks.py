@@ -227,7 +227,8 @@ def task_matchmaker_drain_queue() -> dict:
     """
     from apps.support.agent_sync_service import is_business_hours
     from apps.support.matchmaker_service import matchmaker_drain_queue
-    from apps.support.models import NewConversation
+    from apps.support.models import NewConversation, OpeningAssignmentCohort
+    from apps.webhooks.metrics import emit_metric
 
     # The safety-net task usually finds an empty queue. Read only one scalar
     # before loading calendar rules and agent eligibility for that common case.
@@ -255,6 +256,12 @@ def task_matchmaker_drain_queue() -> dict:
         return {"skipped_off_hours": True}
 
     # Redis lock — prevent overlapping drains
+    expired_cohort_ids = list(
+        OpeningAssignmentCohort.objects.filter(
+            state=OpeningAssignmentCohort.State.ACTIVE,
+            deadline_at__lte=timezone.now(),
+        ).values_list("pk", flat=True)
+    )
     try:
         result = matchmaker_drain_queue()
     except Exception as exc:
@@ -271,7 +278,55 @@ def task_matchmaker_drain_queue() -> dict:
         cataloged_error_context("assignment_repair_unexpected") if result.get("systemic_failures", 0) else {}
     )
     log_method("task_matchmaker_drain_queue_done", **result, **error_context)
+    if expired_cohort_ids:
+        released_by_deadline = OpeningAssignmentCohort.objects.filter(
+            pk__in=expired_cohort_ids,
+            state=OpeningAssignmentCohort.State.RELEASED,
+            release_reason=OpeningAssignmentCohort.ReleaseReason.DEADLINE,
+        ).count()
+        if released_by_deadline:
+            emit_metric("assignment_cohort_beat_fallback_total", released_by_deadline)
     return result
+
+
+@shared_task(
+    bind=True,
+    acks_late=True,
+    name="support.task_recheck_opening_assignment_cohort",
+)
+def task_recheck_opening_assignment_cohort(self, cohort_id: str) -> dict[str, object]:
+    """Refresh the frozen opening cohort once, then invoke the canonical drain."""
+    from apps.support.models import OpeningAssignmentCohort
+    from apps.support.sat_service import sat_heartbeat
+    from apps.webhooks.metrics import emit_metric
+
+    try:
+        cohort = OpeningAssignmentCohort.objects.get(pk=cohort_id)
+    except OpeningAssignmentCohort.DoesNotExist, ValueError:
+        emit_metric("assignment_cohort_callbacks_total", 1, result="missing")
+        return {"result": "missing"}
+    if cohort.state != OpeningAssignmentCohort.State.ACTIVE:
+        emit_metric("assignment_cohort_callbacks_total", 1, result="released")
+        return {"result": "released"}
+    now = timezone.now()
+    if now < cohort.recheck_at:
+        emit_metric("assignment_cohort_callbacks_total", 1, result="early")
+        return {"result": "early"}
+
+    reconciliation = sat_heartbeat(
+        task_id=f"opening-cohort:{self.request.id or cohort.pk}",
+        force_refresh=True,
+    )
+    blocked = any(
+        reconciliation.get(reason)
+        for reason in ("error", "skipped_non_authoritative_runtime", "skipped_off_hours", "skipped_locked")
+    )
+    if blocked:
+        emit_metric("assignment_cohort_callbacks_total", 1, result="reconciliation_blocked")
+        return {"result": "reconciliation_blocked"}
+    result = task_matchmaker_drain_queue()
+    emit_metric("assignment_cohort_callbacks_total", 1, result="drained")
+    return {"result": "drained", "drain": result}
 
 
 @shared_task(name="support.task_repair_assignment_attempts")

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -23,6 +24,16 @@ from apps.support.schemas import HelpdeskCalendarRuleRequest
 from common.exceptions import ConflictError, NotFoundError, ValidationError
 
 DEFAULT_TIMEZONE = "America/Sao_Paulo"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalWindow:
+    """Timezone-aware active interval selected by the calendar authority."""
+
+    start_at: datetime
+    end_at: datetime
+    timezone_name: str
+    source_rule_id: uuid.UUID | None
 
 
 @dataclass(slots=True)
@@ -252,22 +263,39 @@ def resolve_range(start: date, end: date) -> tuple[HelpdeskSchedule, list[dict[s
         )
 
 
-def resolve_now(now: datetime | None = None) -> dict[str, Any]:
-    """Resolve the current operational state and active local interval."""
+def _current_resolution(now: datetime | None = None) -> tuple[dict[str, Any], OperationalWindow | None]:
+    """Resolve one instant and its authoritative half-open operational window."""
     schedule = get_schedule()
     instant = now or timezone.now()
-    local = (
-        instant.astimezone(_tz(schedule.timezone_name))
-        if instant.tzinfo
-        else instant.replace(tzinfo=_tz(schedule.timezone_name))
-    )
-    resolution = resolve_day(local.date(), schedule=schedule)
+    try:
+        zone = _tz(schedule.timezone_name)
+        local = instant.astimezone(zone) if instant.tzinfo else instant.replace(tzinfo=zone)
+        resolution = resolve_day(local.date(), schedule=schedule)
+    except ValueError, ZoneInfoNotFoundError, ValidationError:
+        return (
+            {
+                "date": instant.date(),
+                "state": "CLOSED",
+                "intervals": [],
+                "reason": "calendar_degraded",
+                "message": None,
+                "source_rule_id": None,
+                "source_rule_name": None,
+                "priority": None,
+                "is_open_now": False,
+            },
+            None,
+        )
     current = local.time().replace(tzinfo=None)
-    active = any(
-        time.fromisoformat(item["start"]) <= current < time.fromisoformat(item["end"])
-        for item in resolution["intervals"]
+    active_interval = next(
+        (
+            item
+            for item in resolution["intervals"]
+            if time.fromisoformat(item["start"]) <= current < time.fromisoformat(item["end"])
+        ),
+        None,
     )
-    result = {**resolution, "is_open_now": resolution["state"] == "OPEN" and active}
+    result = {**resolution, "is_open_now": resolution["state"] == "OPEN" and active_interval is not None}
     from apps.ai_agents.utils.business_rules import is_quinta_fire
 
     if not result["is_open_now"] and is_quinta_fire(local) and not resolution["source_rule_id"]:
@@ -276,7 +304,25 @@ def resolve_now(now: datetime | None = None) -> dict[str, Any]:
         result["reason"] = f"absence:{resolution['reason']}"
     elif not result["is_open_now"] and not result["reason"]:
         result["reason"] = "off_hours"
-    return result
+    if not result["is_open_now"] or active_interval is None:
+        return result, None
+    window = OperationalWindow(
+        start_at=datetime.combine(local.date(), time.fromisoformat(active_interval["start"]), zone).astimezone(UTC),
+        end_at=datetime.combine(local.date(), time.fromisoformat(active_interval["end"]), zone).astimezone(UTC),
+        timezone_name=schedule.timezone_name,
+        source_rule_id=resolution["source_rule_id"],
+    )
+    return result, window
+
+
+def resolve_operational_window(now: datetime | None = None) -> OperationalWindow | None:
+    """Return the active interval, or ``None`` when calendar authority is closed/degraded."""
+    return _current_resolution(now)[1]
+
+
+def resolve_now(now: datetime | None = None) -> dict[str, Any]:
+    """Resolve the current operational state and active local interval."""
+    return _current_resolution(now)[0]
 
 
 def serialize_rule(rule: HelpdeskScheduleRule) -> dict[str, Any]:
