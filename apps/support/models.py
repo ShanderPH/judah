@@ -427,6 +427,38 @@ class NewConversation(models.Model):
         )
 
 
+class OpeningAssignmentCohort(models.Model):
+    """Frozen set of agents observed while opening backlog is held."""
+
+    class State(models.TextChoices):
+        ACTIVE = "active", "Active"
+        RELEASED = "released", "Released"
+
+    class ReleaseReason(models.TextChoices):
+        ALL_SETTLED = "all_settled", "All Settled"
+        DEADLINE = "deadline", "Deadline"
+        DISABLED = "disabled", "Disabled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    window_started_at = models.DateTimeField(unique=True)
+    cohort_observed_at = models.DateTimeField()
+    recheck_at = models.DateTimeField()
+    deadline_at = models.DateTimeField()
+    member_agent_ids = models.JSONField(default=list)
+    initial_eligible_count = models.PositiveIntegerField()
+    initial_stabilizing_count = models.PositiveIntegerField()
+    state = models.CharField(max_length=16, choices=State.choices, default=State.ACTIVE)
+    release_reason = models.CharField(max_length=16, choices=ReleaseReason.choices, blank=True, default="")
+    callback_scheduled_at = models.DateTimeField(null=True, blank=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "opening_assignment_cohorts"
+        indexes = [models.Index(fields=["state", "deadline_at"], name="idx_open_cohort_deadline")]  # noqa: RUF012
+
+
 class AssignedConversation(models.Model):
     """Ticket that has been assigned to an agent by the auto-assignment system.
 

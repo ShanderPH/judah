@@ -106,6 +106,7 @@ class QueueItemOutcome(StrEnum):
     DEFERRED_NO_AGENT = "deferred_no_agent"
     DEFERRED_CANDIDATE_CHANGED = "deferred_candidate_changed"
     DEFERRED_PROVIDER_TRANSIENT = "deferred_provider_transient"
+    DEFERRED_STABILIZING_COHORT = "deferred_stabilizing_cohort"
     CLAIMED_ELSEWHERE = "claimed_elsewhere"
     QUEUE_EMPTY = "queue_empty"
     SYSTEMIC_FAILURE = "systemic_failure"
@@ -160,6 +161,8 @@ def process_queue_item(
             return QueueItemResult(QueueItemOutcome.QUARANTINED_STALE_CYCLE, row_id, cycle_id, True)
         if reservation.reason == "candidate_changed":
             return QueueItemResult(QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED, row_id, cycle_id, False)
+        if reservation.reason == "deferred_stabilizing_cohort":
+            return QueueItemResult(QueueItemOutcome.DEFERRED_STABILIZING_COHORT, row_id, cycle_id, False)
         return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, row_id, cycle_id, False)
     if reservation.reason == "completed_same_cycle":
         return QueueItemResult(QueueItemOutcome.CONVERGED_COMPLETED, row_id, cycle_id, True)
@@ -206,6 +209,7 @@ def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
         QueueItemOutcome.QUEUE_EMPTY: AssignmentOutcome.QUEUE_EMPTY,
         QueueItemOutcome.DEFERRED_NO_AGENT: AssignmentOutcome.NO_AGENT,
         QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED: AssignmentOutcome.NO_AGENT,
+        QueueItemOutcome.DEFERRED_STABILIZING_COHORT: AssignmentOutcome.NO_AGENT,
         QueueItemOutcome.QUARANTINED_STALE_CYCLE: AssignmentOutcome.STALE_TICKET,
         QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR: AssignmentOutcome.STALE_TICKET,
         QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT: AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR,

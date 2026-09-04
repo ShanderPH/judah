@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +14,13 @@ from celery.contrib.testing.worker import start_worker
 from django.db import close_old_connections
 from django.utils import timezone
 
-from apps.support.models import Agent, AssignmentAttempt, AvailabilityReconciliationLease, NewConversation
+from apps.support.models import (
+    Agent,
+    AssignmentAttempt,
+    AvailabilityReconciliationLease,
+    NewConversation,
+    OpeningAssignmentCohort,
+)
 from celery import Celery
 
 REDIS_TEST_URL = os.environ.get("JUDAH_TEST_REDIS_URL", "")
@@ -152,3 +160,84 @@ def test_real_worker_serializes_sat_and_respects_capacity() -> None:
     lease = AvailabilityReconciliationLease.objects.get(key="sat-authoritative-reconciliation")
     assert lease.generation == 1
     assert lease.owner_token == ""
+
+
+def test_opening_cohort_eta_survives_worker_handoff_and_duplicate_delivery() -> None:
+    """A Redis-backed ETA is durable and a duplicate is a no-op after release."""
+    token = secrets.token_hex(6)
+    queue_name = f"judah-v04-{token}"
+    celery_app = Celery(
+        f"judah-v04-{token}",
+        broker=_redis_database_url(12),
+        backend=_redis_database_url(13),
+    )
+    celery_app.conf.update(
+        task_always_eager=False,
+        task_ignore_result=False,
+        task_serializer="json",
+        result_serializer="json",
+        accept_content=["json"],
+        task_default_queue=queue_name,
+        worker_prefetch_multiplier=1,
+        result_expires=60,
+    )
+
+    @celery_app.task(name=f"tests.v04.opening-cohort.{token}", acks_late=True)
+    def recheck(cohort_id: str) -> dict[str, object]:
+        close_old_connections()
+        try:
+            from apps.support.tasks import task_recheck_opening_assignment_cohort
+
+            return task_recheck_opening_assignment_cohort.run(cohort_id)
+        finally:
+            close_old_connections()
+
+    now = timezone.now()
+    cohort = OpeningAssignmentCohort.objects.create(
+        window_started_at=now - timedelta(seconds=5),
+        cohort_observed_at=now - timedelta(seconds=5),
+        recheck_at=now + timedelta(seconds=3),
+        deadline_at=now + timedelta(seconds=30),
+        member_agent_ids=[],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+    )
+
+    def release_on_drain() -> dict[str, int]:
+        OpeningAssignmentCohort.objects.filter(pk=cohort.pk).update(
+            state=OpeningAssignmentCohort.State.RELEASED,
+            release_reason=OpeningAssignmentCohort.ReleaseReason.ALL_SETTLED,
+            released_at=timezone.now(),
+        )
+        return {"assigned": 0}
+
+    with (
+        patch("apps.support.sat_service.sat_heartbeat", return_value={"agents_checked": 2}) as heartbeat,
+        patch("apps.support.tasks.task_matchmaker_drain_queue", side_effect=release_on_drain) as drain,
+        patch("apps.webhooks.metrics.emit_metric"),
+    ):
+        started = time.monotonic()
+        with start_worker(
+            celery_app,
+            pool="threads",
+            concurrency=1,
+            perform_ping_check=False,
+            shutdown_timeout=15,
+        ):
+            scheduled = recheck.apply_async(args=(str(cohort.pk),), eta=cohort.recheck_at, queue=queue_name)
+            assert scheduled.ready() is False
+        with start_worker(
+            celery_app,
+            pool="threads",
+            concurrency=1,
+            perform_ping_check=False,
+            shutdown_timeout=15,
+        ):
+            first = scheduled.get(timeout=10)
+            duplicate = recheck.apply_async(args=(str(cohort.pk),), queue=queue_name).get(timeout=10)
+
+    assert time.monotonic() - started >= 2.0
+    assert first["result"] == "drained"
+    assert duplicate == {"result": "released"}
+    heartbeat.assert_called_once()
+    drain.assert_called_once()

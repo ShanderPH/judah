@@ -8,6 +8,7 @@ from pathlib import Path
 
 import structlog
 from decouple import Csv, config
+from django.core.exceptions import ImproperlyConfigured
 
 from common.logging import add_service_context, scrub_pii
 
@@ -235,6 +236,9 @@ ABSENCE_SAFE_ELIGIBILITY_ENFORCED = config(
 AVAILABILITY_FRESHNESS_SECONDS = config("AVAILABILITY_FRESHNESS_SECONDS", default=60, cast=int)
 AVAILABILITY_STABLE_SECONDS = config("AVAILABILITY_STABLE_SECONDS", default=30, cast=int)
 AVAILABILITY_REQUIRED_SAMPLES = config("AVAILABILITY_REQUIRED_SAMPLES", default=2, cast=int)
+OPENING_COHORT_BARRIER_MODE = config("OPENING_COHORT_BARRIER_MODE", default="off").strip().lower()
+if OPENING_COHORT_BARRIER_MODE not in {"off", "shadow", "enforce"}:
+    raise ImproperlyConfigured("OPENING_COHORT_BARRIER_MODE must be one of: off, shadow, enforce")
 AVAILABILITY_LEASE_TTL_SECONDS = config("AVAILABILITY_LEASE_TTL_SECONDS", default=25, cast=int)
 SAT_HEARTBEAT_INTERVAL_SECONDS = max(
     20,
