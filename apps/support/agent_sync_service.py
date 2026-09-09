@@ -195,9 +195,18 @@ def sync_all_agents_status_and_counts_optimized() -> dict:
     api_calls_made = 0
 
     # Fetch conversation counts in parallel (batched by agent)
+    from apps.support.capacity_service import capacity_mode
+    from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+    if capacity_mode() != "off":
+        for agent in agents:
+            refresh_agent_capacity(agent)
+
     count_map: dict[int, int] = {}
 
     def fetch_count(agent: Agent) -> tuple[int, int] | None:
+        if capacity_mode() == "enforce":
+            return None
         try:
             count = client.count_active_tickets_by_owner(agent.hubspot_owner_id)
             return (agent.hubspot_owner_id, count)

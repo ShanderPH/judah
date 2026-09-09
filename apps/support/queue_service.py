@@ -27,7 +27,7 @@ from apps.support.models import Agent
 logger = structlog.get_logger(__name__)
 
 
-def get_eligible_agents() -> list[Agent]:
+def get_eligible_agents(*, include_capacity_blocked: bool = False) -> list[Agent]:
     """Return agents that can currently receive a ticket.
 
     Eligibility criteria:
@@ -47,6 +47,10 @@ def get_eligible_agents() -> list[Agent]:
         "auto_assign_enabled": True,
         "current_simultaneous_chats__lt": Coalesce(F("max_simultaneous_chats"), 5),
     }
+    if include_capacity_blocked:
+        # Previously full agents also need identity reconciliation before a
+        # stale materialized total can exclude them indefinitely.
+        filters.pop("current_simultaneous_chats__lt")
     if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
         filters["eligibility_state"] = Agent.EligibilityState.ELIGIBLE
         filters["availability_observed_at__gte"] = timezone.now() - timezone.timedelta(
@@ -180,6 +184,10 @@ def increment_agent_chat_count(agent: Agent) -> None:
     from apps.support.availability_runtime import require_routing_writer_authority
 
     require_routing_writer_authority("increment_agent_chat_count")
+    from apps.support.capacity_service import capacity_enforced
+
+    if capacity_enforced():
+        raise RuntimeError("Capacity increments require an identified reservation or observation")
 
     now = timezone.now()
     Agent.objects.filter(pk=agent.pk).update(
@@ -207,6 +215,10 @@ def decrement_agent_chat_count(agent: Agent) -> None:
     from apps.support.availability_runtime import require_routing_writer_authority
 
     require_routing_writer_authority("decrement_agent_chat_count")
+    from apps.support.capacity_service import capacity_enforced
+
+    if capacity_enforced():
+        raise RuntimeError("Capacity decrements require an identified occupancy release")
     Agent.objects.filter(pk=agent.pk).update(
         current_simultaneous_chats=Greatest(F("current_simultaneous_chats") - 1, Value(0)),
         updated_at=timezone.now(),

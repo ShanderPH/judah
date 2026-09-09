@@ -731,6 +731,15 @@ def sat_reconcile_agent_load(agent) -> int:
         log_runtime_rejection("sat_reconcile_agent_load")
         return agent.current_simultaneous_chats
 
+    from apps.support.capacity_service import capacity_mode
+    from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+    if capacity_mode() != "off":
+        refresh_agent_capacity(agent)
+        if capacity_mode() == "enforce":
+            agent.refresh_from_db()
+            return agent.current_simultaneous_chats
+
     client = get_hubspot_client()
 
     try:

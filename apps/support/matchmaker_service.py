@@ -107,6 +107,7 @@ class QueueItemOutcome(StrEnum):
     DEFERRED_CANDIDATE_CHANGED = "deferred_candidate_changed"
     DEFERRED_PROVIDER_TRANSIENT = "deferred_provider_transient"
     DEFERRED_STABILIZING_COHORT = "deferred_stabilizing_cohort"
+    DEFERRED_CAPACITY_NOT_READY = "deferred_capacity_not_ready"
     CLAIMED_ELSEWHERE = "claimed_elsewhere"
     QUEUE_EMPTY = "queue_empty"
     SYSTEMIC_FAILURE = "systemic_failure"
@@ -163,6 +164,8 @@ def process_queue_item(
             return QueueItemResult(QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED, row_id, cycle_id, False)
         if reservation.reason == "deferred_stabilizing_cohort":
             return QueueItemResult(QueueItemOutcome.DEFERRED_STABILIZING_COHORT, row_id, cycle_id, False)
+        if reservation.reason == "capacity_not_ready":
+            return QueueItemResult(QueueItemOutcome.DEFERRED_CAPACITY_NOT_READY, row_id, cycle_id, False)
         return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, row_id, cycle_id, False)
     if reservation.reason == "completed_same_cycle":
         return QueueItemResult(QueueItemOutcome.CONVERGED_COMPLETED, row_id, cycle_id, True)
@@ -210,6 +213,7 @@ def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
         QueueItemOutcome.DEFERRED_NO_AGENT: AssignmentOutcome.NO_AGENT,
         QueueItemOutcome.DEFERRED_CANDIDATE_CHANGED: AssignmentOutcome.NO_AGENT,
         QueueItemOutcome.DEFERRED_STABILIZING_COHORT: AssignmentOutcome.NO_AGENT,
+        QueueItemOutcome.DEFERRED_CAPACITY_NOT_READY: AssignmentOutcome.NO_AGENT,
         QueueItemOutcome.QUARANTINED_STALE_CYCLE: AssignmentOutcome.STALE_TICKET,
         QueueItemOutcome.QUARANTINED_PERMANENT_PROVIDER_ERROR: AssignmentOutcome.STALE_TICKET,
         QueueItemOutcome.DEFERRED_PROVIDER_TRANSIENT: AssignmentOutcome.RETRYABLE_EXTERNAL_ERROR,
@@ -244,7 +248,12 @@ def matchmaker_drain_queue() -> dict:
             "quarantined": 0,
             "deferred": 0,
         }
-    if not get_eligible_agents():
+    from apps.support.capacity_service import capacity_enforced
+
+    potential_agents = (
+        get_eligible_agents(include_capacity_blocked=True) if capacity_enforced() else get_eligible_agents()
+    )
+    if not potential_agents:
         return {
             "assigned": 0,
             "remaining": total_pending,

@@ -242,6 +242,25 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     checks["capacity_drift_agents"] = active_agents.filter(
         current_simultaneous_chats__gt=F("max_simultaneous_chats")
     ).count()
+    from apps.support.capacity_service import capacity_count, capacity_mode
+    from apps.support.models import AgentCapacityReservation, SupportTicketOccupancy
+
+    mode = capacity_mode()
+    checks["capacity_mode"] = mode
+    if mode != "off":
+        fresh_after = now - timedelta(seconds=int(settings.SUPPORT_CAPACITY_FRESHNESS_SECONDS))
+        not_ready = active_agents.exclude(capacity_state="ready", capacity_reconciled_at__gte=fresh_after).count()
+        mismatches = sum(agent.current_simultaneous_chats != capacity_count(agent.pk) for agent in active_agents)
+        checks["identified_capacity"] = {
+            "not_ready_agents": not_ready,
+            "counter_mismatches": mismatches,
+            "held_reservations": AgentCapacityReservation.objects.filter(state="held").count(),
+            "occupancy_without_cycle": SupportTicketOccupancy.objects.filter(
+                state="active", cycle__isnull=True
+            ).count(),
+        }
+        if mode == "enforce" and (not_ready or mismatches):
+            reasons.append("identified_capacity_not_ready")
     if checks["poisoned_queue_rows"]:
         reasons.append("assignment_queue_poisoned_rows")
 

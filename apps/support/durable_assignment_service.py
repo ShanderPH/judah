@@ -21,6 +21,16 @@ from apps.integrations.hubspot.exceptions import (
     HubSpotAPIError,
     HubSpotResourceNotFoundError,
 )
+from apps.support.capacity_service import (
+    assignment_transaction,
+    capacity_enforced,
+    capacity_ready,
+    conclude_reservation,
+    degrade_agents,
+    hold_capacity,
+    materialize,
+    optional_ticket_transaction,
+)
 from apps.support.error_catalog import cataloged_error_context
 from apps.support.models import (
     Agent,
@@ -68,6 +78,7 @@ class ReservationReason(StrEnum):
     NO_ELIGIBLE_CANDIDATE = "no_eligible_candidate"
     CANDIDATE_CHANGED = "candidate_changed"
     DEFERRED_STABILIZING_COHORT = "deferred_stabilizing_cohort"
+    CAPACITY_NOT_READY = "capacity_not_ready"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +137,24 @@ def _verify_candidates() -> list[tuple[Agent, str]]:
     from apps.support.sat_service import sat_verify_agent_assignment_eligibility
 
     candidates = _ordered_candidates()
+    if capacity_enforced():
+        from apps.support.owner_reconciliation_service import refresh_agent_capacity
+        from apps.support.queue_service import get_eligible_agents
+
+        refreshed_ids = set()
+        for agent in get_eligible_agents(include_capacity_blocked=True):
+            if refresh_agent_capacity(agent):
+                refreshed_ids.add(agent.pk)
+            else:
+                logger.info(
+                    "assignment_candidate_rejected",
+                    agent_id=str(agent.pk),
+                    reason="capacity_not_ready",
+                    source="capacity",
+                )
+        # Rank only after refresh: a full alternative must not exclude the
+        # last automatic owner when that owner is the only eligible agent.
+        candidates = [agent for agent in _ordered_candidates() if agent.pk in refreshed_ids]
     if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
         return [(agent, "legacy_rollout") for agent in candidates]
 
@@ -177,13 +206,14 @@ def _ready_queue(
 
 def _mark_external_applied(attempt_id: uuid.UUID, *, classification: str) -> AssignmentAttempt:
     """Record a confirmed provider owner without duplicating finalization."""
-    with transaction.atomic():
+    with assignment_transaction(attempt_id):
         attempt = AssignmentAttempt.objects.select_for_update().get(pk=attempt_id)
         if attempt.state == AssignmentAttempt.State.COMPLETED:
             return attempt
         if attempt.state not in (
             AssignmentAttempt.State.RESERVED,
             AssignmentAttempt.State.EXTERNAL_APPLIED,
+            AssignmentAttempt.State.REPAIR_REQUIRED,
         ):
             raise ValueError(f"attempt {attempt.pk} cannot record an external effect from {attempt.state}")
         attempt.state = AssignmentAttempt.State.EXTERNAL_APPLIED
@@ -233,12 +263,16 @@ def reserve_next_assignment(
     candidates = _verify_candidates()
     if not candidates:
         deferred_id = _defer_without_candidate(ticket_id, exclude_queue_row_ids)
+        if capacity_enforced() and any(agent.capacity_state != "ready" for agent in _ordered_candidates()):
+            return Reservation(None, ReservationReason.CAPACITY_NOT_READY, deferred_id)
         return Reservation(None, ReservationReason.NO_ELIGIBLE_CANDIDATE, deferred_id)
 
     for candidate, reason in candidates:
-        with transaction.atomic():
+        with optional_ticket_transaction(precheck_row.hubspot_ticket_id) as occupancy:
             database_now = _database_now()
             ready = _ready_queue(database_now, ticket_id, exclude_queue_row_ids)
+            if capacity_enforced():
+                ready = ready.filter(pk=precheck_row.pk)
             queue_row = ready.select_for_update(skip_locked=True).order_by("entered_queue_at", "id").first()
             if queue_row is None:
                 return Reservation(None, ReservationReason.QUEUE_EMPTY_OR_CLAIMED)
@@ -337,7 +371,7 @@ def reserve_next_assignment(
                 if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED
                 else locked_agent.current_simultaneous_chats < (locked_agent.max_simultaneous_chats or 5)
             )
-            if not eligible_now:
+            if not eligible_now or (capacity_enforced() and not capacity_ready(locked_agent)):
                 logger.info(
                     "assignment_candidate_rejected",
                     agent_id=str(candidate.pk),
@@ -363,7 +397,8 @@ def reserve_next_assignment(
                     "updated_at",
                 ]
             )
-            locked_agent.current_simultaneous_chats += 1
+            if not capacity_enforced():
+                locked_agent.current_simultaneous_chats += 1
             locked_agent.last_assignment_at = database_now
             locked_agent.updated_at = database_now
             locked_agent.save(
@@ -387,7 +422,7 @@ def reserve_next_assignment(
                 decision_snapshot={
                     "agent_id": str(locked_agent.pk),
                     "availability_revision": locked_agent.availability_revision,
-                    "current_chats_before": locked_agent.current_simultaneous_chats - 1,
+                    "current_chats_before": locked_agent.current_simultaneous_chats - (0 if capacity_enforced() else 1),
                     "max_chats": locked_agent.max_simultaneous_chats or 5,
                     "cycle_id": str(queue_row.cycle_id) if queue_row.cycle_id else None,
                 },
@@ -395,6 +430,8 @@ def reserve_next_assignment(
                 provider_request_classification="hubspot_owner_update",
                 reserved_at=database_now,
             )
+            if occupancy is not None:
+                hold_capacity(occupancy, locked_agent, attempt=attempt)
             logger.info(
                 "assignment_attempt_reserved",
                 attempt_id=str(attempt.pk),
@@ -423,6 +460,11 @@ def reserve_manual_assignment(
     from apps.support.sat_service import sat_verify_agent_assignment_eligibility
 
     candidate = Agent.objects.get(pk=agent_id)
+    if capacity_enforced():
+        from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+        if not refresh_agent_capacity(candidate):
+            return Reservation(None, "capacity_not_ready")
     captured_now = timezone.now()
     if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
         local = evaluate_persisted_agent(candidate, captured_now)
@@ -432,7 +474,7 @@ def reserve_manual_assignment(
         if not remote.eligible:
             return Reservation(None, remote.reason.value)
 
-    with transaction.atomic():
+    with optional_ticket_transaction(ticket_id) as occupancy:
         now = _database_now()
         queue_row = NewConversation.objects.select_for_update().filter(hubspot_ticket_id=ticket_id).first()
         if queue_row is None:
@@ -453,7 +495,11 @@ def reserve_manual_assignment(
             if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED
             else agent.current_simultaneous_chats < (agent.max_simultaneous_chats or 5)
         )
-        if not eligible_now or agent.availability_revision != candidate.availability_revision:
+        if (
+            not eligible_now
+            or agent.availability_revision != candidate.availability_revision
+            or (capacity_enforced() and not capacity_ready(agent))
+        ):
             return Reservation(None, "eligibility_revision_changed")
         claim_token = uuid.uuid4().hex
         queue_row.claim_owner_token = claim_token
@@ -471,7 +517,8 @@ def reserve_manual_assignment(
                 "updated_at",
             ]
         )
-        agent.current_simultaneous_chats += 1
+        if not capacity_enforced():
+            agent.current_simultaneous_chats += 1
         agent.last_assignment_at = now
         agent.updated_at = now
         agent.save(
@@ -504,6 +551,8 @@ def reserve_manual_assignment(
             provider_request_classification="hubspot_owner_update",
             reserved_at=now,
         )
+        if occupancy is not None:
+            hold_capacity(occupancy, agent, attempt=attempt)
         return Reservation(attempt, "reserved")
 
 
@@ -548,6 +597,21 @@ def _defer_without_candidate(
 
 
 def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
+    """Serialize provider work for enforcing attempts without holding DB locks."""
+    if not capacity_enforced():
+        return _execute_assignment_attempt(attempt_id)
+    from apps.support.owned_cache_lock import OwnedCacheLock
+
+    lock = OwnedCacheLock(f"capacity-effect:{attempt_id}", timeout=120)
+    if not lock.acquire():
+        return "effect_in_progress"
+    try:
+        return _execute_assignment_attempt(attempt_id)
+    finally:
+        lock.release()
+
+
+def _execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     """Apply HubSpot mutation and converge the durable attempt."""
     attempt = AssignmentAttempt.objects.select_related("selected_agent", "cycle").get(pk=attempt_id)
     if attempt.state == AssignmentAttempt.State.COMPLETED:
@@ -567,7 +631,13 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     client = get_hubspot_client()
     provider_started_at = time.perf_counter()
     try:
-        ticket = client.get_ticket_details(attempt.ticket_id)
+        if capacity_enforced():
+            from apps.support.owner_reconciliation_service import reconcile_ticket
+
+            ticket = {}
+            reconcile_ticket(attempt.ticket_id, source="precondition", snapshot=ticket)
+        else:
+            ticket = client.get_ticket_details(attempt.ticket_id)
     except HubSpotResourceNotFoundError:
         _emit_provider_latency(operation="precondition_read", result="not_found", started_at=provider_started_at)
         compensate_assignment_attempt(
@@ -598,7 +668,7 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
     pipeline = str(ticket.get("pipeline") or "")
     stage = str(ticket.get("stage") or "")
     raw_owner = str(ticket.get("owner_id") or "").strip()
-    if pipeline != str(SUPPORT_PIPELINE_ID) or stage != str(STAGE_NOVO_ID):
+    if pipeline != str(SUPPORT_PIPELINE_ID) or stage != str(STAGE_NOVO_ID) or ticket.get("archived") is True:
         compensate_assignment_attempt(
             attempt.pk,
             retryable=False,
@@ -618,6 +688,8 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
             error_code="hubspot_manual_owner_observed",
             quarantine=True,
         )
+        if capacity_enforced():
+            reconcile_ticket(attempt.ticket_id, source="external_owner")
         return "converged_external_owner"
 
     provider_started_at = time.perf_counter()
@@ -646,7 +718,7 @@ def execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
 
 def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
     """Finalize exactly once after HubSpot is known to hold the target owner."""
-    with transaction.atomic():
+    with assignment_transaction(attempt_id) as occupancy:
         attempt = (
             AssignmentAttempt.objects.select_for_update(of=("self",))
             .select_related("selected_agent", "queue_row", "cycle")
@@ -656,6 +728,10 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
             return attempt
         if attempt.state != AssignmentAttempt.State.EXTERNAL_APPLIED:
             raise ValueError(f"attempt {attempt.pk} is not externally applied")
+        if occupancy is not None and (
+            occupancy.state != "active" or occupancy.hubspot_owner_id != attempt.desired_hubspot_owner_id
+        ):
+            raise ValueError("Capacity confirmation no longer matches assignment")
 
         cycle = None
         if attempt.cycle_id is not None:
@@ -739,7 +815,7 @@ def compensate_assignment_attempt(
     repair_required: bool = False,
 ) -> AssignmentAttempt:
     """Release capacity and update retry/repair state exactly once."""
-    with transaction.atomic():
+    with assignment_transaction(attempt_id) as occupancy:
         attempt = (
             AssignmentAttempt.objects.select_for_update(of=("self",)).select_related("queue_row").get(pk=attempt_id)
         )
@@ -753,8 +829,24 @@ def compensate_assignment_attempt(
         ):
             return attempt
         now = _database_now()
+        if occupancy is not None:
+            from apps.support.models import AgentCapacityReservation
+
+            reservation = (
+                AgentCapacityReservation.objects.select_for_update().filter(assignment_attempt=attempt).first()
+            )
+            if repair_required:
+                # An ambiguous effect still occupies capacity until conclusive readback.
+                attempt.state = AssignmentAttempt.State.REPAIR_REQUIRED
+                attempt.last_error_code = error_code
+                attempt.save(update_fields=["state", "last_error_code", "updated_at"])
+                degrade_agents({attempt.selected_agent_id})
+                return attempt
+            if reservation is not None:
+                conclude_reservation(reservation, converted=False, reason=error_code)
+            materialize({attempt.selected_agent_id})
         attempt.compensation_started_at = attempt.compensation_started_at or now
-        if attempt.compensated_at is None:
+        if attempt.compensated_at is None and not capacity_enforced():
             Agent.objects.filter(pk=attempt.selected_agent_id).update(
                 current_simultaneous_chats=Greatest(
                     F("current_simultaneous_chats") - 1,
@@ -762,6 +854,8 @@ def compensate_assignment_attempt(
                 ),
                 updated_at=now,
             )
+            attempt.compensated_at = now
+        if capacity_enforced():
             attempt.compensated_at = now
         attempt.retry_count += 1
         attempt.last_error_code = error_code
@@ -855,7 +949,16 @@ def reconcile_ambiguous_attempt(
         error_code = f"hubspot_http_{provider_error.external_status}"
     provider_started_at = time.perf_counter()
     try:
-        ticket = get_hubspot_client().get_ticket_details(attempt.ticket_id)
+        if capacity_enforced():
+            from apps.support.owner_reconciliation_service import reconcile_ticket
+
+            observed = reconcile_ticket(attempt.ticket_id, source="effect_readback")
+            if observed.state in {"closed", "out_of_scope"}:
+                compensate_assignment_attempt(attempt.pk, retryable=False, error_code="confirmed_terminal_scope")
+                return "stale_ticket"
+            ticket = {"owner_id": observed.hubspot_owner_id}
+        else:
+            ticket = get_hubspot_client().get_ticket_details(attempt.ticket_id)
     except Exception as exc:
         _emit_provider_latency(operation="owner_readback", result="failure", started_at=provider_started_at)
         reconciliation_error_code = f"{error_code}_owner_unreadable"
@@ -886,6 +989,26 @@ def reconcile_ambiguous_attempt(
         _mark_external_applied(attempt.pk, classification="confirmed_by_read")
         finalize_assignment_attempt(attempt.pk)
         return "assigned"
+    if capacity_enforced():
+        if (
+            provider_error is not None
+            and not provider_error.retryable
+            and provider_error.external_status
+            in {
+                400,
+                401,
+                403,
+                404,
+                422,
+            }
+            and current_owner in (None, attempt.prior_observed_owner_id)
+        ):
+            compensate_assignment_attempt(attempt.pk, retryable=False, error_code=error_code)
+            return "rejected_external_error"
+        compensate_assignment_attempt(
+            attempt.pk, retryable=False, repair_required=True, error_code=f"{error_code}_unconfirmed_owner"
+        )
+        return "repair_required"
     if current_owner in (None, attempt.prior_observed_owner_id) and (
         provider_error is None or provider_error.retryable
     ):
@@ -909,25 +1032,50 @@ def retry_assignment_attempt(attempt_id: uuid.UUID) -> str:
     attempt = AssignmentAttempt.objects.select_related("selected_agent", "cycle").get(pk=attempt_id)
     if attempt.state != AssignmentAttempt.State.RETRYABLE:
         return attempt.state
+    if capacity_enforced():
+        from apps.support.models import AgentCapacityReservation
+
+        if not AgentCapacityReservation.objects.filter(assignment_attempt=attempt, state="released").exists():
+            return "capacity_reservation_not_released"
     if attempt.cycle_id is not None and attempt.cycle.state != SupportConversationCycle.State.QUEUED:
         return "skipped_stale_cycle"
     from apps.support.eligibility_service import evaluate_persisted_agent
     from apps.support.sat_service import sat_verify_agent_assignment_eligibility
 
     captured_now = timezone.now()
+    if capacity_enforced():
+        from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+        if not refresh_agent_capacity(attempt.selected_agent):
+            return "capacity_not_ready"
     if not evaluate_persisted_agent(attempt.selected_agent, captured_now).eligible:
         return "retryable"
     remote = sat_verify_agent_assignment_eligibility(attempt.selected_agent, now=captured_now)
     if not remote.eligible:
         return "retryable"
-    with transaction.atomic():
+    with assignment_transaction(attempt.pk) as occupancy:
         locked_attempt = AssignmentAttempt.objects.select_for_update().get(pk=attempt.pk)
+        if (
+            capacity_enforced()
+            and not AgentCapacityReservation.objects.select_for_update()
+            .filter(
+                assignment_attempt=locked_attempt,
+                state="released",
+            )
+            .exists()
+        ):
+            return "capacity_reservation_not_released"
         agent = Agent.objects.select_for_update().get(pk=attempt.selected_agent_id)
         database_now = _database_now()
         decision = evaluate_persisted_agent(agent, database_now)
-        if locked_attempt.state != AssignmentAttempt.State.RETRYABLE or not decision.eligible:
+        if (
+            locked_attempt.state != AssignmentAttempt.State.RETRYABLE
+            or not decision.eligible
+            or (capacity_enforced() and not capacity_ready(agent))
+        ):
             return locked_attempt.state
-        agent.current_simultaneous_chats += 1
+        if not capacity_enforced():
+            agent.current_simultaneous_chats += 1
         agent.last_assignment_at = database_now
         agent.updated_at = database_now
         agent.save(
@@ -954,6 +1102,8 @@ def retry_assignment_attempt(attempt_id: uuid.UUID) -> str:
                 "updated_at",
             ]
         )
+        if occupancy is not None:
+            hold_capacity(occupancy, agent, attempt=locked_attempt)
     return execute_assignment_attempt(attempt.pk)
 
 
@@ -992,6 +1142,27 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
     }
     for attempt in attempts:
         try:
+            if capacity_enforced():
+                from apps.support.owned_cache_lock import OwnedCacheLock
+
+                effect_lock = OwnedCacheLock(f"capacity-effect:{attempt.pk}", timeout=120)
+                if not effect_lock.acquire():
+                    counts["conflict"] += 1
+                    continue
+                try:
+                    if attempt.state == AssignmentAttempt.State.RETRYABLE:
+                        # Retry owns its own effect lock after reservation.
+                        effect_lock.release()
+                        outcome = retry_assignment_attempt(attempt.pk)
+                    else:
+                        outcome = reconcile_ambiguous_attempt(attempt.pk)
+                    if outcome == "assigned":
+                        outcome = "completed"
+                    if outcome in counts:
+                        counts[outcome] += 1
+                finally:
+                    effect_lock.release()
+                continue
             with transaction.atomic():
                 locked = AssignmentAttempt.objects.select_for_update(skip_locked=True).filter(pk=attempt.pk).first()
                 if locked is None:
