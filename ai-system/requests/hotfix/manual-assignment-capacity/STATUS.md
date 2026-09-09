@@ -2,10 +2,10 @@ request: hotfix/manual-assignment-capacity
 cycle: F
 state: DONE
 opened_at: 2026-09-07T23:25:53-03:00
-last_update: 2026-09-08T23:42:13.6370040-03:00
+last_update: 2026-09-08T23:53:00-03:00
 agent_run_id: /root
 current_blockers: []
-next_action: "Aguardar revisao e CI da PR 119; merge e deploy nao executados."
+next_action: "Aguardar a nova execucao do CI da PR 119; merge e deploy nao executados."
 artifacts_generated:
   - HANDOFF.md
   - 02-artifacts/backend/01-implementation.md
@@ -15,7 +15,7 @@ artifacts_generated:
   - 05-deployment/01-release-and-rollback.md
   - 01-plan/master-plan.md
   - ../../../../docs/plans/manual-assignment-auto-assignment-hotfix-plan.md
-verification_runs: 17
+verification_runs: 18
 
 phase_notes:
   research: "Concluida em docs/research/manual-assignment-auto-assignment-hotfix.md; baseline anterior de 90 passed e 4 skipped."
@@ -71,3 +71,8 @@ publication:
   implementation_commit: 6fe7d81
   base: main
   state: open
+
+ci_remediation:
+  failed_job: "WebApp quality and supply chain"
+  root_cause: "npm audit encontrou advisories em Next.js, Sharp, PostCSS e baseline-browser-mapping"
+  local_verification: "npm ci; lint; typecheck; 28 tests; build; production audit com 0 vulnerabilidades"
