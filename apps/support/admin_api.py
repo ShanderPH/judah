@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Avg, Count, Q, Sum
 from django.utils import timezone
@@ -424,6 +425,12 @@ def _ensure_agent_is_currently_eligible(agent: Agent) -> None:
     """Reject manual assignment to an absent or stale agent."""
     from django.conf import settings
 
+    from apps.support.capacity_service import capacity_enforced
+    from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+    if capacity_enforced() and not refresh_agent_capacity(agent):
+        raise ValidationError("Agent capacity reconciliation is incomplete.")
+
     if not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
         return
     from apps.support.eligibility_service import evaluate_persisted_agent
@@ -532,6 +539,10 @@ def _force_reassign_internal(
     from apps.support.availability_runtime import require_routing_writer_authority
 
     require_routing_writer_authority("admin_force_reassign")
+    from apps.support.capacity_service import capacity_enforced
+
+    if capacity_enforced():
+        return _capacity_force_reassign(hubspot_ticket_id, target_agent, reason=reason, actor_email=actor_email)
     _ensure_agent_is_currently_eligible(target_agent)
     assigned = AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id).first()
     if not assigned:
@@ -644,6 +655,89 @@ def _force_reassign_internal(
         "cycle_id": str(assigned.cycle_id) if assigned.cycle_id else None,
         "agent_id": str(target_agent.id),
         "agent_name": target_agent.name,
+        "detail": "Ticket reassigned.",
+    }
+
+
+def _capacity_force_reassign(
+    ticket_id: str,
+    target: Agent,
+    *,
+    reason: str | None,
+    actor_email: str | None,
+) -> dict:
+    """Reserve a transfer before the provider call and reconcile its readback."""
+    from apps.support.capacity_service import capacity_ready, degrade_agents, hold_capacity, ticket_transaction
+    from apps.support.models import AgentCapacityReservation
+    from apps.support.owner_reconciliation_service import reconcile_ticket
+
+    _ensure_agent_is_currently_eligible(target)
+    observed = reconcile_ticket(ticket_id, source="admin_precondition")
+    with ticket_transaction(ticket_id) as occupancy:
+        if occupancy.revision != observed.revision or occupancy.state != "active":
+            raise ValidationError("Ticket owner changed during transfer preparation.")
+        assigned = AssignedConversation.objects.select_for_update().filter(hubspot_ticket_id=ticket_id).first()
+        if assigned is None:
+            raise NotFoundError("No assigned conversation for transfer.")
+        if occupancy.hubspot_owner_id == target.hubspot_owner_id:
+            return {
+                "success": True,
+                "hubspot_ticket_id": ticket_id,
+                "cycle_id": str(assigned.cycle_id or ""),
+                "agent_id": str(target.pk),
+                "agent_name": target.name,
+                "detail": "Target already owns ticket.",
+            }
+        if AgentCapacityReservation.objects.filter(occupancy=occupancy, state="held").exists():
+            raise ValidationError("A ticket operation is still awaiting reconciliation.")
+        target = Agent.objects.select_for_update().get(pk=target.pk)
+        if not capacity_ready(target):
+            raise ValidationError("Target capacity is unavailable.")
+        from apps.support.eligibility_service import evaluate_persisted_agent
+
+        if settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED and not evaluate_persisted_agent(target, timezone.now()).eligible:
+            raise ValidationError("Target eligibility changed.")
+        intent = ConversationReassignment.objects.create(
+            hubspot_ticket_id=ticket_id,
+            cycle=assigned.cycle,
+            from_agent=assigned.agent,
+            from_hubspot_owner_id=assigned.hubspot_owner_id,
+            from_agent_name=assigned.agent_name,
+            to_agent=target,
+            to_hubspot_owner_id=target.hubspot_owner_id,
+            to_agent_name=target.name,
+            reassigned_at=timezone.now(),
+            reassignment_source="admin_force_reassign:reserved",
+        )
+        hold_capacity(occupancy, target, reassignment=intent)
+    try:
+        _hubspot_assign(ticket_id, target.hubspot_owner_id)
+    except Exception:
+        # A timeout does not prove that the transfer failed.
+        degrade_agents({target.pk})
+    confirmed = reconcile_ticket(ticket_id, source="admin_readback")
+    if confirmed.state != "active" or confirmed.hubspot_owner_id != target.hubspot_owner_id:
+        degrade_agents({target.pk})
+        raise ValidationError("Transfer remains unconfirmed; capacity reservation is retained.")
+    with ticket_transaction(ticket_id):
+        intent.reassignment_source = reason or "admin_force_reassign"
+        intent.save(update_fields=["reassignment_source"])
+        AssignmentLog.objects.create(
+            ticket_id=ticket_id,
+            cycle=assigned.cycle,
+            agent=target,
+            agent_name=target.name,
+            hubspot_owner_id=target.hubspot_owner_id,
+            assignment_type="forced_reassign",
+            assigned_by=actor_email,
+            pipeline_id=assigned.pipeline_id,
+        )
+    return {
+        "success": True,
+        "hubspot_ticket_id": ticket_id,
+        "cycle_id": str(assigned.cycle_id or ""),
+        "agent_id": str(target.pk),
+        "agent_name": target.name,
         "detail": "Ticket reassigned.",
     }
 

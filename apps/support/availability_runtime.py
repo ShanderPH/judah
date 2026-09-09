@@ -24,6 +24,7 @@ class RoutingCapability(StrEnum):
 # Keep this inventory explicit so code review and regression tests can detect
 # newly introduced routing writers that have not selected an authority gate.
 ROUTING_WRITER_CAPABILITIES: dict[str, RoutingCapability] = {
+    "capacity_reconcile": RoutingCapability.WRITE_ROUTING_STATE,
     "enqueue_new_ticket": RoutingCapability.INGEST_QUEUE,
     "process_new_ticket_event": RoutingCapability.INGEST_QUEUE,
     "sync_novo_stage_tickets": RoutingCapability.RECONCILE_QUEUE,

@@ -399,6 +399,9 @@ HUBSPOT_WEBHOOK_MAX_BATCH_SIZE = config("HUBSPOT_WEBHOOK_MAX_BATCH_SIZE", defaul
 # cycle-opening writer must fail closed (identity_unavailable); reads are not
 # affected. The concrete value is a Stop Gate A decision.
 HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
+SUPPORT_CAPACITY_MODE = config("SUPPORT_CAPACITY_MODE", default="off")
+SUPPORT_CAPACITY_FRESHNESS_SECONDS = config("SUPPORT_CAPACITY_FRESHNESS_SECONDS", default=60, cast=int)
+SUPPORT_CAPACITY_MAX_SCAN_TICKETS = config("SUPPORT_CAPACITY_MAX_SCAN_TICKETS", default=200, cast=int)
 # Conversation-cycle enforcement (Gate B dual-write). False = legacy behavior
 # is preserved; writers only attach proven cycles additively and conflicts are
 # telemetry-only. True = cycle divergences fail closed. Must stay False until

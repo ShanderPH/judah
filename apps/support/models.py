@@ -58,6 +58,9 @@ class Agent(models.Model):
         default=StatusEnum.AWAY,
     )
     current_simultaneous_chats = models.BigIntegerField(default=0)
+    capacity_revision = models.PositiveBigIntegerField(default=0)
+    capacity_state = models.CharField(max_length=16, default="uninitialized")
+    capacity_reconciled_at = models.DateTimeField(null=True, blank=True)
     max_simultaneous_chats = models.IntegerField(default=5)
     auto_assign_enabled = models.BooleanField(default=True)
     is_active = models.BooleanField(null=True, blank=True)
@@ -112,6 +115,74 @@ class Agent(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class SupportTicketOccupancy(models.Model):
+    """Current provider occupancy, independent of conversation history."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_account_id = models.CharField(max_length=64)
+    hubspot_ticket_id = models.TextField()
+    hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
+    agent = models.ForeignKey(Agent, null=True, blank=True, on_delete=models.SET_NULL)
+    cycle = models.ForeignKey("SupportConversationCycle", null=True, blank=True, on_delete=models.SET_NULL)
+    pipeline_id = models.TextField(default="")
+    state = models.CharField(max_length=16, default="unknown")
+    revision = models.PositiveBigIntegerField(default=0)
+    observed_at = models.DateTimeField(null=True, blank=True)
+    provider_updated_at = models.DateTimeField(null=True, blank=True)
+    observation_source = models.CharField(max_length=64, default="")
+    observation_id = models.CharField(max_length=128, default="")
+
+    class Meta:
+        db_table = "support_ticket_occupancies"
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(fields=["source_account_id", "hubspot_ticket_id"], name="uq_occupancy_ticket"),
+            models.CheckConstraint(
+                condition=models.Q(state__in=["unknown", "active", "unassigned", "closed", "out_of_scope"]),
+                name="ck_occupancy_state",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(state="active") | models.Q(hubspot_owner_id__isnull=False),
+                name="ck_active_occupancy_owner",
+            ),
+        ]
+        indexes = [models.Index(fields=["agent", "state"], name="idx_occupancy_agent_state")]  # noqa: RUF012
+
+
+class AgentCapacityReservation(models.Model):
+    """Explicit capacity held until an operation has a conclusive readback."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    operation_key = models.CharField(max_length=128, unique=True)
+    occupancy = models.ForeignKey(SupportTicketOccupancy, on_delete=models.CASCADE)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE)
+    assignment_attempt = models.OneToOneField("AssignmentAttempt", null=True, blank=True, on_delete=models.CASCADE)
+    reassignment = models.OneToOneField("ConversationReassignment", null=True, blank=True, on_delete=models.CASCADE)
+    state = models.CharField(max_length=16, default="held")
+    held_at = models.DateTimeField()
+    concluded_at = models.DateTimeField(null=True, blank=True)
+    conclusion_reason = models.CharField(max_length=128, default="")
+
+    class Meta:
+        db_table = "agent_capacity_reservations"
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=(
+                    models.Q(assignment_attempt__isnull=False, reassignment__isnull=True)
+                    | models.Q(assignment_attempt__isnull=True, reassignment__isnull=False)
+                ),
+                name="ck_capacity_operation_origin",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(state="held", concluded_at__isnull=True)
+                    | models.Q(state__in=["converted", "released"], concluded_at__isnull=False)
+                ),
+                name="ck_capacity_conclusion",
+            ),
+        ]
+        indexes = [models.Index(fields=["agent", "state"], name="idx_capacity_agent_state")]  # noqa: RUF012
 
 
 class Ticket(models.Model):

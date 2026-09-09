@@ -445,6 +445,18 @@ def task_handle_owner_change(
 
     try:
         previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
+        from apps.support.capacity_service import capacity_mode
+        from apps.support.owner_reconciliation_service import reconcile_ticket
+
+        if capacity_mode() != "off":
+            try:
+                reconcile_ticket(hubspot_ticket_id, source="webhook", observation_id=str(payload.get("eventId", "")))
+            except Exception:
+                if capacity_mode() == "enforce":
+                    raise
+                logger.warning("capacity_shadow_observation_failed")
+            if capacity_mode() == "enforce":
+                return
 
         # Safely parse owner IDs — HubSpot may send formats like "userId:72733895"
         prev_owner_int = _safe_parse_owner_id(previous_owner_id)
@@ -861,6 +873,14 @@ def task_reconcile_agent_counts() -> dict:
         .order_by("id")
     )
 
+    from apps.support.capacity_service import capacity_mode
+    from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+    if capacity_mode() != "off":
+        ready = sum(refresh_agent_capacity(agent, force=True) for agent in agents)
+        if capacity_mode() == "enforce":
+            return {"agents_checked": len(agents), "capacity_ready": ready, "corrections": 0}
+
     # Parallelize HubSpot API calls (one per agent)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -904,6 +924,20 @@ def task_reconcile_agent_counts() -> dict:
 
     logger.info("task_reconcile_agent_counts_done", agents_checked=len(agents), corrections=corrections)
     return {"agents_checked": len(agents), "corrections": corrections}
+
+
+@shared_task(bind=True, name="support.task_reconcile_ticket_capacity", max_retries=3, default_retry_delay=5)
+def task_reconcile_ticket_capacity(self, ticket_id: str) -> str:
+    """Bounded authoritative capacity recheck; provider reads run outside locks."""
+    from apps.support.capacity_service import capacity_mode
+    from apps.support.owner_reconciliation_service import reconcile_ticket
+
+    if capacity_mode() == "off":
+        return "off"
+    try:
+        return reconcile_ticket(ticket_id, source="recheck").state
+    except Exception as exc:
+        raise self.retry(exc=exc) from exc
 
 
 @shared_task(name="support.task_aggregate_agent_metrics")

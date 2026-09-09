@@ -280,6 +280,34 @@ def _do_handle_ticket_closed(
     closed_at_ms: str | int | None = None,
     owner_id: str | None = None,
 ) -> None:
+    """Confirm current capacity before applying a lifecycle close event."""
+    from apps.support.capacity_service import capacity_mode, ticket_transaction
+    from apps.support.owner_reconciliation_service import reconcile_ticket
+
+    if capacity_mode() == "off":
+        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+        return
+    if capacity_mode() == "shadow":
+        try:
+            reconcile_ticket(hubspot_ticket_id, source="close")
+        except Exception:
+            logger.warning("capacity_shadow_close_observation_failed")
+        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+        return
+    observed = reconcile_ticket(hubspot_ticket_id, source="close")
+    if observed.state != "closed":
+        return
+    with ticket_transaction(hubspot_ticket_id) as locked:
+        if locked.revision != observed.revision or locked.state != "closed":
+            return
+        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+
+
+def _apply_ticket_closed(
+    hubspot_ticket_id: str,
+    closed_at_ms: str | int | None = None,
+    owner_id: str | None = None,
+) -> None:
     """Internal implementation of ticket closure — called only after dedup lock is held."""
     closed_at = _parse_hubspot_timestamp(closed_at_ms)
     if closed_at is None and bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False)):
@@ -349,7 +377,9 @@ def _do_handle_ticket_closed(
             # Decrement the ASSIGNED agent's count — always use assigned.agent,
             # regardless of who closed the ticket. This matches the increment that
             # was applied when the ticket was auto-assigned.
-            if assigned.agent:
+            from apps.support.capacity_service import capacity_enforced
+
+            if assigned.agent and not capacity_enforced():
                 decrement_agent_chat_count(assigned.agent)
 
             # Move from assigned_conversations → closed_conversations

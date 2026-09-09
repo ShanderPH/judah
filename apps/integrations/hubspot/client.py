@@ -197,11 +197,21 @@ class HubSpotClient:
         ]
         fetch_props = properties or default_props
         try:
-            ticket = _circuit_breaker.call(
-                self._client.crm.tickets.basic_api.get_by_id,
-                ticket_id,
-                properties=fetch_props,
-            )
+            try:
+                ticket = _circuit_breaker.call(
+                    self._client.crm.tickets.basic_api.get_by_id,
+                    ticket_id,
+                    properties=fetch_props,
+                )
+            except NotFoundException:
+                # One 404 is not closure evidence. Confirm archival explicitly;
+                # a second failure remains unreadable and cannot release capacity.
+                ticket = _circuit_breaker.call(
+                    self._client.crm.tickets.basic_api.get_by_id,
+                    ticket_id,
+                    properties=fetch_props,
+                    archived=True,
+                )
             props = ticket.properties or {}
             return {
                 "id": ticket.id,
@@ -214,6 +224,8 @@ class HubSpotClient:
                 "entered_closed_at": props.get(f"hs_v2_date_entered_{STAGE_CLOSED_ID}"),
                 "contact_name": props.get("firstname", ""),
                 "contact_email": props.get("email", ""),
+                "updated_at": ticket.updated_at.isoformat() if getattr(ticket, "updated_at", None) else None,
+                "archived": getattr(ticket, "archived", False),
             }
         except Exception as exc:
             logger.error("hubspot_get_ticket_details_failed", ticket_id=ticket_id, error=str(exc))
@@ -682,6 +694,72 @@ class HubSpotClient:
 
         logger.info("hubspot_owners_availability_fetched", count=len(result), pages=page)
         return result
+
+    def list_active_ticket_ids_by_owner(self, owner_id: int) -> tuple[tuple[str, ...], bool]:
+        """Discover a bounded portfolio; partial search never proves completeness."""
+        import requests
+        from django.core.cache import cache
+
+        identities: set[str] = set()
+        after: str | None = None
+        seen_cursors: set[str] = set()
+        expected_total: int | None = None
+        budget = int(settings.SUPPORT_CAPACITY_MAX_SCAN_TICKETS)
+        try:
+            for _page in range(max(1, (budget + 199) // 200)):
+                # Reserve a small account-wide budget for this consumer. Cache
+                # failure or contention defers work; no worker sleeps under locks.
+                import time
+
+                slot = int(time.time())
+                key = f"capacity-search-budget:{settings.HUBSPOT_PORTAL_ID}:{slot}"
+                if not cache.add(key, 1, timeout=2) and cache.incr(key) > 2:
+                    return tuple(sorted(identities)), False
+                payload: dict[str, Any] = {
+                    "filterGroups": [
+                        {
+                            "filters": [
+                                {"propertyName": "hs_pipeline", "operator": "EQ", "value": SUPPORT_PIPELINE_ID},
+                                {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": str(owner_id)},
+                                {"propertyName": "hs_pipeline_stage", "operator": "NEQ", "value": STAGE_FECHADO_ID},
+                            ]
+                        }
+                    ],
+                    "limit": min(200, budget),
+                    "properties": ["hubspot_owner_id"],
+                }
+                if after is not None:
+                    payload["after"] = after
+                response = _circuit_breaker.call(
+                    requests.post,
+                    "https://api.hubapi.com/crm/v3/objects/tickets/search",
+                    headers={"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=10,
+                )
+                response.raise_for_status()
+                data = response.json()
+                total = data.get("total")
+                if not isinstance(total, int) or total > min(budget, 10000):
+                    return tuple(sorted(identities)), False
+                if expected_total is not None and expected_total != total:
+                    return tuple(sorted(identities)), False
+                expected_total = total
+                for item in data["results"]:
+                    identity = str(item["id"])
+                    if identity in identities:
+                        return tuple(sorted(identities)), False
+                    identities.add(identity)
+                after_value = ((data.get("paging") or {}).get("next") or {}).get("after")
+                if after_value is None:
+                    return tuple(sorted(identities)), len(identities) == expected_total
+                after = str(after_value)
+                if after in seen_cursors:
+                    return tuple(sorted(identities)), False
+                seen_cursors.add(after)
+        except Exception as exc:
+            logger.warning("capacity_search_incomplete", reason=type(exc).__name__)
+        return tuple(sorted(identities)), False
 
     def count_active_tickets_by_owner(self, owner_id: int) -> int:
         """Count active (non-closed) tickets assigned to a specific owner.
