@@ -2,10 +2,10 @@ request: hotfix/manual-assignment-capacity
 cycle: F
 state: DONE
 opened_at: 2026-09-07T23:25:53-03:00
-last_update: 2026-09-08T23:37:04.9270284-03:00
+last_update: 2026-09-08T23:42:13.6370040-03:00
 agent_run_id: /root
 current_blockers: []
-next_action: "Publicacao autorizada: criar commit, push e PR; aguardar revisao e CI antes de merge."
+next_action: "Aguardar revisao e CI da PR 119; merge e deploy nao executados."
 artifacts_generated:
   - HANDOFF.md
   - 02-artifacts/backend/01-implementation.md
@@ -64,4 +64,10 @@ implementation_tasks:
 
 completion_scope: implementacao_e_verificacao_locais
 final_verification: '866 passed; 0 skipped; coverage 90.89%; ruff clean; mypy 351 files clean'
-external_gates: 'Commit/push/PR autorizados em andamento. Nao executados: staging, deploy, bootstrap remoto, shadow representativo e enforcement. Default off.'
+external_gates: 'Commit/push/PR concluidos por autorizacao do usuario. Nao executados: staging, deploy, bootstrap remoto, shadow representativo e enforcement. Default off.'
+
+publication:
+  pull_request: https://github.com/ShanderPH/judah/pull/119
+  implementation_commit: 6fe7d81
+  base: main
+  state: open
