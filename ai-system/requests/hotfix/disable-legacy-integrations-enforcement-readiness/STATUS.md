@@ -1,11 +1,11 @@
 request: hotfix/disable-legacy-integrations-enforcement-readiness
 cycle: M
-state: VERIFY
+state: REVIEW
 opened_at: 2026-09-17T10:20:00-03:00
-last_update: 2026-09-17T10:39:00-03:00
+last_update: 2026-09-17T10:42:08-03:00
 agent_run_id: /root
 current_blockers: []
-next_action: "Felipe: authorize push and creation of a reviewed PR."
+next_action: "Obtain human review and green CI before merge; do not deploy or backfill from this gate."
 artifacts_generated:
   - 00-context/production-diagnosis.md
   - 01-plan/master-plan.md
