@@ -86,3 +86,17 @@ Conectar browser e produzir navegação/recording real; revisão humana; checks 
 proteção de branch antes de merge; staging/smoke/deploy com autorização própria.
 PR deve permanecer draft enquanto o gate browser estiver pendente. Não houve
 deploy, modificação HMAC, banco remoto ou chamada real HubSpot.
+
+## Entrega
+
+Implementação publicada no commit `56fdcdb`, branch
+`hotfix/security-assessment-remediation`. [PR #121](https://github.com/ShanderPH/judah/pull/121)
+aberto como draft para main. Hooks pre-commit passaram; houve apenas adição de
+newline ao XML gerado antes do commit. Deleções e arquivos não rastreados
+preexistentes ficaram fora do commit. O assessment restrito não foi publicado.
+
+A integração Vercel existente criou um preview automaticamente após a publicação
+da branch/PR. Não foi executado comando de deploy nem merge para produção.
+Checks remotos são consultáveis no PR; o snapshot inicial tinha webapp e preview
+aprovados, com backend ainda em execução. A prova local acima não depende desse
+preview e não valida seu runtime.
