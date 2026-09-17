@@ -65,6 +65,10 @@ def poll_n8n_outbox_task() -> int:
     """Dispatch a bounded due batch and expose the remaining backlog metric."""
     from django.conf import settings
 
+    if not settings.N8N_BOT_DELIVERY_ENABLED:
+        logger.info("n8n_outbox_poll_disabled")
+        return 0
+
     from apps.webhooks.metrics import emit_metric
     from apps.webhooks.n8n_outbox import due_outbox_ids, pending_outbox_count
 

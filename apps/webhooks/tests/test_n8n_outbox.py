@@ -48,6 +48,25 @@ def test_deterministic_body_and_hmac() -> None:
 
 @pytest.mark.django_db
 @override_settings(
+    N8N_BOT_DELIVERY_ENABLED=False,
+    N8N_BOT_INBOUND_URL="https://n8n.example.test/webhook",
+    JUDAH_N8N_HMAC_SECRET="secret",
+)
+def test_disabled_delivery_never_claims_or_calls_n8n() -> None:
+    outbox = _outbox()
+
+    with patch("apps.webhooks.n8n_outbox.httpx.post") as post:
+        assert deliver_outbox_event(str(outbox.pk)) is False
+
+    post.assert_not_called()
+    outbox.refresh_from_db()
+    assert outbox.status == OutboxEvent.Status.PENDING
+    assert outbox.attempt_count == 0
+    assert not N8nThreadDeliveryLock.objects.exists()
+
+
+@pytest.mark.django_db
+@override_settings(
     N8N_BOT_INBOUND_URL="https://n8n.example.test/webhook",
     JUDAH_N8N_HMAC_SECRET="secret",
     N8N_BOT_CONNECT_TIMEOUT_SECONDS=1,

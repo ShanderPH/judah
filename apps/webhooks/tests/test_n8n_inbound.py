@@ -91,6 +91,22 @@ def test_webhook_and_reconciliation_converge_to_one_ledger_and_outbox() -> None:
 
 
 @pytest.mark.django_db
+@override_settings(N8N_BOT_DELIVERY_ENABLED=False, N8N_BOT_MAX_DELIVERY_ATTEMPTS=8)
+def test_disabled_delivery_preserves_outbox_without_dispatching() -> None:
+    with patch("apps.webhooks.tasks.dispatch_n8n_outbox_event_task.delay") as delay:
+        result = ingest_hubspot_message(
+            portal_id="47354717",
+            thread=_thread(),
+            message=_message(),
+            delivery_method="webhook",
+        )
+
+    delay.assert_not_called()
+    assert result.ignored is False
+    assert OutboxEvent.objects.filter(status=OutboxEvent.Status.PENDING).count() == 1
+
+
+@pytest.mark.django_db
 @override_settings(N8N_BOT_MAX_DELIVERY_ATTEMPTS=8)
 def test_existing_envelope_hydration_does_not_insert_another_ledger_row() -> None:
     envelope = {

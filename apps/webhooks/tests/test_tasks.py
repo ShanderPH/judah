@@ -68,3 +68,14 @@ def test_outbox_poller_dispatches_bounded_batch(settings) -> None:
         assert poll_n8n_outbox_task.run() == 2
     assert delay.call_count == 2
     metric.assert_called_once_with("n8n_outbox_pending_total", 7, kind="gauge")
+
+
+def test_outbox_poller_is_noop_when_delivery_is_disabled(settings) -> None:
+    settings.N8N_BOT_DELIVERY_ENABLED = False
+    with (
+        patch("apps.webhooks.n8n_outbox.due_outbox_ids") as due,
+        patch("apps.webhooks.tasks.dispatch_n8n_outbox_event_task.delay") as delay,
+    ):
+        assert poll_n8n_outbox_task.run() == 0
+    due.assert_not_called()
+    delay.assert_not_called()

@@ -14,6 +14,7 @@ CACHES = {
 
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
+N8N_BOT_DELIVERY_ENABLED = True
 
 # Tests opt into the legacy-compatible assignment lane explicitly. Individual
 # Gate B tests override these controls to prove fail-closed behavior.
