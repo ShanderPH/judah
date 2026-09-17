@@ -10,13 +10,52 @@ and metrics screens for any user logged into ``judah-admin``.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.test import Client
 from django.utils import timezone
+from ninja_jwt.tokens import AccessToken
 
 from apps.auth_user.models import User
 from apps.support.models import Agent, AgentDailyTimeLog, QueuePerformanceMetrics
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "role,status", [(None, 401), ("viewer", 403), ("agent", 403), ("manager", 200), ("admin", 200)]
+)
+def test_queue_metrics_authorization(client: Client, role: str | None, status: int) -> None:
+    """Authorize direct requests while preserving paginated metric dates."""
+    today = timezone.localdate()
+    QueuePerformanceMetrics.objects.create(metric_date=today, total_entered_queue=10)
+    QueuePerformanceMetrics.objects.create(metric_date=today - timedelta(days=1))
+    headers = {}
+    if role:
+        user = User.objects.create_user(username=f"queue-{role}", role=role)
+        headers["HTTP_AUTHORIZATION"] = f"Bearer {AccessToken.for_user(user)}"
+    response = client.get("/api/v1/support/queue/metrics/?limit=1&offset=0", **headers)
+    assert response.status_code == status, response.content
+    if status == 200:
+        body = response.json()
+        assert body["count"] == 2
+        assert len(body["items"]) == 1
+        assert body["items"][0]["metric_date"] == today.isoformat()
+        assert body["items"][0]["total_entered_queue"] == 10
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role", ["viewer", "agent"])
+def test_denied_queue_metrics_do_not_query_data(client: Client, role: str) -> None:
+    """Reject roles before querying metrics."""
+    user = User.objects.create_user(username=f"denied-queue-{role}", role=role)
+    with patch.object(QueuePerformanceMetrics.objects, "filter") as query:
+        query.return_value.order_by.return_value = []
+        response = client.get(
+            "/api/v1/support/queue/metrics/", HTTP_AUTHORIZATION=f"Bearer {AccessToken.for_user(user)}"
+        )
+    assert response.status_code == 403
+    query.assert_not_called()
 
 
 @pytest.fixture

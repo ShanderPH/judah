@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { CAPABILITIES, hasCapability } from "@/src/lib/auth/access-policy";
 import { readAuthTokens, resolveSessionFromTokens } from "@/src/lib/auth/server-session";
 import { markSensitiveResponse, resolveRequestId } from "@/src/lib/observability/request-context";
 import { errorType, serverLogger } from "@/src/lib/observability/server-logger";
@@ -19,20 +20,23 @@ export async function POST(request: NextRequest) {
   const requestId = resolveRequestId(request.headers);
   const json = (payload: object, status = 200) =>
     markSensitiveResponse(NextResponse.json(payload, { status }), requestId);
-  const accessToken =
-    process.env.HUBSPOT_SANDBOX_ACCESS_TOKEN ?? process.env.HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN;
-
-  if (!accessToken) {
-    serverLogger.error("hubspot.visitor_token.misconfigured", { requestId, route: "/api/hubspot/visitor-token", method: "POST", upstream: "hubspot", status: 503 });
-    return json({ detail: "HUBSPOT_SANDBOX_ACCESS_TOKEN nao foi configurado no servidor." }, 503);
-  }
-
   try {
     const cookieStore = await cookies();
     const session = await resolveSessionFromTokens(readAuthTokens(cookieStore), requestId);
 
     if (session.status !== "authenticated") {
       return json({ detail: "Sessao expirada." }, 401);
+    }
+
+    if (!hasCapability(session.user, CAPABILITIES.sandboxUse)) {
+      return json({ detail: "Acesso negado." }, 403);
+    }
+
+    const accessToken =
+      process.env.HUBSPOT_SANDBOX_ACCESS_TOKEN ?? process.env.HUBSPOT_SANDBOX_OAUTH_ACCESS_TOKEN;
+    if (!accessToken) {
+      serverLogger.error("hubspot.visitor_token.misconfigured", { requestId, route: "/api/hubspot/visitor-token", method: "POST", upstream: "hubspot", status: 503 });
+      return json({ detail: "HUBSPOT_SANDBOX_ACCESS_TOKEN nao foi configurado no servidor." }, 503);
     }
 
     const response = await fetch("https://api.hubapi.com/visitor-identification/v3/tokens/create", {
