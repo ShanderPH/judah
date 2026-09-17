@@ -432,6 +432,7 @@ HUBSPOT_TICKET_CHURCH_PROPERTY = config(
 # inserted into CELERY_BEAT_SCHEDULE by this feature; activation is an explicit
 # operational step after migrations and credential provisioning.
 N8N_BOT_INBOUND_REQUIRED = config("N8N_BOT_INBOUND_REQUIRED", default=False, cast=bool)
+N8N_BOT_DELIVERY_ENABLED = config("N8N_BOT_DELIVERY_ENABLED", default=False, cast=bool)
 N8N_BOT_INBOUND_URL = config("N8N_BOT_INBOUND_URL", default="")
 JUDAH_N8N_HMAC_SECRET = config("JUDAH_N8N_HMAC_SECRET", default="")
 N8N_BOT_CONNECT_TIMEOUT_SECONDS = config("N8N_BOT_CONNECT_TIMEOUT_SECONDS", default=5.0, cast=float)

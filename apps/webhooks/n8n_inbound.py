@@ -321,6 +321,13 @@ def ingest_hubspot_message(
             from apps.webhooks.tasks import dispatch_n8n_outbox_event_task
 
             def _dispatch_after_commit() -> None:
+                if not settings.N8N_BOT_DELIVERY_ENABLED:
+                    logger.info(
+                        "n8n_outbox_dispatch_disabled",
+                        event_id=str(event.pk),
+                        outbox_id=str(outbox.pk),
+                    )
+                    return
                 try:
                     dispatch_n8n_outbox_event_task.delay(str(outbox.pk))
                 except Exception as exc:

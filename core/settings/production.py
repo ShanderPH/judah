@@ -12,7 +12,11 @@ _REQUIRED_ENV: tuple[str, ...] = (
     "DATABASE_URL",
 )
 _missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
-if os.environ.get("N8N_BOT_INBOUND_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"}:
+_n8n_delivery_requested = any(
+    os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    for name in ("N8N_BOT_DELIVERY_ENABLED", "N8N_BOT_INBOUND_REQUIRED")
+)
+if _n8n_delivery_requested:
     _missing.extend(name for name in ("N8N_BOT_INBOUND_URL", "JUDAH_N8N_HMAC_SECRET") if not os.environ.get(name))
 if _missing:
     _active_env = os.environ.get("DJANGO_ENV", "production")

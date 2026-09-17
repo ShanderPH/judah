@@ -313,6 +313,14 @@ class TestDualWriteEnforced:
         assert row is not None
         assert SupportConversationCycle.objects.count() == 1
 
+    def test_close_without_active_cycle_fails_closed(self) -> None:
+        from apps.support.auto_assign_service import _apply_ticket_closed
+        from apps.support.models import ClosedConversation
+
+        _apply_ticket_closed(TICKET, ENTRY_MS)
+
+        assert not ClosedConversation.objects.exists()
+
 
 class TestOpenOrGetCycleRaceCapture:
     @pytest.fixture(autouse=True)

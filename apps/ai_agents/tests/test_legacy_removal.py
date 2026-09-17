@@ -1,3 +1,4 @@
+import pytest
 from django.conf import settings
 from django.test import Client
 
@@ -17,6 +18,29 @@ def test_legacy_tasks_and_schedule_are_absent() -> None:
     assert not hasattr(tasks, "retry_failed_lifecycle_instances_task")
     assert not hasattr(tasks, "run_supervisor_pipeline_task")
     assert not hasattr(tasks, "run_salomao_v1_thread_pipeline_task")
+
+
+@pytest.mark.django_db
+def test_repair_migration_disables_persisted_legacy_schedule() -> None:
+    import importlib
+
+    from django.apps import apps
+    from django_celery_beat.models import IntervalSchedule, PeriodicTask
+
+    interval = IntervalSchedule.objects.create(every=1, period=IntervalSchedule.MINUTES)
+
+    task = PeriodicTask.objects.create(
+        name="ai-lifecycle-retry-dispatch",
+        task="ai_agents.retry_failed_lifecycle_instances_task",
+        interval=interval,
+        enabled=True,
+    )
+    migration = importlib.import_module("apps.ai_agents.migrations.0009_disable_legacy_retry_schedule")
+
+    migration.disable_legacy_retry_schedule(apps, None)
+
+    task.refresh_from_db()
+    assert task.enabled is False
 
 
 def test_legacy_runtime_flags_are_absent() -> None:

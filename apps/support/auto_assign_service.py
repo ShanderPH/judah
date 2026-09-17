@@ -323,6 +323,9 @@ def _apply_ticket_closed(
         .order_by("-entered_stage_at")
         .first()
     )
+    if active_cycle is None and bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False)):
+        logger.warning("auto_assign_close_cycle_missing", ticket_id=hubspot_ticket_id)
+        return
     if active_cycle is not None and closed_at < active_cycle.entered_stage_at:
         logger.info("auto_assign_close_stale_cycle", ticket_id=hubspot_ticket_id, cycle_id=str(active_cycle.pk))
         return

@@ -238,6 +238,10 @@ def _record_failure(claim: ClaimedDelivery, failure: DeliveryFailure) -> None:
 
 def deliver_outbox_event(outbox_id: str) -> bool:
     """Attempt one n8n delivery and durably record its classified outcome."""
+    if not settings.N8N_BOT_DELIVERY_ENABLED:
+        logger.info("n8n_outbox_delivery_disabled", outbox_id=outbox_id)
+        return False
+
     claim = claim_outbox_event(outbox_id)
     if claim is None:
         return False
