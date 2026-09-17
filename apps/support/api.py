@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
+from django.http import HttpRequest
 from ninja import Query, Router
 
 from apps.support.admin_api import router as admin_router
@@ -439,8 +440,9 @@ def sync_novo_tickets(request) -> tuple[int, dict]:
     summary="Queue performance metrics",
 )
 @paginate(StandardPagination)
+@require_manager_or_admin
 def list_queue_metrics(
-    request,
+    request: HttpRequest,
     days: int = 30,
 ) -> list[QueuePerformanceMetrics]:
     """Return daily queue performance metrics for the last N days (default 30).

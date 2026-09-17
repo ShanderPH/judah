@@ -2,10 +2,23 @@
 
 from datetime import UTC, datetime
 
-from django.http import JsonResponse
+from django.http import HttpRequest, JsonResponse
 from ninja import Router
 
+from common.logging import get_logger
+
 router = Router()
+logger = get_logger(__name__)
+
+
+def _log_probe_failure(check: str, exc: Exception, request: HttpRequest) -> None:
+    """Record correlation and exception type without retaining sensitive messages."""
+    logger.warning(
+        "health.readiness_probe_failed",
+        check=check,
+        error_type=type(exc).__name__,
+        request_id=getattr(request, "META", {}).get("X_REQUEST_ID"),
+    )
 
 
 @router.get("/", auth=None, summary="Liveness probe")
@@ -23,7 +36,7 @@ def health_check(request) -> dict:
 
 
 @router.get("/ready", auth=None, summary="Readiness probe")
-def readiness_check(request) -> JsonResponse:
+def readiness_check(request: HttpRequest) -> JsonResponse:
     """Readiness probe — verifies DB + cache + auth-critical migrations.
 
     Returns 503 (not 200) if any critical dependency is degraded so
@@ -40,7 +53,8 @@ def readiness_check(request) -> JsonResponse:
             cur.fetchone()
         checks["database"] = "ok"
     except Exception as exc:
-        checks["database"] = f"error: {exc}"
+        checks["database"] = "error"
+        _log_probe_failure("database", exc, request)
 
     try:
         from django.core.cache import cache
@@ -48,7 +62,8 @@ def readiness_check(request) -> JsonResponse:
         cache.set("health_ping", "pong", timeout=5)
         checks["cache"] = "ok" if cache.get("health_ping") == "pong" else "error"
     except Exception as exc:
-        checks["cache"] = f"error: {exc}"
+        checks["cache"] = "error"
+        _log_probe_failure("cache", exc, request)
 
     # Verify auth-critical tables exist — these are the ones whose absence
     # surfaces as a silent 500 on /auth/login when token_blacklist or
@@ -68,7 +83,8 @@ def readiness_check(request) -> JsonResponse:
         else:
             checks["auth_schema"] = "ok"
     except Exception as exc:
-        checks["auth_schema"] = f"error: {exc}"
+        checks["auth_schema"] = "error"
+        _log_probe_failure("auth_schema", exc, request)
 
     # Replicate the exact failure path of /auth/login without persisting
     # anything: encode an access token for the first available user. This
@@ -87,7 +103,8 @@ def readiness_check(request) -> JsonResponse:
             _ = str(token)
             checks["jwt_mint"] = "ok"
     except Exception as exc:
-        checks["jwt_mint"] = f"error: {type(exc).__name__}: {exc}"
+        checks["jwt_mint"] = "error"
+        _log_probe_failure("jwt_mint", exc, request)
 
     all_ok = all(v == "ok" or v.startswith("skipped") for v in checks.values())
     from django.conf import settings
@@ -103,9 +120,10 @@ def readiness_check(request) -> JsonResponse:
 
         conversation_cycles = _conversation_cycle_checks()
     except Exception as exc:
+        _log_probe_failure("conversation_cycles", exc, request)
         conversation_cycles = {
             "enforcement_ready": False,
-            "error": type(exc).__name__,
+            "error": "unavailable",
         }
 
     body = {
