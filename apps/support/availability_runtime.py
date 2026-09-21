@@ -25,6 +25,7 @@ class RoutingCapability(StrEnum):
 # newly introduced routing writers that have not selected an authority gate.
 ROUTING_WRITER_CAPABILITIES: dict[str, RoutingCapability] = {
     "capacity_reconcile": RoutingCapability.WRITE_ROUTING_STATE,
+    "finalize_opening_assignment_cohort": RoutingCapability.WRITE_ROUTING_STATE,
     "enqueue_new_ticket": RoutingCapability.INGEST_QUEUE,
     "process_new_ticket_event": RoutingCapability.INGEST_QUEUE,
     "sync_novo_stage_tickets": RoutingCapability.RECONCILE_QUEUE,
