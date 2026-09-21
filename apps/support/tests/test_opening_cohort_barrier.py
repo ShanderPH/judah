@@ -11,6 +11,10 @@ import pytest
 from django.db import close_old_connections, connection, transaction
 from django.test import override_settings
 
+from apps.support.assignment_readiness import (
+    _current_opening_cohort,
+    _orphaned_opening_cohort_count,
+)
 from apps.support.durable_assignment_service import reserve_next_assignment
 from apps.support.helpdesk_calendar.service import resolve_operational_window
 from apps.support.matchmaker_service import matchmaker_drain_queue
@@ -383,6 +387,126 @@ def test_recheck_task_is_noop_after_release() -> None:
 
     assert result == {"result": "released"}
     heartbeat.assert_not_called()
+
+
+def test_recheck_releases_shadow_cohort_after_queue_is_consumed() -> None:
+    """The callback owns cohort finalization even when shadow emptied the queue."""
+    from apps.support.tasks import task_recheck_opening_assignment_cohort
+
+    now = datetime(2026, 9, 21, 9, 1, 17, tzinfo=SAO_PAULO)
+    eligible = _agent(owner_id=8821, eligibility_reason="eligible", observed_at=now - timedelta(minutes=1))
+    settled = _agent(owner_id=8822, eligibility_reason="remote_away", observed_at=now - timedelta(minutes=1))
+    cohort = OpeningAssignmentCohort.objects.create(
+        window_started_at=now - timedelta(minutes=1, seconds=17),
+        cohort_observed_at=now - timedelta(minutes=1),
+        recheck_at=now - timedelta(seconds=1),
+        deadline_at=now + timedelta(seconds=30),
+        member_agent_ids=[str(eligible.pk), str(settled.pk)],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+        callback_scheduled_at=now - timedelta(seconds=30),
+    )
+
+    with (
+        patch("apps.support.tasks.timezone.now", return_value=now),
+        patch("apps.support.sat_service.sat_heartbeat", return_value={"agents_checked": 2}),
+        patch("apps.webhooks.metrics.emit_metric"),
+    ):
+        result = task_recheck_opening_assignment_cohort.run(str(cohort.pk))
+
+    cohort.refresh_from_db()
+    assert result["result"] == "drained"
+    assert result["drain"]["total_pending"] == 0
+    assert cohort.state == OpeningAssignmentCohort.State.RELEASED
+    assert cohort.release_reason == OpeningAssignmentCohort.ReleaseReason.ALL_SETTLED
+
+
+def test_empty_drain_releases_expired_cohort_as_beat_fallback() -> None:
+    """The Beat fallback must close an expired cohort without a queue row."""
+    from apps.support.tasks import task_matchmaker_drain_queue
+
+    now = datetime(2026, 9, 21, 9, 2, tzinfo=SAO_PAULO)
+    eligible = _agent(owner_id=8831, eligibility_reason="eligible", observed_at=now - timedelta(minutes=2))
+    stabilizing = _agent(
+        owner_id=8832,
+        eligibility_reason="stabilizing",
+        observed_at=now - timedelta(minutes=2),
+    )
+    cohort = OpeningAssignmentCohort.objects.create(
+        window_started_at=now - timedelta(minutes=2),
+        cohort_observed_at=now - timedelta(minutes=2),
+        recheck_at=now - timedelta(minutes=1),
+        deadline_at=now - timedelta(seconds=30),
+        member_agent_ids=[str(eligible.pk), str(stabilizing.pk)],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+        callback_scheduled_at=now - timedelta(minutes=1),
+    )
+
+    with (
+        patch("apps.support.tasks.timezone.now", return_value=now),
+        patch("apps.webhooks.metrics.emit_metric"),
+    ):
+        result = task_matchmaker_drain_queue()
+
+    cohort.refresh_from_db()
+    assert result["total_pending"] == 0
+    assert cohort.state == OpeningAssignmentCohort.State.RELEASED
+    assert cohort.release_reason == OpeningAssignmentCohort.ReleaseReason.DEADLINE
+
+
+def test_non_authoritative_drain_does_not_finalize_expired_cohort() -> None:
+    """A shared non-authoritative runtime must never mutate cohort state."""
+    from apps.support.tasks import task_matchmaker_drain_queue
+
+    now = datetime(2026, 9, 21, 9, 2, tzinfo=SAO_PAULO)
+    cohort = OpeningAssignmentCohort.objects.create(
+        window_started_at=now - timedelta(minutes=2),
+        cohort_observed_at=now - timedelta(minutes=2),
+        recheck_at=now - timedelta(minutes=1),
+        deadline_at=now - timedelta(seconds=30),
+        member_agent_ids=[],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+    )
+
+    with (
+        patch("apps.support.tasks.timezone.now", return_value=now),
+        patch("apps.support.availability_runtime.may_write_routing_state", return_value=False),
+        patch("apps.webhooks.metrics.emit_metric"),
+    ):
+        result = task_matchmaker_drain_queue()
+
+    cohort.refresh_from_db()
+    assert result["total_pending"] == 0
+    assert cohort.state == OpeningAssignmentCohort.State.ACTIVE
+
+
+def test_readiness_separates_current_cohort_from_expired_orphans() -> None:
+    """Historical active rows must not hide the cohort for the current window."""
+    now = datetime(2026, 9, 21, 9, 0, 30, tzinfo=SAO_PAULO)
+    stale = OpeningAssignmentCohort.objects.create(
+        window_started_at=now - timedelta(days=1, seconds=30),
+        cohort_observed_at=now - timedelta(days=1),
+        recheck_at=now - timedelta(days=1) + timedelta(seconds=30),
+        deadline_at=now - timedelta(days=1) + timedelta(minutes=1),
+        member_agent_ids=[],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+    )
+    current = OpeningAssignmentCohort.objects.create(
+        window_started_at=now.replace(hour=9, minute=0, second=0, microsecond=0),
+        cohort_observed_at=now - timedelta(seconds=10),
+        recheck_at=now + timedelta(seconds=20),
+        deadline_at=now + timedelta(seconds=50),
+        member_agent_ids=[],
+        initial_eligible_count=1,
+        initial_stabilizing_count=1,
+    )
+
+    assert _current_opening_cohort(now).pk == current.pk
+    assert _orphaned_opening_cohort_count(now) == 1
+    assert stale.pk != current.pk
 
 
 @override_settings(OPENING_COHORT_BARRIER_MODE="enforce")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.conf import settings
@@ -16,6 +16,7 @@ from apps.support.availability_runtime import (
     is_authoritative_availability_runtime,
     may_assign,
 )
+from apps.support.helpdesk_calendar.service import resolve_operational_window
 from apps.support.models import (
     ASSIGNMENT_ATTEMPT_NON_TERMINAL_STATES,
     Agent,
@@ -34,6 +35,25 @@ _CYCLE_PROJECTION_TABLES = (
     ("assignment_logs", "AssignmentLog", "ticket_id"),
     ("conversation_reassignments", "ConversationReassignment", "hubspot_ticket_id"),
 )
+
+
+def _current_opening_cohort(now: datetime) -> OpeningAssignmentCohort | None:
+    """Return only the active cohort that belongs to the current window."""
+    window = resolve_operational_window(now)
+    if window is None:
+        return None
+    return OpeningAssignmentCohort.objects.filter(
+        state=OpeningAssignmentCohort.State.ACTIVE,
+        window_started_at=window.start_at,
+    ).first()
+
+
+def _orphaned_opening_cohort_count(now: datetime) -> int:
+    """Count active cohorts that survived beyond their immutable deadline."""
+    return OpeningAssignmentCohort.objects.filter(
+        state=OpeningAssignmentCohort.State.ACTIVE,
+        deadline_at__lte=now,
+    ).count()
 
 
 def _conversation_cycle_checks() -> dict[str, Any]:
@@ -139,14 +159,10 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     checks["opening_cohort_migration_applied"] = cohort_migration_applied
 
     now = timezone.now()
-    active_cohort = (
-        OpeningAssignmentCohort.objects.filter(state=OpeningAssignmentCohort.State.ACTIVE)
-        .order_by("deadline_at")
-        .first()
-        if cohort_migration_applied
-        else None
-    )
+    active_cohort = _current_opening_cohort(now) if cohort_migration_applied else None
+    orphaned_active_cohorts = _orphaned_opening_cohort_count(now) if cohort_migration_applied else 0
     checks["opening_cohort_active"] = active_cohort is not None
+    checks["opening_cohort_orphaned_active"] = orphaned_active_cohorts
     checks["opening_cohort_age_seconds"] = (
         max(0, int((now - active_cohort.cohort_observed_at).total_seconds())) if active_cohort else 0
     )
@@ -160,7 +176,7 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
         if active_cohort
         else 0
     )
-    if checks["opening_cohort_deadline_expired"] and checks["opening_cohort_deferred_backlog"]:
+    if orphaned_active_cohorts:
         reasons.append("opening_cohort_deadline_expired")
     freshness_cutoff = now - timedelta(seconds=int(settings.AVAILABILITY_FRESHNESS_SECONDS))
     active_agents = Agent.objects.filter(Q(is_active=True) | Q(is_active__isnull=True))
@@ -354,6 +370,11 @@ def emit_assignment_readiness_metrics(readiness: dict[str, Any]) -> None:
         int(bool(checks.get("opening_cohort_active", False))),
         kind="gauge",
         mode=str(checks.get("opening_cohort_mode", "off")),
+    )
+    emit_metric(
+        "assignment_cohort_orphaned_active",
+        int(checks.get("opening_cohort_orphaned_active", 0)),
+        kind="gauge",
     )
     for attempt_state, count in checks["attempts_by_state"].items():
         emit_metric("assignment_attempts", count, kind="gauge", state=attempt_state)

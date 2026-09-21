@@ -7,6 +7,11 @@
 
 ---
 
+## 0. RESTRIÇÃO DE AUTOMAÇÃO
+
+- Não utilizar skills, comandos ou workflows do Skynet neste repositório.
+- Seguir somente as instruções locais deste `AGENTS.md` e as solicitações explícitas do usuário.
+
 ## 1. STACK DESTE PROJETO
 
 - **Linguagens:** Python 3.14 (versão exata obrigatória)

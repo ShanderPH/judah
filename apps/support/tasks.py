@@ -226,9 +226,33 @@ def task_matchmaker_drain_queue() -> dict:
     PostgreSQL row claims and ``SKIP LOCKED`` serialize overlapping drains.
     """
     from apps.support.agent_sync_service import is_business_hours
+    from apps.support.availability_runtime import may_write_routing_state
     from apps.support.matchmaker_service import matchmaker_drain_queue
     from apps.support.models import NewConversation, OpeningAssignmentCohort
+    from apps.support.opening_cohort_service import (
+        CohortBarrierOutcome,
+        finalize_opening_assignment_cohort,
+    )
     from apps.webhooks.metrics import emit_metric
+
+    now = timezone.now()
+    expired_cohort_ids = (
+        list(
+            OpeningAssignmentCohort.objects.filter(
+                state=OpeningAssignmentCohort.State.ACTIVE,
+                deadline_at__lte=now,
+            ).values_list("pk", flat=True)
+        )
+        if may_write_routing_state()
+        else []
+    )
+    release_decisions = [finalize_opening_assignment_cohort(cohort_id, now=now) for cohort_id in expired_cohort_ids]
+    released_by_deadline = sum(
+        decision.released_now and decision.outcome == CohortBarrierOutcome.RELEASED_DEADLINE
+        for decision in release_decisions
+    )
+    if released_by_deadline:
+        emit_metric("assignment_cohort_beat_fallback_total", released_by_deadline)
 
     # The safety-net task usually finds an empty queue. Read only one scalar
     # before loading calendar rules and agent eligibility for that common case.
@@ -255,13 +279,6 @@ def task_matchmaker_drain_queue() -> dict:
     if not is_business_hours():
         return {"skipped_off_hours": True}
 
-    # Redis lock — prevent overlapping drains
-    expired_cohort_ids = list(
-        OpeningAssignmentCohort.objects.filter(
-            state=OpeningAssignmentCohort.State.ACTIVE,
-            deadline_at__lte=timezone.now(),
-        ).values_list("pk", flat=True)
-    )
     try:
         result = matchmaker_drain_queue()
     except Exception as exc:
@@ -278,14 +295,6 @@ def task_matchmaker_drain_queue() -> dict:
         cataloged_error_context("assignment_repair_unexpected") if result.get("systemic_failures", 0) else {}
     )
     log_method("task_matchmaker_drain_queue_done", **result, **error_context)
-    if expired_cohort_ids:
-        released_by_deadline = OpeningAssignmentCohort.objects.filter(
-            pk__in=expired_cohort_ids,
-            state=OpeningAssignmentCohort.State.RELEASED,
-            release_reason=OpeningAssignmentCohort.ReleaseReason.DEADLINE,
-        ).count()
-        if released_by_deadline:
-            emit_metric("assignment_cohort_beat_fallback_total", released_by_deadline)
     return result
 
 
@@ -297,6 +306,7 @@ def task_matchmaker_drain_queue() -> dict:
 def task_recheck_opening_assignment_cohort(self, cohort_id: str) -> dict[str, object]:
     """Refresh the frozen opening cohort once, then invoke the canonical drain."""
     from apps.support.models import OpeningAssignmentCohort
+    from apps.support.opening_cohort_service import finalize_opening_assignment_cohort
     from apps.support.sat_service import sat_heartbeat
     from apps.webhooks.metrics import emit_metric
 
@@ -324,6 +334,7 @@ def task_recheck_opening_assignment_cohort(self, cohort_id: str) -> dict[str, ob
     if blocked:
         emit_metric("assignment_cohort_callbacks_total", 1, result="reconciliation_blocked")
         return {"result": "reconciliation_blocked"}
+    finalize_opening_assignment_cohort(cohort.pk, now=timezone.now())
     result = task_matchmaker_drain_queue()
     emit_metric("assignment_cohort_callbacks_total", 1, result="drained")
     return {"result": "drained", "drain": result}

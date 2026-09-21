@@ -37,6 +37,7 @@ class CohortBarrierDecision:
     outcome: CohortBarrierOutcome
     cohort_id: uuid.UUID | None = None
     recheck_at: datetime | None = None
+    released_now: bool = False
 
     @property
     def deferred(self) -> bool:
@@ -147,6 +148,58 @@ def _release(
     logger.info("opening_cohort_released", cohort_id=str(cohort.pk), reason=reason, duration_seconds=duration)
 
 
+def _stabilizing_member_count(cohort: OpeningAssignmentCohort) -> int:
+    member_ids = [uuid.UUID(value) for value in cohort.member_agent_ids]
+    return (
+        Agent.objects.filter(pk__in=member_ids, eligibility_reason="stabilizing")
+        .filter(Q(is_active=True) | Q(is_active__isnull=True))
+        .filter(
+            auto_assign_enabled=True,
+            current_simultaneous_chats__lt=Coalesce(F("max_simultaneous_chats"), 5),
+        )
+        .count()
+    )
+
+
+def finalize_opening_assignment_cohort(
+    cohort_id: uuid.UUID | str,
+    *,
+    now: datetime,
+) -> CohortBarrierDecision:
+    """Finalize one persisted cohort without depending on a queue row."""
+    from apps.support.availability_runtime import require_routing_writer_authority
+
+    require_routing_writer_authority("finalize_opening_assignment_cohort")
+    with transaction.atomic():
+        cohort = OpeningAssignmentCohort.objects.select_for_update().filter(pk=cohort_id).first()
+        if cohort is None:
+            return CohortBarrierDecision(CohortBarrierOutcome.NOT_APPLICABLE)
+        if cohort.state == OpeningAssignmentCohort.State.RELEASED:
+            outcome = (
+                CohortBarrierOutcome.RELEASED_DEADLINE
+                if cohort.release_reason == OpeningAssignmentCohort.ReleaseReason.DEADLINE
+                else CohortBarrierOutcome.RELEASED_ALL_SETTLED
+            )
+            return CohortBarrierDecision(outcome, cohort.pk, cohort.recheck_at)
+        if _stabilizing_member_count(cohort) == 0:
+            _release(cohort, reason=OpeningAssignmentCohort.ReleaseReason.ALL_SETTLED, now=now)
+            return CohortBarrierDecision(
+                CohortBarrierOutcome.RELEASED_ALL_SETTLED,
+                cohort.pk,
+                cohort.recheck_at,
+                released_now=True,
+            )
+        if now >= cohort.deadline_at:
+            _release(cohort, reason=OpeningAssignmentCohort.ReleaseReason.DEADLINE, now=now)
+            return CohortBarrierDecision(
+                CohortBarrierOutcome.RELEASED_DEADLINE,
+                cohort.pk,
+                cohort.recheck_at,
+                released_now=True,
+            )
+        return CohortBarrierDecision(CohortBarrierOutcome.DEFERRED, cohort.pk, cohort.recheck_at)
+
+
 def _schedule_recheck(cohort: OpeningAssignmentCohort, now: datetime) -> None:
     if cohort.callback_scheduled_at is not None:
         return
@@ -198,16 +251,7 @@ def evaluate_opening_cohort_barrier(
             )
             return CohortBarrierDecision(outcome, cohort.pk, cohort.recheck_at)
 
-        member_ids = [uuid.UUID(value) for value in cohort.member_agent_ids]
-        stabilizing_count = (
-            Agent.objects.filter(pk__in=member_ids, eligibility_reason="stabilizing")
-            .filter(Q(is_active=True) | Q(is_active__isnull=True))
-            .filter(
-                auto_assign_enabled=True,
-                current_simultaneous_chats__lt=Coalesce(F("max_simultaneous_chats"), 5),
-            )
-            .count()
-        )
+        stabilizing_count = _stabilizing_member_count(cohort)
         if stabilizing_count == 0:
             _release(cohort, reason=OpeningAssignmentCohort.ReleaseReason.ALL_SETTLED, now=now)
             return CohortBarrierDecision(CohortBarrierOutcome.RELEASED_ALL_SETTLED, cohort.pk, cohort.recheck_at)
