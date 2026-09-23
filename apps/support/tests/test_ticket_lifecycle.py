@@ -217,8 +217,8 @@ class TestHandleOwnerChange:
         to_agent = _make_agent("ToAgent", owner_id=200, chats=1)
         _make_assigned("T012", from_agent)
 
-        # Pre-acquire the lock for this ticket+owner combo
-        lock_key = "owner_change:T012:100:200"
+        # Pre-acquire the lock for this ticket.
+        lock_key = "owner_change:T012"
         cache.add(lock_key, "1", timeout=120)
 
         from apps.support.tasks import task_handle_owner_change
