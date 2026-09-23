@@ -434,9 +434,8 @@ def task_handle_owner_change(
     Handles chat count adjustments, AssignedConversation updates, and
     ConversationReassignment logging.
 
-    Idempotent: a Redis dedup lock keyed on ``{ticket_id}:{prev}:{new}``
-    ensures that Celery retries and HubSpot webhook re-deliveries do not
-    cause double increment/decrement of agent chat counts.
+    Idempotent: a Redis lock keyed by ticket serializes owner changes while
+    the persisted assignment provides the source owner for accounting.
 
     Args:
         hubspot_ticket_id: HubSpot ticket ID.
@@ -455,49 +454,54 @@ def task_handle_owner_change(
         return
 
     try:
-        previous_owner_id = payload.get("previousValue") or payload.get("sourceId")
+        previous_owner_id = payload.get("previousValue")
         from apps.support.capacity_service import capacity_mode
         from apps.support.owner_reconciliation_service import reconcile_ticket
 
-        if capacity_mode() != "off":
+        mode = capacity_mode()
+        occupancy = None
+        if mode != "off":
             try:
-                reconcile_ticket(hubspot_ticket_id, source="webhook", observation_id=str(payload.get("eventId", "")))
+                occupancy = reconcile_ticket(
+                    hubspot_ticket_id,
+                    source="webhook",
+                    observation_id=str(payload.get("eventId", "")),
+                )
             except Exception:
-                if capacity_mode() == "enforce":
+                if mode == "enforce":
                     raise
                 logger.warning("capacity_shadow_observation_failed")
-            if capacity_mode() == "enforce":
+                occupancy = None
+            if mode == "enforce":
                 return
 
-        # Safely parse owner IDs — HubSpot may send formats like "userId:72733895"
         prev_owner_int = _safe_parse_owner_id(previous_owner_id)
         new_owner_int = _safe_parse_owner_id(new_owner_id)
+        if mode == "shadow" and occupancy is not None:
+            new_owner_int = occupancy.hubspot_owner_id
+        elif mode == "off" and prev_owner_int is None:
+            from apps.support.models import AssignedConversation, NewConversation
 
-        # Initial and out-of-order owner events are confirmed against HubSpot;
-        # they may need to consume a still-queued local projection.
-        if prev_owner_int is None:
-            from apps.integrations.hubspot.client import get_hubspot_client
-            from apps.support.models import AssignedConversation
-
-            existing_owner = (
+            persisted_owner_id = (
                 AssignedConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id)
                 .values_list("hubspot_owner_id", flat=True)
                 .first()
             )
-            if existing_owner == new_owner_int:
+            if persisted_owner_id == new_owner_int:
                 return
+            has_active_queue = NewConversation.objects.filter(
+                hubspot_ticket_id=hubspot_ticket_id,
+                queue_status__in=(NewConversation.QueueStatus.PENDING, NewConversation.QueueStatus.QUEUED),
+            ).exists()
+            if persisted_owner_id is None and not has_active_queue:
+                return
+
+            from apps.integrations.hubspot.client import get_hubspot_client
 
             current = get_hubspot_client().get_ticket_details(hubspot_ticket_id)
             new_owner_int = _safe_parse_owner_id(current.get("owner_id"))
-            if new_owner_int is None:
-                return
-        # Skip if no actual change
-        if prev_owner_int == new_owner_int:
-            return
 
-        # Redis dedup lock — prevents double count adjustments when HubSpot retries
-        # the webhook or when Celery retries this task after a partial failure.
-        lock_key = f"owner_change:{hubspot_ticket_id}:{prev_owner_int}:{new_owner_int}"
+        lock_key = f"owner_change:{hubspot_ticket_id}"
         lock = OwnedCacheLock(lock_key, timeout=120)
         if not lock.acquire():
             logger.info(
@@ -559,7 +563,6 @@ def _do_handle_owner_change(
 
     now = timezone.now()
 
-    from_agent = Agent.objects.filter(hubspot_owner_id=prev_owner_int).first() if prev_owner_int is not None else None
     to_agent = Agent.objects.filter(hubspot_owner_id=new_owner_int).first() if new_owner_int is not None else None
 
     # Calculate time with previous agent
@@ -656,12 +659,13 @@ def _do_handle_owner_change(
                         metadata={"support_cycle_id": str(assigned_conv.cycle_id or "")},
                     )
                 return
-        if assigned_conv is None or assigned_conv.hubspot_owner_id != prev_owner_int:
-            logger.info(
-                "task_owner_change_stale_cycle",
-                ticket_id=hubspot_ticket_id,
-                cycle_id=str(assigned_conv.cycle_id) if assigned_conv and assigned_conv.cycle_id else None,
-            )
+        if assigned_conv is None:
+            return
+        if prev_owner_int is not None and assigned_conv.hubspot_owner_id != prev_owner_int:
+            return
+        prev_owner_int = assigned_conv.hubspot_owner_id
+        from_agent = assigned_conv.agent
+        if prev_owner_int == new_owner_int:
             return
         if assigned_conv.assigned_at:
             delta = now - assigned_conv.assigned_at

@@ -17,6 +17,7 @@ from apps.support.models import (
     Agent,
     AgentCapacityReservation,
     AssignedConversation,
+    ConversationReassignment,
     NewConversation,
     SupportConversationCycle,
     SupportTicketOccupancy,
@@ -71,6 +72,32 @@ def test_transfer_without_previous_owner():
     source.refresh_from_db()
     target.refresh_from_db()
     assert (source.current_simultaneous_chats, target.current_simultaneous_chats) == (0, 1)
+
+
+@pytest.mark.parametrize("payload", [{}, {"sourceId": "14832413"}])
+def test_shadow_transfer_uses_persisted_owner_when_webhook_omits_previous_value(provider, settings, payload):
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    source, target = agent(100), agent(200)
+    Agent.objects.filter(pk=source.pk).update(current_simultaneous_chats=1)
+    AssignedConversation.objects.create(
+        hubspot_ticket_id="cap-1",
+        agent=source,
+        hubspot_owner_id=100,
+        assigned_at=timezone.now(),
+        entered_queue_at=timezone.now(),
+    )
+    provider.get_ticket_details.return_value = ticket(200)
+
+    task_handle_owner_change("cap-1", "200", payload)
+
+    source.refresh_from_db()
+    target.refresh_from_db()
+    assigned = AssignedConversation.objects.get(hubspot_ticket_id="cap-1")
+    reassignment = ConversationReassignment.objects.get(hubspot_ticket_id="cap-1")
+    assert (source.current_simultaneous_chats, target.current_simultaneous_chats) == (0, 1)
+    assert assigned.hubspot_owner_id == 200
+    assert reassignment.from_hubspot_owner_id == 100
+    assert reassignment.to_hubspot_owner_id == 200
 
 
 def test_manual_without_queue_counts_once():
