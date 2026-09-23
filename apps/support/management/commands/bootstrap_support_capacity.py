@@ -38,7 +38,10 @@ def bootstrap_agent(agent: Agent) -> dict[str, int | bool | str]:
             target = Agent.objects.select_for_update().get(pk=agent.pk)
             hold_capacity(occupancy, target, reassignment=intent)
             imported += 1
-    ready = refresh_agent_capacity(agent, force=True)
+    # The explicit command is already bounded by SUPPORT_CAPACITY_MAX_SCAN_TICKETS
+    # and each provider request timeout. It must not restart a large history at
+    # the runtime refresh deadline.
+    ready = refresh_agent_capacity(agent, force=True, time_budget_seconds=None)
     agent.refresh_from_db()
     return {
         "agent_id": str(agent.pk),

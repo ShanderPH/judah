@@ -242,6 +242,40 @@ def test_search_absence_is_confirmed_by_identity(provider):
     assert target.current_simultaneous_chats == 1
 
 
+def test_portfolio_bootstrap_resumes_after_bounded_historical_batches(provider, settings):
+    from apps.integrations.hubspot.client import STAGE_FECHADO_ID
+    from apps.support.owner_reconciliation_service import refresh_agent_capacity
+
+    target = agent(200)
+    settings.SUPPORT_CAPACITY_MAX_SCAN_TICKETS = 1
+    for identity in ("history-1", "history-2", "history-3"):
+        AssignedConversation.objects.create(
+            hubspot_ticket_id=identity,
+            agent=target,
+            hubspot_owner_id=target.hubspot_owner_id,
+            agent_name=target.name,
+            assigned_at=timezone.now(),
+            entered_queue_at=timezone.now(),
+        )
+    provider.get_ticket_details.side_effect = lambda identity: {
+        **ticket("", identity),
+        "stage": STAGE_FECHADO_ID,
+    }
+
+    assert not refresh_agent_capacity(target, force=True)
+    assert not refresh_agent_capacity(target, force=True)
+    assert refresh_agent_capacity(target, force=True)
+
+    assert [call.args[0] for call in provider.get_ticket_details.call_args_list] == [
+        "history-1",
+        "history-2",
+        "history-3",
+    ]
+    target.refresh_from_db()
+    assert target.capacity_state == "ready"
+    assert target.current_simultaneous_chats == 0
+
+
 @pytest.mark.parametrize("owners", [(100, 200, 100, 200), (200, 200, 200)])
 def test_repeated_transfers_use_current_identity(provider, owners):
     source, target = agent(100), agent(200)
@@ -430,6 +464,35 @@ def test_bootstrap_distinguishes_released_retry_from_ambiguous_operation(provide
     assert AgentCapacityReservation.objects.get().state == "released"
     target.refresh_from_db()
     assert target.current_simultaneous_chats == 0
+
+
+def test_explicit_bootstrap_uses_identity_bound_instead_of_runtime_deadline(provider, settings):
+    from apps.integrations.hubspot.client import STAGE_FECHADO_ID
+    from apps.support.management.commands.bootstrap_support_capacity import bootstrap_agent
+
+    target = agent(200)
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    AssignedConversation.objects.create(
+        hubspot_ticket_id="historical-bootstrap",
+        agent=target,
+        hubspot_owner_id=target.hubspot_owner_id,
+        agent_name=target.name,
+        assigned_at=timezone.now(),
+        entered_queue_at=timezone.now(),
+    )
+    provider.get_ticket_details.return_value = {
+        **ticket("", "historical-bootstrap"),
+        "stage": STAGE_FECHADO_ID,
+    }
+
+    with patch(
+        "apps.support.owner_reconciliation_service.time.monotonic",
+        side_effect=AssertionError("runtime deadline must not govern explicit bootstrap"),
+    ):
+        report = bootstrap_agent(target)
+
+    assert report["ready"] is True
+    assert SupportTicketOccupancy.objects.get(hubspot_ticket_id="historical-bootstrap").state == "closed"
 
 
 def test_precondition_cannot_overwrite_newer_known_owner(provider):

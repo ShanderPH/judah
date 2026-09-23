@@ -819,45 +819,41 @@ def compensate_assignment_attempt(
         attempt = (
             AssignmentAttempt.objects.select_for_update(of=("self",)).select_related("queue_row").get(pk=attempt_id)
         )
-        if (
-            attempt.state
-            in (
-                AssignmentAttempt.State.COMPLETED,
-                AssignmentAttempt.State.COMPENSATED,
-            )
-            or attempt.compensated_at is not None
+        if attempt.state in (
+            AssignmentAttempt.State.COMPLETED,
+            AssignmentAttempt.State.COMPENSATED,
         ):
             return attempt
+        already_compensated = attempt.compensated_at is not None
+        if already_compensated and (retryable or repair_required):
+            return attempt
         now = _database_now()
-        if occupancy is not None:
-            from apps.support.models import AgentCapacityReservation
+        from apps.support.models import AgentCapacityReservation
 
-            reservation = (
-                AgentCapacityReservation.objects.select_for_update().filter(assignment_attempt=attempt).first()
-            )
-            if repair_required:
-                # An ambiguous effect still occupies capacity until conclusive readback.
-                attempt.state = AssignmentAttempt.State.REPAIR_REQUIRED
-                attempt.last_error_code = error_code
-                attempt.save(update_fields=["state", "last_error_code", "updated_at"])
-                degrade_agents({attempt.selected_agent_id})
-                return attempt
-            if reservation is not None:
-                conclude_reservation(reservation, converted=False, reason=error_code)
+        reservation = AgentCapacityReservation.objects.select_for_update().filter(assignment_attempt=attempt).first()
+        if repair_required and (occupancy is not None or reservation is not None):
+            # An ambiguous effect still occupies capacity until conclusive readback.
+            attempt.state = AssignmentAttempt.State.REPAIR_REQUIRED
+            attempt.last_error_code = error_code
+            attempt.save(update_fields=["state", "last_error_code", "updated_at"])
+            degrade_agents({attempt.selected_agent_id})
+            return attempt
+        if reservation is not None:
+            conclude_reservation(reservation, converted=False, reason=error_code)
+        if occupancy is not None or reservation is not None:
             materialize({attempt.selected_agent_id})
         attempt.compensation_started_at = attempt.compensation_started_at or now
-        if attempt.compensated_at is None and not capacity_enforced():
-            Agent.objects.filter(pk=attempt.selected_agent_id).update(
-                current_simultaneous_chats=Greatest(
-                    F("current_simultaneous_chats") - 1,
-                    Value(0),
-                ),
-                updated_at=now,
-            )
+        if not already_compensated:
+            if not capacity_enforced():
+                Agent.objects.filter(pk=attempt.selected_agent_id).update(
+                    current_simultaneous_chats=Greatest(
+                        F("current_simultaneous_chats") - 1,
+                        Value(0),
+                    ),
+                    updated_at=now,
+                )
             attempt.compensated_at = now
-        if capacity_enforced():
-            attempt.compensated_at = now
-        attempt.retry_count += 1
+            attempt.retry_count += 1
         attempt.last_error_code = error_code
         attempt.provider_result_classification = error_code
         if repair_required:
@@ -1167,17 +1163,6 @@ def repair_assignment_attempts(*, limit: int = 100) -> dict[str, int]:
                 locked = AssignmentAttempt.objects.select_for_update(skip_locked=True).filter(pk=attempt.pk).first()
                 if locked is None:
                     counts["conflict"] += 1
-                    continue
-                if (
-                    locked.cycle_id
-                    and locked.cycle
-                    and locked.cycle.state
-                    in {
-                        SupportConversationCycle.State.CLOSED,
-                        SupportConversationCycle.State.CANCELLED,
-                    }
-                ):
-                    counts["skipped_stale_cycle"] += 1
                     continue
                 if locked.state == AssignmentAttempt.State.EXTERNAL_APPLIED:
                     outcome = reconcile_ambiguous_attempt(locked.pk)
