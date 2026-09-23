@@ -262,8 +262,23 @@ def reconcile_ticket(
         raise
 
 
-def refresh_agent_capacity(agent: Agent, *, force: bool = False) -> bool:
-    """Reconcile a bounded complete portfolio, preserving held reservations."""
+def refresh_agent_capacity(
+    agent: Agent,
+    *,
+    force: bool = False,
+    time_budget_seconds: float | None = 20,
+) -> bool:
+    """Reconcile a bounded complete portfolio, preserving held reservations.
+
+    Args:
+        agent: Agent whose complete provider portfolio must be reconciled.
+        force: Ignore a still-fresh successful reconciliation.
+        time_budget_seconds: Runtime deadline, or ``None`` for the explicit
+            bootstrap whose identity count and provider calls are already bounded.
+
+    Returns:
+        Whether the agent reached a complete, conflict-free capacity snapshot.
+    """
     from apps.integrations.hubspot.client import get_hubspot_client
     from apps.support.availability_runtime import require_routing_writer_authority
     from apps.support.owned_cache_lock import OwnedCacheLock
@@ -285,25 +300,46 @@ def refresh_agent_capacity(agent: Agent, *, force: bool = False) -> bool:
         return False
     try:
         revision_tracker = {agent.pk: agent.capacity_revision}
-        scan_started_at = timezone.now()
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + time_budget_seconds if time_budget_seconds is not None else None
         ids, complete = get_hubspot_client().list_active_ticket_ids_by_owner(agent.hubspot_owner_id)
         if not complete:
             raise CapacityObservationConflictError("Incomplete portfolio discovery")
-        local_ids = set(SupportTicketOccupancy.objects.filter(agent=agent).values_list("hubspot_ticket_id", flat=True))
-        local_ids.update(AssignedConversation.objects.filter(agent=agent).values_list("hubspot_ticket_id", flat=True))
-        local_ids.update(
+        remote_ids = set(ids)
+        held_ids = set(
             AgentCapacityReservation.objects.filter(agent=agent, state="held").values_list(
                 "occupancy__hubspot_ticket_id", flat=True
             )
         )
-        identities = local_ids | set(ids)
-        if len(identities) > int(settings.SUPPORT_CAPACITY_MAX_SCAN_TICKETS):
-            raise CapacityObservationConflictError("Portfolio exceeds read budget")
-        for identity in sorted(identities):
-            if time.monotonic() >= deadline:
+        historical_ids = set(
+            AssignedConversation.objects.filter(agent=agent).values_list("hubspot_ticket_id", flat=True)
+        )
+        terminal_historical_ids = set(
+            SupportTicketOccupancy.objects.filter(
+                source_account_id=capacity_account(),
+                hubspot_ticket_id__in=historical_ids,
+                state__in={"closed", "out_of_scope"},
+            ).values_list("hubspot_ticket_id", flat=True)
+        )
+        local_ids = set(
+            SupportTicketOccupancy.objects.filter(agent=agent)
+            .exclude(state__in={"closed", "out_of_scope"})
+            .values_list("hubspot_ticket_id", flat=True)
+        )
+        local_ids.update(historical_ids - terminal_historical_ids)
+        critical_ids = remote_ids | held_ids
+        scan_limit = int(settings.SUPPORT_CAPACITY_MAX_SCAN_TICKETS)
+        if len(critical_ids) > scan_limit:
+            raise CapacityObservationConflictError("Active portfolio exceeds read budget")
+        backlog = sorted(local_ids - critical_ids)
+        remaining_slots = scan_limit - len(critical_ids)
+        identities = sorted(critical_ids) + backlog[:remaining_slots]
+        has_backlog = len(backlog) > remaining_slots
+        for identity in identities:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise CapacityObservationConflictError("Portfolio exceeds time budget")
             reconcile_ticket(identity, source="portfolio", revision_tracker=revision_tracker)
+        if has_backlog:
+            raise CapacityObservationConflictError("Historical portfolio requires another batch")
         # Pre-activation operations cannot be inferred from LIVE_STATES alone.
         unresolved = (
             AssignmentAttempt.objects.filter(selected_agent=agent)
@@ -326,7 +362,7 @@ def refresh_agent_capacity(agent: Agent, *, force: bool = False) -> bool:
             if locked.capacity_revision != revision_tracker[agent.pk]:
                 raise CapacityObservationConflictError("Portfolio generation changed during scan")
             locked.capacity_state = "ready"
-            locked.capacity_reconciled_at = scan_started_at
+            locked.capacity_reconciled_at = timezone.now()
             locked.save(update_fields=["capacity_state", "capacity_reconciled_at"])
         agent.refresh_from_db()
         return True

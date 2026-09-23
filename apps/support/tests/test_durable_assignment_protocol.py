@@ -198,6 +198,50 @@ def test_repair_external_applied_reads_back_and_never_repatches() -> None:
     client_factory.return_value.assign_ticket_owner.assert_not_called()
 
 
+def test_repair_closed_cycle_terminalizes_already_compensated_attempt() -> None:
+    agent = _agent()
+    now = timezone.now()
+    cycle = SupportConversationCycle.objects.create(
+        cycle_key="closed-cycle-repair",
+        source_account_id="test-portal",
+        hubspot_ticket_id="closed-cycle-ticket",
+        entered_stage_at=now - timedelta(minutes=10),
+        state=SupportConversationCycle.State.CLOSED,
+        opened_at=now - timedelta(minutes=10),
+        closed_at=now - timedelta(minutes=5),
+    )
+    attempt = AssignmentAttempt.objects.create(
+        idempotency_key="00000000-0000-0000-0000-000000000321",
+        ticket_id=cycle.hubspot_ticket_id,
+        cycle=cycle,
+        selected_agent=agent,
+        eligibility_revision=agent.availability_revision,
+        desired_hubspot_owner_id=agent.hubspot_owner_id,
+        decision_reason="test",
+        state=AssignmentAttempt.State.REPAIR_REQUIRED,
+        reserved_at=now - timedelta(minutes=9),
+        compensation_started_at=now - timedelta(minutes=8),
+        compensated_at=now - timedelta(minutes=8),
+        retry_count=1,
+        next_retry_at=now - timedelta(minutes=7),
+    )
+    AssignmentAttempt.objects.filter(pk=attempt.pk).update(updated_at=now - timedelta(minutes=5))
+
+    with patch("apps.support.durable_assignment_service.get_hubspot_client") as client_factory:
+        counts = repair_assignment_attempts(limit=1)
+        repeated = repair_assignment_attempts(limit=1)
+
+    attempt.refresh_from_db()
+    assert counts["skipped_stale_cycle"] == 1
+    assert attempt.state == AssignmentAttempt.State.COMPENSATED
+    assert attempt.compensated_at is not None
+    assert attempt.retry_count == 1
+    assert attempt.next_retry_at is None
+    assert attempt.last_error_code == "stale_cycle"
+    assert repeated["scanned"] == 0
+    client_factory.return_value.get_ticket_details.assert_not_called()
+
+
 def test_execute_external_applied_reads_back_and_never_repatches() -> None:
     agent = _agent()
     _queue()
