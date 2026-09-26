@@ -8,19 +8,25 @@ from typing import Any
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.db.models import Min
 
 from apps.ai_agents.models import ConversationEvent
 from apps.support.availability_runtime import require_routing_writer_authority
 from apps.support.conversation_cycle_service import InvalidStageTimestampError, parse_stage_entry_timestamp
+from apps.support.models import SupportConversationCycle
 from apps.support.owner_reconciliation_service import CapacityObservationConflictError
 from apps.support.ticket_close_service import CloseClassification, TicketCloseOccurrence, reconcile_close_occurrence
 from common.exceptions import ExternalServiceError
 
 
 class Command(BaseCommand):
-    """Classify without writes by default; explicitly authorized apply uses the live service."""
+    """Classify cycle-era closures without writes unless --apply is explicit."""
 
-    help = "Reconcile close occurrences (dry-run unless --apply; no automatic production repair)."
+    help = (
+        "Reconcile cycle-era close occurrences only (dry-run unless --apply). "
+        "The cutoff is the earliest SupportConversationCycle.created_at; --offset counts only events created at/after it. "
+        "legacy_skipped includes all earlier receipts and selected later receipts with an earlier effective close time."
+    )
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Declare bounded pagination and the explicit mutation switch."""
@@ -29,28 +35,37 @@ class Command(BaseCommand):
         parser.add_argument("--apply", action="store_true")
 
     def handle(self, *args: object, **options: Any) -> None:  # Any: Django management command keyword contract.
-        """Replay only persisted calculated stage-entry values, never receipt timestamps."""
+        """Exclude pre-cycle receipts before paging and pre-cycle occurrence times before repair."""
         limit, offset = options["limit"], options["offset"]
         if not 1 <= limit <= 1000 or offset < 0:
             raise CommandError("limit must be between 1 and 1000; offset must be nonnegative")
         apply = bool(options["apply"])
         if apply:
             require_routing_writer_authority("reconcile_ticket_closures")
+        cutoff = SupportConversationCycle.objects.aggregate(first_created_at=Min("created_at"))["first_created_at"]
+        if cutoff is None:
+            raise CommandError("No SupportConversationCycle exists; cycle-era cutoff is unavailable.")
+        close_events = ConversationEvent.objects.filter(
+            source="hubspot",
+            event_type="ticket_closed",
+            payload__propertyName=f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}",
+        )
+        legacy_skipped = close_events.filter(created_at__lt=cutoff).count()
         events = (
-            ConversationEvent.objects.filter(
-                source="hubspot",
-                event_type="ticket_closed",
-                payload__propertyName=f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}",
-            )
+            close_events.filter(created_at__gte=cutoff)
             .select_related("instance")
             .order_by("created_at", "pk")[offset : offset + limit]
         )
         counts = Counter(
             scanned=0,
+            legacy_skipped=legacy_skipped,
             applicable_current=0,
             applicable_historical=0,
             duplicate=0,
             reopen_not_materialized=0,
+            no_cycle=0,
+            identity_unavailable=0,
+            conflict=0,
             ambiguous=0,
             provider_unavailable=0,
             applied=0,
@@ -60,11 +75,14 @@ class Command(BaseCommand):
             try:
                 effective_at = parse_stage_entry_timestamp(event.payload.get("propertyValue"))
             except InvalidStageTimestampError:
-                counts["ambiguous"] += 1
+                counts["identity_unavailable"] += 1
+                continue
+            if effective_at < cutoff:
+                counts["legacy_skipped"] += 1
                 continue
             ticket_id = event.instance.hubspot_ticket_id
             if not ticket_id:
-                counts["ambiguous"] += 1
+                counts["identity_unavailable"] += 1
                 continue
             try:
                 result = reconcile_close_occurrence(
@@ -75,13 +93,20 @@ class Command(BaseCommand):
                 counts["provider_unavailable"] += 1
                 continue
             except CapacityObservationConflictError:
-                counts["ambiguous"] += 1
+                counts["conflict"] += 1
                 continue
             if result.classification in {CloseClassification.APPLIED_CURRENT, CloseClassification.APPLIED_HISTORICAL}:
                 key = "applicable_current" if result.closes_current_lifecycle else "applicable_historical"
                 counts[key] += 1
                 counts["applied"] += int(apply)
-            elif result.classification in {CloseClassification.DUPLICATE, CloseClassification.REOPEN_NOT_MATERIALIZED}:
+            elif result.classification in {
+                CloseClassification.DUPLICATE,
+                CloseClassification.REOPEN_NOT_MATERIALIZED,
+                CloseClassification.NO_CYCLE,
+                CloseClassification.IDENTITY_UNAVAILABLE,
+                CloseClassification.CONFLICT,
+                CloseClassification.PROVIDER_UNAVAILABLE,
+            }:
                 counts[result.classification.value] += 1
             else:
                 counts["ambiguous"] += 1
