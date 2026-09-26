@@ -269,6 +269,7 @@ def handle_ticket_closed(
 def _close_occurrence(
     ticket_id: str, closed_at_ms: str | int | None, owner_id: str | None, source_event_id: str = ""
 ) -> TicketCloseOccurrence | None:
+    """Parse a closed-stage occurrence, retaining legacy timestamp fallback."""
     from apps.support.conversation_cycle_service import InvalidStageTimestampError, parse_stage_entry_timestamp
     from apps.support.ticket_close_service import TicketCloseOccurrence
 

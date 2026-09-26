@@ -88,10 +88,12 @@ def resolve_close_target(
 
 
 def _cycles(ticket_id: str) -> QuerySet[SupportConversationCycle]:
+    """Return locally known service cycles for one ticket."""
     return SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id).order_by("pk")
 
 
 def _provider_decision(occurrence: TicketCloseOccurrence, snapshot: dict[str, object]) -> CloseClassification | None:
+    """Reject a close when provider state proves a later active attendance."""
     from apps.integrations.hubspot.client import STAGE_FECHADO_ID, SUPPORT_PIPELINE_ID
 
     if str(snapshot.get("id")) != occurrence.ticket_id or not snapshot.get("stage") or not snapshot.get("pipeline"):
@@ -212,10 +214,12 @@ def apply_close_occurrence(
 
 
 def _minutes(start: datetime | None, end: datetime) -> Decimal | None:
+    """Calculate elapsed minutes only when a start timestamp exists."""
     return Decimal(str(round((end - start).total_seconds() / 60, 2))) if start else None
 
 
 def _materialize(target: SupportConversationCycle | None, occurrence: TicketCloseOccurrence, *, current: bool) -> None:
+    """Move active projections into a closed record for the proven occurrence."""
     from apps.support.auto_assign_service import _transition_lifecycle_best_effort
     from apps.support.queue_service import decrement_agent_chat_count
 

@@ -71,6 +71,7 @@ def snapshot(settings):
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
 def test_current_close_and_retries_have_one_effect(settings, mode):
+    """Current closure applies once across all capacity modes."""
     settings.SUPPORT_CAPACITY_MODE = mode
     target = cycle()
     agent = assignment(target)
@@ -101,6 +102,7 @@ def test_invalid_timestamp_never_mutates(value):
 
 
 def test_provider_failure_leaves_cycle_untouched():
+    """Provider failure leaves active projections unchanged."""
     target = cycle()
     assignment(target)
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
@@ -114,6 +116,7 @@ def test_provider_failure_leaves_cycle_untouched():
 
 
 def test_unmaterialized_reopen_is_rejected(settings):
+    """A later provider reopening blocks old close materialization."""
     target = cycle()
     assignment(target)
     current = snapshot(settings)
@@ -127,6 +130,7 @@ def test_unmaterialized_reopen_is_rejected(settings):
 
 
 def test_dry_run_does_not_mutate(settings):
+    """Dry-run reports eligibility without changing projections."""
     target = cycle()
     agent = assignment(target)
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
@@ -142,6 +146,7 @@ def test_dry_run_does_not_mutate(settings):
 
 
 def test_revision_change_after_reconciliation_is_retryable(settings):
+    """Revision races raise retryable conflicts before close writes."""
     from apps.support.owner_reconciliation_service import CapacityObservationConflictError
 
     settings.SUPPORT_CAPACITY_MODE = "shadow"
@@ -161,6 +166,7 @@ def test_revision_change_after_reconciliation_is_retryable(settings):
 
 @pytest.mark.parametrize("projection", ["assigned", "pending"])
 def test_legacy_close_with_prior_closed_row_materializes_active_projection(settings, projection):
+    """An active legacy projection permits another close record."""
     settings.CONVERSATION_CYCLES_ENFORCED = False
     ClosedConversation.objects.create(hubspot_ticket_id="close-ticket", closed_at=T0)
     if projection == "assigned":
@@ -186,6 +192,7 @@ def test_legacy_close_with_prior_closed_row_materializes_active_projection(setti
 
 
 def test_legacy_close_with_only_prior_closed_row_is_duplicate(settings):
+    """A legacy close without active projection remains duplicate."""
     settings.CONVERSATION_CYCLES_ENFORCED = False
     ClosedConversation.objects.create(hubspot_ticket_id="close-ticket", closed_at=T0)
     result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1), allow_legacy=True)
@@ -194,6 +201,7 @@ def test_legacy_close_with_only_prior_closed_row_is_duplicate(settings):
 
 
 def test_cycle_close_with_existing_closed_row_remains_conflict(settings):
+    """Cycle-bound close rows retain conflict classification."""
     target = cycle()
     assignment(target)
     ClosedConversation.objects.create(cycle=target, hubspot_ticket_id="close-ticket", closed_at=T0)
@@ -208,6 +216,7 @@ def test_cycle_close_with_existing_closed_row_remains_conflict(settings):
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
 def test_postgres_concurrent_close_converges(settings, mode):
+    """Concurrent closes produce one durable effect under row locks."""
     from apps.support.owner_reconciliation_service import CapacityObservationConflictError
 
     if connection.vendor != "postgresql":
@@ -262,6 +271,7 @@ def test_postgres_concurrent_close_converges(settings, mode):
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
 def test_late_duplicate_does_not_close_reopened_cycle(settings, mode):
+    """Late duplicate close preserves the reopened active cycle."""
     from apps.ai_agents.models import ConversationInstance
     from apps.support.models import SupportTicketOccupancy
 
@@ -299,6 +309,7 @@ def test_late_duplicate_does_not_close_reopened_cycle(settings, mode):
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
 def test_reopen_during_provider_read_cannot_release_new_occupancy(settings, mode):
+    """Provider read races cannot release reopened occupancy."""
     from apps.ai_agents.models import ConversationInstance
     from apps.support.models import SupportTicketOccupancy
 

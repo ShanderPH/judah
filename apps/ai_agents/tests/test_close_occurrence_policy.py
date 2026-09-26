@@ -1,5 +1,6 @@
 """Close occurrences stay dispatchable without terminalizing a later attendance."""
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,11 +15,12 @@ from apps.ai_agents.services.lifecycle import (
 )
 from apps.support.auto_assign_service import handle_ticket_closed
 from apps.support.models import AssignedConversation, ClosedConversation
-from apps.support.tests.test_ticket_close_service import T1, assignment, cycle, snapshot
+from apps.support.tests.test_ticket_close_service import T0, T1, assignment, cycle, snapshot
 from apps.webhooks.services import process_webhook_event, record_webhook_event
 
 
 def event(property_name, value, occurred_at):
+    """Build a ticket property-change event with provider occurrence time."""
     payload = {
         "objectId": "close-ticket",
         "subscriptionType": "ticket.propertyChange",
@@ -28,6 +30,16 @@ def event(property_name, value, occurred_at):
         "eventId": f"{property_name}:{occurred_at}",
     }
     return SimpleNamespace(event_type="ticket.propertyChange", object_id="close-ticket", payload=payload)
+
+
+def test_close_without_provider_id_uses_delivery_id(settings):
+    """Match close ledger identity to task identity when provider ID is absent."""
+    raw = event(f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}", "1790000000000", 1790000000000)
+    raw.payload.pop("eventId")
+    raw.pk = "delivery-id"
+    raw.event_id = ""
+    normalized = EventNormalizer().normalize_webhook_event(raw)
+    assert normalized.source_event_id == "delivery-id"
 
 
 @pytest.mark.parametrize(
@@ -41,6 +53,7 @@ def event(property_name, value, occurred_at):
     ],
 )
 def test_policy_only_admits_occurrences(settings, kind, expected):
+    """Only calculated stage entries use idempotent occurrence routing."""
     names = {
         "new": f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_NEW_STAGE_ID}",
         "close": f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}",
@@ -54,6 +67,7 @@ def test_policy_only_admits_occurrences(settings, kind, expected):
 
 
 def test_owner_removal_after_close_does_not_suppress_occurrence(settings):
+    """A later owner update cannot suppress a proven close occurrence."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.SUPPORT_CAPACITY_MODE = "off"
     target = cycle()
@@ -90,6 +104,7 @@ def test_owner_removal_after_close_does_not_suppress_occurrence(settings):
 
 
 def test_current_close_converges_every_ticket_instance(settings):
+    """Current closure reaches every lifecycle instance for the ticket."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.SUPPORT_CAPACITY_MODE = "off"
     target = cycle()
@@ -114,7 +129,51 @@ def test_current_close_converges_every_ticket_instance(settings):
         assert instance.service_cycles.filter(status="CLOSED").latest("sequence").closed_at == T1
 
 
+def test_confirmed_first_close_records_cursor_and_rejects_older_event(settings):
+    """A confirmed first close establishes the provider cursor."""
+    settings.CONVERSATION_CYCLES_ENFORCED = True
+    settings.SUPPORT_CAPACITY_MODE = "off"
+    target = cycle()
+    assignment(target)
+    closed_ms = int(T1.timestamp() * 1000)
+    raw = event(f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}", str(closed_ms), closed_ms)
+    engine = LifecycleEngine()
+    recorded = engine.record_normalized_event(EventNormalizer().normalize_webhook_event(raw))
+    assert "last_provider_event_occurred_at" not in recorded.instance.metadata
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        handle_ticket_closed("close-ticket", str(closed_ms), source_event_id=raw.payload["eventId"])
+    recorded.instance.refresh_from_db()
+    assert recorded.instance.metadata["last_provider_event_occurred_at"] == T1.isoformat()
+    older = event("hubspot_owner_id", "700", int(T0.timestamp() * 1000))
+    assert engine.record_normalized_event(EventNormalizer().normalize_webhook_event(older)).stale_event
+    recorded.instance.refresh_from_db()
+    assert recorded.instance.metadata["last_payload"] == raw.payload
+
+
+def test_confirmed_stale_close_preserves_newer_cursor_and_snapshot(settings):
+    """A stale close cannot rewind cursor or operational payload."""
+    settings.CONVERSATION_CYCLES_ENFORCED = True
+    settings.SUPPORT_CAPACITY_MODE = "off"
+    target = cycle()
+    assignment(target)
+    engine = LifecycleEngine()
+    newer_at = T1 + timedelta(hours=1)
+    newer = event("hubspot_owner_id", "700", int(newer_at.timestamp() * 1000))
+    instance = engine.record_normalized_event(EventNormalizer().normalize_webhook_event(newer)).instance
+    closed_ms = int(T1.timestamp() * 1000)
+    raw = event(f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}", str(closed_ms), closed_ms)
+    assert engine.record_normalized_event(EventNormalizer().normalize_webhook_event(raw)).stale_event
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        handle_ticket_closed("close-ticket", str(closed_ms), source_event_id=raw.payload["eventId"])
+    instance.refresh_from_db()
+    assert instance.metadata["last_provider_event_occurred_at"] == newer_at.isoformat()
+    assert instance.metadata["last_payload"] == newer.payload
+
+
 def test_calculated_close_does_not_close_lifecycle_before_cycle_resolution(settings):
+    """Calculated close waits for service-cycle resolution."""
     instance = ConversationInstance.objects.create(
         hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED", pipeline_stage_id="open-stage"
     )
@@ -127,6 +186,7 @@ def test_calculated_close_does_not_close_lifecycle_before_cycle_resolution(setti
 
 
 def test_generic_stage_observation_does_not_close_enforced_lifecycle(settings):
+    """Generic stage observations do not close enforced lifecycle state."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     instance = ConversationInstance.objects.create(hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED")
     raw = event("hs_pipeline_stage", settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID, 1790000000000)
@@ -138,6 +198,7 @@ def test_generic_stage_observation_does_not_close_enforced_lifecycle(settings):
 
 
 def test_stale_close_dispatch_retries_after_broker_failure(settings):
+    """A failed broker dispatch keeps stale close occurrence retryable."""
     engine = LifecycleEngine()
     owner = EventNormalizer().normalize_webhook_event(event("hubspot_owner_id", "", 1790000010000))
     engine.record_normalized_event(owner)

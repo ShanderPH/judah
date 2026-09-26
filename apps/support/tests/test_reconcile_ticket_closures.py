@@ -18,6 +18,7 @@ from common.exceptions import ExternalServiceError, ForbiddenError
 
 
 def occurrence(settings):
+    """Persist a calculated close event for command replay."""
     instance = ConversationInstance.objects.create(hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED")
     return ConversationEvent.objects.create(
         instance=instance,
@@ -34,6 +35,7 @@ def occurrence(settings):
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
 def test_command_defaults_to_read_only_classification(settings, mode):
+    """Dry-run classifies every capacity mode without database writes."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.SUPPORT_CAPACITY_MODE = mode
     target = cycle()
@@ -52,6 +54,7 @@ def test_command_defaults_to_read_only_classification(settings, mode):
 
 
 def test_apply_requires_writer_authority_before_provider_io(settings):
+    """Unauthorized apply stops before provider access."""
     occurrence(settings)
     with (
         patch("apps.support.availability_runtime.may_write_routing_state", return_value=False),
@@ -63,6 +66,7 @@ def test_apply_requires_writer_authority_before_provider_io(settings):
 
 
 def test_apply_and_repeated_batch_converge(settings):
+    """Repeated apply does not create another closed projection."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.SUPPORT_CAPACITY_MODE = "off"
     target = cycle()
@@ -78,6 +82,7 @@ def test_apply_and_repeated_batch_converge(settings):
 
 
 def test_provider_failure_reports_batch_then_exits_nonzero(settings):
+    """Provider failure reports full batch before signaling incomplete work."""
     event = occurrence(settings)
     event.pk = None
     event.idempotency_key = "repair-close-second"
