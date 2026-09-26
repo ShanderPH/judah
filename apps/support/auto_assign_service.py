@@ -44,6 +44,7 @@ def _transition_lifecycle_best_effort(
     reason: str,
     closed_at: datetime | None = None,
     source_event_id: str = "",
+    strict: bool = False,
 ) -> None:
     """Advance AI/helpdesk lifecycle when a support event affects a ticket."""
     try:
@@ -75,6 +76,8 @@ def _transition_lifecycle_best_effort(
                     target_state=state,
                     exception_type=type(exc).__name__,
                 )
+                if strict and state == "CLOSED":
+                    raise
                 return
     except Exception as exc:
         logger.warning(
@@ -82,6 +85,8 @@ def _transition_lifecycle_best_effort(
             ticket_id=hubspot_ticket_id,
             exception_type=type(exc).__name__,
         )
+        if strict:
+            raise
 
 
 def _safe_parse_owner_id(value: str | int | None) -> int | None:
@@ -254,15 +259,19 @@ def handle_ticket_closed(
     source_event_id: str = "",
 ) -> TicketCloseResult:
     """Reconcile one occurrence; transient provider errors reach the task retry."""
-    from apps.support.availability_runtime import log_runtime_rejection, may_write_routing_state
+    from apps.support.availability_runtime import require_routing_writer_authority
     from apps.support.ticket_close_service import CloseClassification, TicketCloseResult, reconcile_close_occurrence
 
-    if not may_write_routing_state():
-        log_runtime_rejection("handle_ticket_closed")
-        return TicketCloseResult(CloseClassification.CONFLICT)
+    require_routing_writer_authority("handle_ticket_closed")
     occurrence = _close_occurrence(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id)
     if occurrence is None:
         return TicketCloseResult(CloseClassification.IDENTITY_UNAVAILABLE)
+    logger.info(
+        "ticket_close_occurrence_received",
+        ticket_id=hubspot_ticket_id,
+        source_event_id=source_event_id,
+        effective_at=occurrence.effective_at.isoformat(),
+    )
     return reconcile_close_occurrence(occurrence, allow_legacy=not settings.CONVERSATION_CYCLES_ENFORCED)
 
 
@@ -282,7 +291,16 @@ def _close_occurrence(
             settings.CONVERSATION_CYCLES_ENFORCED
             or SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id).exists()
         ):
-            logger.warning("ticket_close_occurrence", ticket_id=ticket_id, classification="identity_unavailable")
+            logger.warning(
+                "ticket_close_occurrence",
+                ticket_id=ticket_id,
+                source_event_id=source_event_id,
+                cycle_id=None,
+                classification="identity_unavailable",
+                effective_at=None,
+                domain_applied=False,
+                retryable=False,
+            )
             return None
         effective_at = timezone.now()
     return TicketCloseOccurrence(ticket_id, effective_at, _safe_parse_owner_id(owner_id), source_event_id)

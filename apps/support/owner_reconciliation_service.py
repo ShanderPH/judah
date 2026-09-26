@@ -45,6 +45,10 @@ class CapacityObservationConflictError(RuntimeError):
     """The read cannot safely supersede locally committed evidence."""
 
 
+class CloseProjectionError(CapacityObservationConflictError):
+    """A provider close could not converge with the current local cycle."""
+
+
 def _timestamp(value: object) -> datetime | None:
     if isinstance(value, datetime):
         return value if timezone.is_aware(value) else None
@@ -150,6 +154,7 @@ def reconcile_ticket(
     revision_tracker: dict[UUID, int] | None = None,
     snapshot: dict[str, object] | None = None,
     close_occurrence: TicketCloseOccurrence | None = None,
+    provider_data: dict[str, object] | None = None,
 ) -> SupportTicketOccupancy:
     """Read outside locks and apply only if the captured revision still holds."""
     from apps.integrations.hubspot.client import STAGE_FECHADO_ID, SUPPORT_PIPELINE_ID, get_hubspot_client
@@ -161,7 +166,7 @@ def reconcile_ticket(
             AgentCapacityReservation.objects.filter(occupancy=captured, state="held").values_list("agent_id", flat=True)
         )
     try:
-        data = get_hubspot_client().get_ticket_details(ticket_id)
+        data = provider_data if provider_data is not None else get_hubspot_client().get_ticket_details(ticket_id)
         if str(data.get("id")) != ticket_id or not data.get("pipeline") or not data.get("stage"):
             raise CapacityObservationConflictError("Incomplete provider ticket")
         raw_owner = data.get("owner_id")
@@ -244,10 +249,40 @@ def reconcile_ticket(
                         .values_list("agent_id", flat=True)
                     )
                     logger.warning("capacity_projection_cycle_identity_unresolved", ticket_id=ticket_id)
-                if close_occurrence is None and row.state == "closed" and data.get("entered_closed_at"):
-                    from apps.support.auto_assign_service import _apply_ticket_closed
+            if (
+                close_occurrence is None
+                and row.state == "closed"
+                and SupportConversationCycle.objects.filter(
+                    hubspot_ticket_id=ticket_id,
+                    source_account_id=row.source_account_id,
+                    state__in=[SupportConversationCycle.State.QUEUED, SupportConversationCycle.State.ASSIGNED],
+                ).exists()
+            ):
+                from apps.support.auto_assign_service import _apply_ticket_closed
+                from apps.support.ticket_close_service import CloseClassification
 
-                    _apply_ticket_closed(ticket_id, data["entered_closed_at"], provider_snapshot=data)
+                if not data.get("entered_closed_at"):
+                    logger.error(
+                        "ticket_close_projection_inconsistency", ticket_id=ticket_id, reason="missing_close_time"
+                    )
+                    raise CloseProjectionError("Closed provider ticket lacks a close occurrence")
+                try:
+                    close_result = _apply_ticket_closed(ticket_id, data["entered_closed_at"], provider_snapshot=data)
+                except Exception as exc:
+                    logger.error(
+                        "ticket_close_projection_failed",
+                        ticket_id=ticket_id,
+                        exception_type=type(exc).__name__,
+                    )
+                    raise CloseProjectionError("Current cycle close projection failed") from exc
+                if close_result.classification != CloseClassification.APPLIED_CURRENT:
+                    logger.error(
+                        "ticket_close_projection_inconsistency",
+                        ticket_id=ticket_id,
+                        cycle_id=str(close_result.cycle_id) if close_result.cycle_id else None,
+                        classification=close_result.classification.value,
+                    )
+                    raise CloseProjectionError("Closed occupancy has no materialized current cycle")
             for reservation in AgentCapacityReservation.objects.select_for_update().filter(occupancy=row, state="held"):
                 affected.add(reservation.agent_id)
                 # Only matching confirmation resolves an in-flight effect. A different
