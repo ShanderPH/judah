@@ -4,4 +4,4 @@ O campo `hs_v2_date_entered_*` vem da HubSpot CRM API como ISO-8601 UTC. No caso
 
 O mesmo formato bruto alcançava `owner_reconciliation_service` ao abrir ciclos e ao aplicar fechamentos, além da busca da fila NOVO. A correção ocorre em `apps/integrations/hubspot/client.py`: respostas CRM entregam `datetime` UTC aware. Valor CRM presente, malformado ou sem timezone falha na fronteira; ausência continua `None`. O parser de webhook permanece estrito.
 
-Nenhum reparo histórico ou escrita em produção faz parte deste hotfix.
+Este hotfix não inclui reparo histórico nem escrita manual em produção; fechamentos novos continuam gerando as gravações normais do fluxo após o deploy.
