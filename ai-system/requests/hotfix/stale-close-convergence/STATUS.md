@@ -6,7 +6,7 @@ last_update: 2026-09-26
 agent_run_id: root
 baseline_sha: 8b4d99134d3d553efec4cf044a9100f027b3b50d
 current_blockers: []
-next_action: "Revisar o draft PR #126; deploy e repair operacional seguem o rollout após aprovação."
+next_action: "Confirmar o CI do PR #126 após correção da dependência; depois revisar e seguir o rollout aprovado."
 pull_request: https://github.com/ShanderPH/judah/pull/126
 artifacts_generated:
   - 01-plan/master-plan.md

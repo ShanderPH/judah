@@ -12,7 +12,7 @@ Branch `hotfix/stale-close-convergence`, baseline `8b4d99134d3d553efec4cf044a910
 - `manage.py makemigrations --check --dry-run`: `No changes detected`.
 - `git diff --check`: limpo.
 
-Uma falha inicial da suíte veio da ausência de `greenlet` no ambiente virtual; após instalar localmente, a suíte inteira passou. Nenhum arquivo de dependências foi alterado.
+O primeiro CI do PR #126 passou 936 testes e falhou apenas em `test_agentos_registers_only_independent_agents`: a instalação limpa não incluía `greenlet`, exigido pelo SQLAlchemy assíncrono. A declaração em `requirements/base.txt` agora usa `sqlalchemy[asyncio]`; o metadata instalado confirma `greenlet>=1` nesse extra. Depois da correção, a suíte local em Python 3.14.7 passou novamente (897 aprovados, 46 ignorados) e `uv pip check` confirmou compatibilidade das 160 dependências instaladas. A nova execução do CI é o portão final para validar a instalação limpa.
 
 ## Cenários cobertos
 
