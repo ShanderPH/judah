@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from apps.ai_agents.models import ConversationInstance
+from apps.ai_agents.models import ConversationEvent, ConversationInstance
 from apps.ai_agents.services.lifecycle import (
     EffectOrderingPolicy,
     EventNormalizer,
@@ -149,6 +149,41 @@ def test_confirmed_first_close_records_cursor_and_rejects_older_event(settings):
     assert engine.record_normalized_event(EventNormalizer().normalize_webhook_event(older)).stale_event
     recorded.instance.refresh_from_db()
     assert recorded.instance.metadata["last_payload"] == raw.payload
+
+
+@pytest.mark.parametrize("source_event_id,persist_null_event", [("close-id", False), ("close-id", True), ("", False)])
+def test_close_without_timestamped_ledger_event_rejects_older_reopen(settings, source_event_id, persist_null_event):
+    """A proven close without a timestamped ledger event blocks older deliveries."""
+    settings.CONVERSATION_CYCLES_ENFORCED = True
+    instance = ConversationInstance.objects.create(
+        hubspot_ticket_id="close-ticket", idempotency_key="close-without-event", state="HUMAN_ASSIGNED"
+    )
+    if persist_null_event:
+        ConversationEvent.objects.create(
+            instance=instance,
+            source="hubspot",
+            source_event_id="close-id",
+            event_type="ticket_closed",
+            occurred_at=None,
+            idempotency_key="close-event-without-timestamp",
+        )
+    engine = LifecycleEngine()
+    assert engine.close_ticket_instances(
+        "close-ticket", reason="Proven closure.", source_event_id=source_event_id, occurred_at=T1
+    )
+    instance.refresh_from_db()
+    assert instance.metadata["last_provider_event_occurred_at"] == T1.isoformat()
+
+    older = event(
+        f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_NEW_STAGE_ID}",
+        str(int(T0.timestamp() * 1000)),
+        int(T0.timestamp() * 1000),
+    )
+    result = engine.record_normalized_event(EventNormalizer().normalize_webhook_event(older))
+    instance.refresh_from_db()
+    assert result.stale_event
+    assert instance.state == "CLOSED"
+    assert instance.closed_at == T1
 
 
 def test_confirmed_stale_close_preserves_newer_cursor_and_snapshot(settings):

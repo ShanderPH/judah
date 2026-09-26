@@ -559,18 +559,21 @@ class LifecycleEngine:
                 reason=reason,
                 occurred_at=occurred_at,
             )
-            if found and source_event_id:
-                close_event_at = (
-                    ConversationEvent.objects.filter(
-                        instance__hubspot_ticket_id=str(ticket_id),
-                        event_type="ticket_closed",
-                        source_event_id=source_event_id,
-                        occurred_at__isnull=False,
+            if found:
+                close_event_at = None
+                if source_event_id:
+                    close_event_at = (
+                        ConversationEvent.objects.filter(
+                            instance__hubspot_ticket_id=str(ticket_id),
+                            event_type="ticket_closed",
+                            source_event_id=source_event_id,
+                            occurred_at__isnull=False,
+                        )
+                        .order_by("-occurred_at")
+                        .values_list("occurred_at", flat=True)
+                        .first()
                     )
-                    .order_by("-occurred_at")
-                    .values_list("occurred_at", flat=True)
-                    .first()
-                )
+                close_event_at = close_event_at or occurred_at
                 if close_event_at is not None:
                     for instance in ConversationInstance.objects.select_for_update().filter(
                         hubspot_ticket_id=str(ticket_id)
