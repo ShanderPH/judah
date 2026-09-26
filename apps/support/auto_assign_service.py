@@ -118,8 +118,10 @@ def _safe_parse_owner_id(value: str | int | None) -> int | None:
         return None
 
 
-def _parse_hubspot_timestamp(value: str | int | None) -> datetime | None:
-    """Parse a HubSpot millisecond-epoch timestamp into a UTC datetime."""
+def _parse_hubspot_timestamp(value: datetime | str | int | None) -> datetime | None:
+    """Use a CRM-normalized datetime or parse a webhook millisecond timestamp."""
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo is not None else None
     if not value:
         return None
     try:
@@ -308,15 +310,27 @@ def _close_occurrence(
 
 def _apply_ticket_closed(
     hubspot_ticket_id: str,
-    closed_at_ms: str | int | None = None,
+    entered_closed_at: datetime | str | int | None = None,
     owner_id: str | None = None,
     *,
     provider_snapshot: dict[str, object] | None = None,
 ) -> TicketCloseResult:
     """Apply a provider snapshot already read outside the caller's transaction."""
-    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult, apply_close_occurrence
+    from apps.support.ticket_close_service import (
+        CloseClassification,
+        TicketCloseOccurrence,
+        TicketCloseResult,
+        apply_close_occurrence,
+    )
 
-    occurrence = _close_occurrence(hubspot_ticket_id, closed_at_ms, owner_id)
+    if isinstance(entered_closed_at, datetime):
+        occurrence = (
+            TicketCloseOccurrence(hubspot_ticket_id, entered_closed_at.astimezone(UTC), _safe_parse_owner_id(owner_id))
+            if entered_closed_at.tzinfo is not None
+            else None
+        )
+    else:
+        occurrence = _close_occurrence(hubspot_ticket_id, entered_closed_at, owner_id)
     if occurrence is None:
         return TicketCloseResult(CloseClassification.IDENTITY_UNAVAILABLE)
     return apply_close_occurrence(
@@ -474,7 +488,7 @@ def sync_novo_stage_tickets() -> dict:
 
         cycle_result = open_or_get_cycle(
             hubspot_ticket_id=ticket_id,
-            entered_stage_value=ticket.get("entered_novo_at"),
+            entered_stage_value=entered_at,
         )
         cycle = (
             cycle_result.cycle

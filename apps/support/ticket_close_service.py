@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
@@ -119,9 +119,16 @@ def _provider_decision(occurrence: TicketCloseOccurrence, snapshot: dict[str, ob
         return CloseClassification.CONFLICT
     entered_novo = snapshot.get("entered_novo_at")
     if entered_novo:
-        try:
-            reopened_at = parse_stage_entry_timestamp(str(entered_novo))
-        except InvalidStageTimestampError:
+        if isinstance(entered_novo, datetime):
+            if entered_novo.tzinfo is None:
+                return CloseClassification.IDENTITY_UNAVAILABLE
+            reopened_at = entered_novo.astimezone(UTC)
+        elif isinstance(entered_novo, (str, int)):
+            try:
+                reopened_at = parse_stage_entry_timestamp(entered_novo)
+            except InvalidStageTimestampError:
+                return CloseClassification.IDENTITY_UNAVAILABLE
+        else:
             return CloseClassification.IDENTITY_UNAVAILABLE
         if reopened_at > occurrence.effective_at:
             return CloseClassification.REOPEN_NOT_MATERIALIZED

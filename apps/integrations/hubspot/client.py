@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -37,6 +38,16 @@ STAGE_FECHADO_ID = STAGE_CLOSED_ID  # Alias for Portuguese naming consistency
 # HubSpot team IDs for N1 support
 HUBSPOT_TEAM_N1_ID = "8"  # 8.1 N1 sub-team
 HUBSPOT_TEAM_SUPORTE_ID = "8"  # 08. Suporte parent team
+
+
+def _crm_stage_entry_at(value: str | None) -> datetime | None:
+    """Normalize a CRM API stage-entry ISO timestamp to aware UTC."""
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("CRM stage-entry timestamp has no timezone")
+    return parsed.astimezone(UTC)
 
 
 class HubSpotClient:
@@ -220,8 +231,8 @@ class HubSpotClient:
                 "pipeline": props.get("hs_pipeline", ""),
                 "stage": props.get("hs_pipeline_stage", ""),
                 "owner_id": props.get("hubspot_owner_id") or "",
-                "entered_novo_at": props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}"),
-                "entered_closed_at": props.get(f"hs_v2_date_entered_{STAGE_CLOSED_ID}"),
+                "entered_novo_at": _crm_stage_entry_at(props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}")),
+                "entered_closed_at": _crm_stage_entry_at(props.get(f"hs_v2_date_entered_{STAGE_CLOSED_ID}")),
                 "contact_name": props.get("firstname", ""),
                 "contact_email": props.get("email", ""),
                 "updated_at": ticket.updated_at.isoformat() if getattr(ticket, "updated_at", None) else None,
@@ -442,7 +453,7 @@ class HubSpotClient:
                             "owner_id": props.get("hubspot_owner_id") or "",
                             "contact_name": props.get("firstname", ""),
                             "contact_email": props.get("email", ""),
-                            "entered_novo_at": props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}"),
+                            "entered_novo_at": _crm_stage_entry_at(props.get(f"hs_v2_date_entered_{STAGE_NOVO_ID}")),
                         }
                     )
 

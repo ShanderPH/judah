@@ -370,7 +370,7 @@ def _snapshot_of(row: SupportConversationCycle) -> CycleSnapshot:
 def open_or_get_cycle(
     *,
     hubspot_ticket_id: str,
-    entered_stage_value: str | int | None,
+    entered_stage_value: datetime | str | int | None,
     source_event_id: str | None = None,
     source_account_id: str | None = None,
 ) -> CycleOpenResult:
@@ -389,7 +389,7 @@ def open_or_get_cycle(
 
     Args:
         hubspot_ticket_id: HubSpot ticket ID.
-        entered_stage_value: Raw HubSpot ms-epoch stage-entry value.
+        entered_stage_value: A CRM-normalized aware datetime or raw webhook ms-epoch value.
         source_event_id: Audit-only delivery identifier persisted on creation.
         source_account_id: Portal override; defaults to settings.
 
@@ -400,7 +400,12 @@ def open_or_get_cycle(
     from apps.support.models import SupportConversationCycle
 
     try:
-        entered_stage_at = parse_stage_entry_timestamp(entered_stage_value)
+        if isinstance(entered_stage_value, datetime):
+            if entered_stage_value.tzinfo is None:
+                raise InvalidStageTimestampError("stage-entry datetime is not timezone-aware")
+            entered_stage_at = entered_stage_value.astimezone(UTC)
+        else:
+            entered_stage_at = parse_stage_entry_timestamp(entered_stage_value)
         identity = build_cycle_identity(
             hubspot_ticket_id=hubspot_ticket_id,
             entered_stage_at=entered_stage_at,
