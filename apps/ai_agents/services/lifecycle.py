@@ -560,8 +560,8 @@ class LifecycleEngine:
                 occurred_at=occurred_at,
             )
             if found:
-                close_event_at = None
-                if source_event_id:
+                close_event_at = occurred_at
+                if close_event_at is None and source_event_id:
                     close_event_at = (
                         ConversationEvent.objects.filter(
                             instance__hubspot_ticket_id=str(ticket_id),
@@ -573,7 +573,6 @@ class LifecycleEngine:
                         .values_list("occurred_at", flat=True)
                         .first()
                     )
-                close_event_at = close_event_at or occurred_at
                 if close_event_at is not None:
                     for instance in ConversationInstance.objects.select_for_update().filter(
                         hubspot_ticket_id=str(ticket_id)

@@ -186,6 +186,38 @@ def test_close_without_timestamped_ledger_event_rejects_older_reopen(settings, s
     assert instance.closed_at == T1
 
 
+def test_explicit_close_time_overrides_ledger_time_and_rejects_older_reopen(settings):
+    """An N1 entry between the ledger time and proven closure cannot reopen."""
+    settings.CONVERSATION_CYCLES_ENFORCED = True
+    instance = ConversationInstance.objects.create(
+        hubspot_ticket_id="close-ticket", idempotency_key="close-distinct-times", state="HUMAN_ASSIGNED"
+    )
+    ConversationEvent.objects.create(
+        instance=instance,
+        source="hubspot",
+        source_event_id="close-id",
+        event_type="ticket_closed",
+        occurred_at=T0,
+        idempotency_key="close-event-earlier-ledger-time",
+    )
+    engine = LifecycleEngine()
+    assert engine.close_ticket_instances(
+        "close-ticket", reason="Proven closure.", source_event_id="close-id", occurred_at=T1
+    )
+
+    n1_at = T0 + (T1 - T0) / 2
+    n1_ms = int(n1_at.timestamp() * 1000)
+    older = event(f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_NEW_STAGE_ID}", str(n1_ms), n1_ms)
+    result = engine.record_normalized_event(EventNormalizer().normalize_webhook_event(older))
+
+    instance.refresh_from_db()
+    assert result.stale_event
+    assert instance.metadata["last_provider_event_occurred_at"] == T1.isoformat()
+    assert instance.state == "CLOSED"
+    assert instance.closed_at == T1
+    assert instance.service_cycles.count() == 1
+
+
 def test_confirmed_stale_close_preserves_newer_cursor_and_snapshot(settings):
     """A stale close cannot rewind cursor or operational payload."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
