@@ -1,5 +1,7 @@
 # Handoff do P0 live
 
+PR draft: https://github.com/ShanderPH/judah/pull/127
+
 ## Resumo
 
 - A observação de provider só fecha occupancy de um ciclo ativo quando o fechamento do ciclo e a `ClosedConversation` são materializados na mesma transação.
