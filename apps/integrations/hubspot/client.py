@@ -42,7 +42,7 @@ HUBSPOT_TEAM_SUPORTE_ID = "8"  # 08. Suporte parent team
 
 def _crm_stage_entry_at(value: str | None) -> datetime | None:
     """Normalize a CRM API stage-entry ISO timestamp to aware UTC."""
-    if not value:
+    if value is None:
         return None
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
