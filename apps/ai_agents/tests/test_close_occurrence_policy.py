@@ -89,6 +89,31 @@ def test_owner_removal_after_close_does_not_suppress_occurrence(settings):
     assert instance.service_cycles.filter(status="CLOSED").latest("sequence").closed_at == T1
 
 
+def test_current_close_converges_every_ticket_instance(settings):
+    settings.CONVERSATION_CYCLES_ENFORCED = True
+    settings.SUPPORT_CAPACITY_MODE = "off"
+    target = cycle()
+    assignment(target)
+    instances = [
+        ConversationInstance.objects.create(
+            hubspot_ticket_id="close-ticket",
+            hubspot_thread_id=f"thread-{index}",
+            idempotency_key=f"close-instance-{index}",
+            state=state,
+        )
+        for index, state in enumerate(("HUMAN_ASSIGNED", "WAITING_FOR_CUSTOMER"))
+    ]
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        result = handle_ticket_closed("close-ticket", str(int(T1.timestamp() * 1000)))
+    assert result.classification == "applied_current"
+    for instance in instances:
+        instance.refresh_from_db()
+        assert instance.state == "CLOSED"
+        assert instance.closed_at == T1
+        assert instance.service_cycles.filter(status="CLOSED").latest("sequence").closed_at == T1
+
+
 def test_calculated_close_does_not_close_lifecycle_before_cycle_resolution(settings):
     instance = ConversationInstance.objects.create(
         hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED", pipeline_stage_id="open-stage"

@@ -86,3 +86,5 @@ class Command(BaseCommand):
             else:
                 counts["ambiguous"] += 1
         self.stdout.write(json.dumps(dict(counts), sort_keys=True))
+        if counts["provider_unavailable"]:
+            raise CommandError("Provider unavailable; batch incomplete. Repeat this offset.")

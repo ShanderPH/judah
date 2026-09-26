@@ -3,13 +3,20 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from django.db import close_old_connections, connection
 
 from apps.support.auto_assign_service import handle_ticket_closed
-from apps.support.models import Agent, AssignedConversation, ClosedConversation, SupportConversationCycle
+from apps.support.models import (
+    Agent,
+    AssignedConversation,
+    ClosedConversation,
+    NewConversation,
+    SupportConversationCycle,
+)
 from apps.support.ticket_close_service import CloseClassification, TicketCloseOccurrence, reconcile_close_occurrence
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
@@ -132,6 +139,70 @@ def test_dry_run_does_not_mutate(settings):
     assert agent.current_simultaneous_chats == 1
     assert AssignedConversation.objects.filter(cycle=target).exists()
     assert not ClosedConversation.objects.exists()
+
+
+def test_revision_change_after_reconciliation_is_retryable(settings):
+    from apps.support.owner_reconciliation_service import CapacityObservationConflictError
+
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    target = cycle()
+    assignment(target)
+    with (
+        patch(
+            "apps.support.owner_reconciliation_service.reconcile_ticket",
+            return_value=SimpleNamespace(revision=-1),
+        ),
+        pytest.raises(CapacityObservationConflictError, match="revision changed"),
+    ):
+        reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1))
+    assert AssignedConversation.objects.filter(cycle=target).exists()
+    assert not ClosedConversation.objects.exists()
+
+
+@pytest.mark.parametrize("projection", ["assigned", "pending"])
+def test_legacy_close_with_prior_closed_row_materializes_active_projection(settings, projection):
+    settings.CONVERSATION_CYCLES_ENFORCED = False
+    ClosedConversation.objects.create(hubspot_ticket_id="close-ticket", closed_at=T0)
+    if projection == "assigned":
+        agent = Agent.objects.create(
+            hubspot_owner_id=700,
+            name="Test",
+            agent_email="test@example.test",
+            current_simultaneous_chats=1,
+        )
+        AssignedConversation.objects.create(
+            hubspot_ticket_id="close-ticket",
+            agent=agent,
+            hubspot_owner_id=700,
+            assigned_at=T0,
+        )
+    else:
+        NewConversation.objects.create(hubspot_ticket_id="close-ticket", entered_queue_at=T0)
+    result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1), allow_legacy=True)
+    assert result.classification == CloseClassification.APPLIED_CURRENT
+    assert ClosedConversation.objects.filter(hubspot_ticket_id="close-ticket", cycle__isnull=True).count() == 2
+    assert not AssignedConversation.objects.filter(hubspot_ticket_id="close-ticket", cycle__isnull=True).exists()
+    assert not NewConversation.objects.filter(hubspot_ticket_id="close-ticket", cycle__isnull=True).exists()
+
+
+def test_legacy_close_with_only_prior_closed_row_is_duplicate(settings):
+    settings.CONVERSATION_CYCLES_ENFORCED = False
+    ClosedConversation.objects.create(hubspot_ticket_id="close-ticket", closed_at=T0)
+    result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1), allow_legacy=True)
+    assert result.classification == CloseClassification.DUPLICATE
+    assert ClosedConversation.objects.filter(hubspot_ticket_id="close-ticket", cycle__isnull=True).count() == 1
+
+
+def test_cycle_close_with_existing_closed_row_remains_conflict(settings):
+    target = cycle()
+    assignment(target)
+    ClosedConversation.objects.create(cycle=target, hubspot_ticket_id="close-ticket", closed_at=T0)
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1))
+    assert result.classification == CloseClassification.CONFLICT
+    assert AssignedConversation.objects.filter(cycle=target).exists()
+    assert ClosedConversation.objects.filter(cycle=target).count() == 1
 
 
 @pytest.mark.django_db(transaction=True)

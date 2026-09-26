@@ -511,25 +511,47 @@ class LifecycleEngine:
         self,
         ticket_id: str,
         *,
-        primary_instance_id: UUID,
+        primary_instance_id: UUID | None,
         source_event_id: str,
-    ) -> None:
+        reason: str = "HubSpot ticket closure converged across conversation instances.",
+        occurred_at: datetime | None = None,
+    ) -> bool:
         """Converge every persisted conversation for a closed HubSpot ticket."""
-        siblings = (
-            ConversationInstance.objects.select_for_update()
-            .filter(hubspot_ticket_id=str(ticket_id))
-            .exclude(pk=primary_instance_id)
-        )
-        for sibling in siblings:
-            if sibling.state == ConversationInstance.State.CLOSED:
+        instances = ConversationInstance.objects.select_for_update().filter(hubspot_ticket_id=str(ticket_id))
+        if primary_instance_id is not None:
+            instances = instances.exclude(pk=primary_instance_id)
+        found = False
+        for instance in instances:
+            found = True
+            if instance.state == ConversationInstance.State.CLOSED:
                 continue
             self.transition(
-                sibling,
+                instance,
                 ConversationInstance.State.CLOSED,
-                reason="HubSpot ticket closure converged across conversation instances.",
+                reason=reason,
                 actor_type="ticket_lifecycle_convergence",
                 source_event_id=source_event_id,
-                allow_terminal_reopen=sibling.state in TERMINAL_STATES,
+                allow_terminal_reopen=instance.state in TERMINAL_STATES,
+                occurred_at=occurred_at,
+            )
+        return found
+
+    def close_ticket_instances(
+        self,
+        ticket_id: str,
+        *,
+        reason: str,
+        source_event_id: str = "",
+        occurred_at: datetime | None = None,
+    ) -> bool:
+        """Close every lifecycle instance associated with a proven ticket closure."""
+        with transaction.atomic():
+            return self._close_all_ticket_instances(
+                ticket_id,
+                primary_instance_id=None,
+                source_event_id=source_event_id,
+                reason=reason,
+                occurred_at=occurred_at,
             )
 
     def transition(

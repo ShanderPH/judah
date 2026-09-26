@@ -118,7 +118,7 @@ def reconcile_close_occurrence(
 ) -> TicketCloseResult:
     """Read provider before locks, then apply to the revalidated local interval."""
     from apps.integrations.hubspot.client import get_hubspot_client
-    from apps.support.owner_reconciliation_service import reconcile_ticket
+    from apps.support.owner_reconciliation_service import CapacityObservationConflictError, reconcile_ticket
 
     initial = resolve_close_target(list(_cycles(occurrence.ticket_id)), occurrence)
     snapshot: dict[str, object] | None = None
@@ -135,7 +135,7 @@ def reconcile_close_occurrence(
     if observed is not None:
         with ticket_transaction(occurrence.ticket_id) as locked:
             if locked.revision != observed.revision:
-                return TicketCloseResult(CloseClassification.CONFLICT, initial.cycle_id)
+                raise CapacityObservationConflictError("Ticket revision changed after provider reconciliation")
             return apply_close_occurrence(occurrence, snapshot=snapshot, dry_run=dry_run, allow_legacy=allow_legacy)
     return apply_close_occurrence(occurrence, snapshot=snapshot, dry_run=dry_run, allow_legacy=allow_legacy)
 
@@ -191,7 +191,11 @@ def apply_close_occurrence(
                 if target is not None
                 else ClosedConversation.objects.filter(hubspot_ticket_id=occurrence.ticket_id, cycle__isnull=True)
             )
-            if existing.exists():
+            active_legacy = target is None and (
+                AssignedConversation.objects.filter(cycle__isnull=True, hubspot_ticket_id=occurrence.ticket_id).exists()
+                or NewConversation.objects.filter(cycle__isnull=True, hubspot_ticket_id=occurrence.ticket_id).exists()
+            )
+            if existing.exists() and not active_legacy:
                 classification = CloseClassification.CONFLICT if target is not None else CloseClassification.DUPLICATE
                 result = TicketCloseResult(classification, result.cycle_id)
             elif not dry_run:
@@ -264,7 +268,13 @@ def _materialize(target: SupportConversationCycle | None, occurrence: TicketClos
     if current:
         _transition_lifecycle_best_effort(
             occurrence.ticket_id,
-            ["RESOLVED_BY_HUMAN", "CLOSED"],
+            ["RESOLVED_BY_HUMAN"],
+            reason="Proven current support cycle closed.",
+            source_event_id=occurrence.source_event_id,
+        )
+        _transition_lifecycle_best_effort(
+            occurrence.ticket_id,
+            ["CLOSED"],
             reason="Proven current support cycle closed.",
             closed_at=occurrence.effective_at,
             source_event_id=occurrence.source_event_id,

@@ -6,13 +6,15 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 from apps.ai_agents.models import ConversationEvent, ConversationInstance
 from apps.support.models import ClosedConversation
 from apps.support.tests.test_ticket_close_service import T1, assignment, cycle, snapshot
-from common.exceptions import ForbiddenError
+from apps.support.ticket_close_service import CloseClassification, TicketCloseResult
+from common.exceptions import ExternalServiceError, ForbiddenError
 
 
 def occurrence(settings):
@@ -73,3 +75,25 @@ def test_apply_and_repeated_batch_converge(settings):
             call_command("reconcile_ticket_closures", apply=True, stdout=output)
             assert json.loads(output.getvalue())["applied"] == expected
     assert ClosedConversation.objects.filter(cycle=target).count() == 1
+
+
+def test_provider_failure_reports_batch_then_exits_nonzero(settings):
+    event = occurrence(settings)
+    event.pk = None
+    event.idempotency_key = "repair-close-second"
+    event.source_event_id = "repair-event-second"
+    event.save(force_insert=True)
+    output = StringIO()
+    with (
+        patch(
+            "apps.support.management.commands.reconcile_ticket_closures.reconcile_close_occurrence",
+            side_effect=[ExternalServiceError("hubspot"), TicketCloseResult(CloseClassification.DUPLICATE)],
+        ) as reconcile,
+        pytest.raises(CommandError, match="batch incomplete"),
+    ):
+        call_command("reconcile_ticket_closures", limit=2, stdout=output)
+    counts = json.loads(output.getvalue())
+    assert counts["scanned"] == 2
+    assert counts["provider_unavailable"] == 1
+    assert counts["duplicate"] == 1
+    assert reconcile.call_count == 2

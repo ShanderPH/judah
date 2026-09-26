@@ -52,13 +52,21 @@ def _transition_lifecycle_best_effort(
         engine = LifecycleEngine()
         for state in states:
             try:
-                if not engine.transition_by_ticket(
-                    hubspot_ticket_id,
-                    state,
-                    reason=reason,
-                    source_event_id=source_event_id,
-                    occurred_at=closed_at if state == "CLOSED" else None,
-                ):
+                if state == "CLOSED":
+                    transitioned = engine.close_ticket_instances(
+                        hubspot_ticket_id,
+                        reason=reason,
+                        source_event_id=source_event_id,
+                        occurred_at=closed_at,
+                    )
+                else:
+                    transitioned = engine.transition_by_ticket(
+                        hubspot_ticket_id,
+                        state,
+                        reason=reason,
+                        source_event_id=source_event_id,
+                    )
+                if not transitioned:
                     return
             except InvalidStateTransitionError as exc:
                 logger.info(
