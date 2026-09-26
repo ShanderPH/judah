@@ -45,7 +45,7 @@ def test_support_closed_stage_dispatches_closure(settings) -> None:
     with patch("apps.support.tasks.task_handle_ticket_closed.delay") as close:
         handle_hubspot_event(event)
 
-    close.assert_called_once_with("ticket-2", "456", "userId:99")
+    close.assert_called_once_with("ticket-2", "456", "userId:99", "provider-1")
 
 
 def test_owner_change_dispatches_preserved_owner_task() -> None:

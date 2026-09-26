@@ -125,6 +125,18 @@ class LifecycleRecordResult:
     effect_policy: EffectOrderingPolicy = EffectOrderingPolicy.REVALIDATE_CURRENT_PROVIDER_STATE
 
 
+def _is_authoritative_stage_occurrence(event: NormalizedEvent, decision: RouteDecision) -> bool:
+    """Identify stage timestamps that remain actionable after later webhooks."""
+    if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
+        return True
+    return (
+        event.source == "hubspot"
+        and event.event_type == "ticket_closed"
+        and (event.payload.get("propertyName") or event.payload.get("property_name")) == _PROP_STAGE_CLOSED
+        and decision.route == "CLOSE"
+    )
+
+
 TERMINAL_STATES = {
     ConversationInstance.State.CLOSED,
     ConversationInstance.State.FAILED_TERMINAL,
@@ -261,6 +273,7 @@ class EventNormalizer:
     """Convert raw webhook rows into provider-neutral lifecycle events."""
 
     def normalize_webhook_event(self, event: Any, *, source: str = "hubspot") -> NormalizedEvent:
+        """Normalize provider payload and retain a stable close-event identity."""
         payload: dict[str, Any] = dict(getattr(event, "payload", {}) or {})
         raw_event_type = _as_text(getattr(event, "event_type", "") or payload.get("subscriptionType") or "unknown")
         object_id = _as_text(payload.get("objectId") or payload.get("object_id") or getattr(event, "object_id", ""))
@@ -312,6 +325,9 @@ class EventNormalizer:
             hubspot_ticket_id = object_id or None
         elif raw_event_type.startswith("contact."):
             normalized_type = "contact_association_changed"
+
+        if normalized_type == "ticket_closed" and not source_event_id:
+            source_event_id = _as_text(getattr(event, "event_id", None) or getattr(event, "pk", None))
 
         idempotency_key = _idempotency_key(
             source=source,
@@ -382,12 +398,17 @@ class LifecycleEngine:
         *,
         decision: RouteDecision | None = None,
     ) -> LifecycleRecordResult:
+        """Append an event without applying deferred closes to operational state."""
         decision = decision or RoutingPolicyEngine().route(event)
         effect_policy = self.effect_ordering_policy(event, decision)
+        defer_close = decision.route == "CLOSE" and (
+            effect_policy == EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
+            or bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False))
+        )
         with transaction.atomic():
             instance, instance_created = self._get_or_create_instance(event)
             stale_event = self._is_stale_provider_event(instance, event)
-            if not stale_event:
+            if not stale_event and not defer_close:
                 self._refresh_instance_snapshot(instance, event)
             lifecycle_event, event_created = self._append_event(instance, event)
             if event_created and not stale_event:
@@ -414,7 +435,7 @@ class LifecycleEngine:
                         reason="Assigned human agent sent the first outgoing message.",
                         source_event_id=event.source_event_id,
                     )
-                elif decision.route != "IGNORE":
+                elif decision.route != "IGNORE" and not defer_close:
                     can_reopen_terminal = event.event_type == "ticket_entered_n1" or decision.route == "AI_SERVICE"
                     allow_authoritative_queue_entry = (
                         event.event_type == "ticket_entered_n1"
@@ -438,7 +459,7 @@ class LifecycleEngine:
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                     )
-                if decision.route == "CLOSE" and event.hubspot_ticket_id:
+                if decision.route == "CLOSE" and event.hubspot_ticket_id and not defer_close:
                     self._close_all_ticket_instances(
                         event.hubspot_ticket_id,
                         primary_instance_id=instance.pk,
@@ -464,7 +485,7 @@ class LifecycleEngine:
         decision: RouteDecision,
     ) -> EffectOrderingPolicy:
         """Classify whether a late event may still produce a domain effect."""
-        if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
+        if _is_authoritative_stage_occurrence(event, decision):
             return EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
         if decision.route == "IGNORE":
             return EffectOrderingPolicy.PRESERVE_PROJECTION_ONLY
@@ -496,26 +517,79 @@ class LifecycleEngine:
         self,
         ticket_id: str,
         *,
-        primary_instance_id: UUID,
+        primary_instance_id: UUID | None,
         source_event_id: str,
-    ) -> None:
+        reason: str = "HubSpot ticket closure converged across conversation instances.",
+        occurred_at: datetime | None = None,
+    ) -> bool:
         """Converge every persisted conversation for a closed HubSpot ticket."""
-        siblings = (
-            ConversationInstance.objects.select_for_update()
-            .filter(hubspot_ticket_id=str(ticket_id))
-            .exclude(pk=primary_instance_id)
-        )
-        for sibling in siblings:
-            if sibling.state == ConversationInstance.State.CLOSED:
+        instances = ConversationInstance.objects.select_for_update().filter(hubspot_ticket_id=str(ticket_id))
+        if primary_instance_id is not None:
+            instances = instances.exclude(pk=primary_instance_id)
+        found = False
+        for instance in instances:
+            found = True
+            if instance.state == ConversationInstance.State.CLOSED:
                 continue
             self.transition(
-                sibling,
+                instance,
                 ConversationInstance.State.CLOSED,
-                reason="HubSpot ticket closure converged across conversation instances.",
+                reason=reason,
                 actor_type="ticket_lifecycle_convergence",
                 source_event_id=source_event_id,
-                allow_terminal_reopen=sibling.state in TERMINAL_STATES,
+                allow_terminal_reopen=instance.state in TERMINAL_STATES,
+                occurred_at=occurred_at,
             )
+        return found
+
+    def close_ticket_instances(
+        self,
+        ticket_id: str,
+        *,
+        reason: str,
+        source_event_id: str = "",
+        occurred_at: datetime | None = None,
+    ) -> bool:
+        """Close every lifecycle instance associated with a proven ticket closure."""
+        with transaction.atomic():
+            found = self._close_all_ticket_instances(
+                ticket_id,
+                primary_instance_id=None,
+                source_event_id=source_event_id,
+                reason=reason,
+                occurred_at=occurred_at,
+            )
+            if found:
+                close_event_at = occurred_at
+                if close_event_at is None and source_event_id:
+                    close_event_at = (
+                        ConversationEvent.objects.filter(
+                            instance__hubspot_ticket_id=str(ticket_id),
+                            event_type="ticket_closed",
+                            source_event_id=source_event_id,
+                            occurred_at__isnull=False,
+                        )
+                        .order_by("-occurred_at")
+                        .values_list("occurred_at", flat=True)
+                        .first()
+                    )
+                if close_event_at is not None:
+                    for instance in ConversationInstance.objects.select_for_update().filter(
+                        hubspot_ticket_id=str(ticket_id)
+                    ):
+                        metadata = dict(instance.metadata or {})
+                        raw_cursor = metadata.get("last_provider_event_occurred_at")
+                        try:
+                            cursor = datetime.fromisoformat(str(raw_cursor)) if raw_cursor else None
+                        except TypeError, ValueError:
+                            cursor = None
+                        if cursor is not None and cursor.tzinfo is None:
+                            cursor = cursor.replace(tzinfo=UTC)
+                        if cursor is None or close_event_at > cursor:
+                            metadata["last_provider_event_occurred_at"] = close_event_at.isoformat()
+                            instance.metadata = metadata
+                            instance.save(update_fields=["metadata", "updated_at"])
+            return found
 
     def transition(
         self,
@@ -528,7 +602,9 @@ class LifecycleEngine:
         source_event_id: str = "",
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
+        occurred_at: datetime | None = None,
     ) -> ConversationInstance:
+        """Persist one validated state transition and its service-cycle effect."""
         with transaction.atomic():
             locked = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
             if locked.state == to_state:
@@ -559,7 +635,7 @@ class LifecycleEngine:
             locked.state_version += 1
             locked.last_activity_at = now
             if to_state == ConversationInstance.State.CLOSED and locked.closed_at is None:
-                locked.closed_at = now
+                locked.closed_at = occurred_at or now
             elif is_terminal_reopen and to_state not in TERMINAL_STATES:
                 locked.closed_at = None
             update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
@@ -578,7 +654,7 @@ class LifecycleEngine:
                 source_event_id=source_event_id,
             )
             if to_state in TERMINAL_STATES:
-                service_cycle = close_current_service_cycle(locked, reason=reason)
+                service_cycle = close_current_service_cycle(locked, reason=reason, occurred_at=occurred_at)
 
             instance.state = locked.state
             instance.state_version = locked.state_version
@@ -598,11 +674,28 @@ class LifecycleEngine:
         )
         return instance
 
-    def transition_by_ticket(self, ticket_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:
+    def transition_by_ticket(
+        self,
+        ticket_id: str,
+        to_state: str,
+        *,
+        reason: str,
+        actor_id: str = "",
+        source_event_id: str = "",
+        occurred_at: datetime | None = None,
+    ) -> bool:
+        """Transition the canonical instance for a ticket when one exists."""
         instance = find_conversation_instance(ticket_id=str(ticket_id))
         if instance is None:
             return False
-        self.transition(instance, to_state, reason=reason, actor_id=actor_id)
+        self.transition(
+            instance,
+            to_state,
+            reason=reason,
+            actor_id=actor_id,
+            source_event_id=source_event_id,
+            occurred_at=occurred_at,
+        )
         return True
 
     def transition_by_thread(self, thread_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:

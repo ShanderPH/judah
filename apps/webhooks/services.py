@@ -141,7 +141,11 @@ def process_webhook_event(event_id) -> bool:
                     process_stale_occurrence = (
                         lifecycle.stale_event
                         and lifecycle.effect_policy.value == "process_idempotent_occurrence"
-                        and lifecycle.event_created
+                        and (
+                            lifecycle.event_created
+                            or lifecycle.event.processing_status
+                            in {lifecycle.event.ProcessingStatus.PENDING, lifecycle.event.ProcessingStatus.FAILED}
+                        )
                     )
                     if lifecycle.stale_event and not process_stale_occurrence:
                         logger.warning(

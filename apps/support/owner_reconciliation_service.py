@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -35,6 +36,9 @@ from apps.support.models import (
 )
 
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from apps.support.ticket_close_service import TicketCloseOccurrence
 
 
 class CapacityObservationConflictError(RuntimeError):
@@ -145,6 +149,7 @@ def reconcile_ticket(
     observation_id: str = "",
     revision_tracker: dict[UUID, int] | None = None,
     snapshot: dict[str, object] | None = None,
+    close_occurrence: TicketCloseOccurrence | None = None,
 ) -> SupportTicketOccupancy:
     """Read outside locks and apply only if the captured revision still holds."""
     from apps.integrations.hubspot.client import STAGE_FECHADO_ID, SUPPORT_PIPELINE_ID, get_hubspot_client
@@ -165,6 +170,15 @@ def reconcile_ticket(
         owner = int(str(raw_owner)) if raw_owner else None
         updated = _timestamp(data.get("updated_at"))
         with ticket_transaction(ticket_id) as row:
+            if close_occurrence is not None:
+                from apps.support.ticket_close_service import classify_close_occurrence
+
+                cycles = list(SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id))
+                decision = classify_close_occurrence(cycles, close_occurrence, data)
+                if cycles and not decision.closes_current_lifecycle:
+                    if snapshot is not None:
+                        snapshot.update(data)
+                    return row
             if row.agent_id:
                 affected.add(row.agent_id)
             observed_agent = Agent.objects.filter(hubspot_owner_id=owner).first() if owner else None
@@ -230,10 +244,10 @@ def reconcile_ticket(
                         .values_list("agent_id", flat=True)
                     )
                     logger.warning("capacity_projection_cycle_identity_unresolved", ticket_id=ticket_id)
-                if row.state == "closed" and data.get("entered_closed_at"):
+                if close_occurrence is None and row.state == "closed" and data.get("entered_closed_at"):
                     from apps.support.auto_assign_service import _apply_ticket_closed
 
-                    _apply_ticket_closed(ticket_id, data["entered_closed_at"])
+                    _apply_ticket_closed(ticket_id, data["entered_closed_at"], provider_snapshot=data)
             for reservation in AgentCapacityReservation.objects.select_for_update().filter(occupancy=row, state="held"):
                 affected.add(reservation.agent_id)
                 # Only matching confirmation resolves an in-flight effect. A different

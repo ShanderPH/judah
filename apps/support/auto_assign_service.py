@@ -17,28 +17,34 @@ Validation rules before assignment:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
 from apps.support.models import (
     Agent,
     AssignedConversation,
-    ClosedConversation,
     NewConversation,
-    SupportConversationCycle,
 )
-from apps.support.queue_service import decrement_agent_chat_count
 from common.exceptions import ExternalServiceError
+
+if TYPE_CHECKING:
+    from apps.support.ticket_close_service import TicketCloseOccurrence, TicketCloseResult
 
 logger = structlog.get_logger(__name__)
 
 
-def _transition_lifecycle_best_effort(hubspot_ticket_id: str, states: list[str], *, reason: str) -> None:
+def _transition_lifecycle_best_effort(
+    hubspot_ticket_id: str,
+    states: list[str],
+    *,
+    reason: str,
+    closed_at: datetime | None = None,
+    source_event_id: str = "",
+) -> None:
     """Advance AI/helpdesk lifecycle when a support event affects a ticket."""
     try:
         from apps.ai_agents.services.lifecycle import InvalidStateTransitionError, LifecycleEngine
@@ -46,7 +52,21 @@ def _transition_lifecycle_best_effort(hubspot_ticket_id: str, states: list[str],
         engine = LifecycleEngine()
         for state in states:
             try:
-                if not engine.transition_by_ticket(hubspot_ticket_id, state, reason=reason):
+                if state == "CLOSED":
+                    transitioned = engine.close_ticket_instances(
+                        hubspot_ticket_id,
+                        reason=reason,
+                        source_event_id=source_event_id,
+                        occurred_at=closed_at,
+                    )
+                else:
+                    transitioned = engine.transition_by_ticket(
+                        hubspot_ticket_id,
+                        state,
+                        reason=reason,
+                        source_event_id=source_event_id,
+                    )
+                if not transitioned:
                     return
             except InvalidStateTransitionError as exc:
                 logger.info(
@@ -230,231 +250,59 @@ def handle_ticket_closed(
     hubspot_ticket_id: str,
     closed_at_ms: str | int | None = None,
     owner_id: str | None = None,
-) -> None:
-    """Handle a ticket entering the FECHADO (closed) stage.
-
-    Updates the ``assigned_conversations`` record with closure metadata,
-    calculates total handle time, and decrements the agent's chat counter.
-
-    This function is fully idempotent: concurrent or duplicate calls for the
-    same ticket are safe. A Redis dedup lock + ``select_for_update()`` on the
-    ``AssignedConversation`` row ensures only one execution performs the
-    decrement and moves the record to ``closed_conversations``.
-
-    The agent whose count is decremented is always ``assigned.agent`` — the
-    agent the ticket was auto-assigned to — regardless of who closed it.
-
-    Args:
-        hubspot_ticket_id: The HubSpot ticket ID.
-        closed_at_ms: Value of the configured closed-stage timestamp (ms epoch).
-        owner_id: The ``hubspot_owner_id`` at the time of closure (used only
-            for ``closed_by_*`` metadata fields, not for count management).
-    """
-    from django.core.cache import cache
-
-    from apps.support.availability_runtime import (
-        log_runtime_rejection,
-        may_write_routing_state,
-    )
+    *,
+    source_event_id: str = "",
+) -> TicketCloseResult:
+    """Reconcile one occurrence; transient provider errors reach the task retry."""
+    from apps.support.availability_runtime import log_runtime_rejection, may_write_routing_state
+    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult, reconcile_close_occurrence
 
     if not may_write_routing_state():
         log_runtime_rejection("handle_ticket_closed")
-        return
+        return TicketCloseResult(CloseClassification.CONFLICT)
+    occurrence = _close_occurrence(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id)
+    if occurrence is None:
+        return TicketCloseResult(CloseClassification.IDENTITY_UNAVAILABLE)
+    return reconcile_close_occurrence(occurrence, allow_legacy=not settings.CONVERSATION_CYCLES_ENFORCED)
 
-    # Redis dedup lock — prevent concurrent/duplicate calls (e.g., when both
-    # Closed-stage timestamp and hs_pipeline_stage webhooks fire for the
-    # same closure event).
-    lock_key = f"ticket_close:{hubspot_ticket_id}"
-    if not cache.add(lock_key, "1", timeout=60):
-        logger.info("handle_ticket_closed_dedup_skip", ticket_id=hubspot_ticket_id)
-        return
+
+def _close_occurrence(
+    ticket_id: str, closed_at_ms: str | int | None, owner_id: str | None, source_event_id: str = ""
+) -> TicketCloseOccurrence | None:
+    """Parse a closed-stage occurrence, retaining legacy timestamp fallback."""
+    from apps.support.conversation_cycle_service import InvalidStageTimestampError, parse_stage_entry_timestamp
+    from apps.support.ticket_close_service import TicketCloseOccurrence
 
     try:
-        _do_handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
-    finally:
-        cache.delete(lock_key)
+        effective_at = parse_stage_entry_timestamp(closed_at_ms)
+    except InvalidStageTimestampError:
+        from apps.support.models import SupportConversationCycle
 
-
-def _do_handle_ticket_closed(
-    hubspot_ticket_id: str,
-    closed_at_ms: str | int | None = None,
-    owner_id: str | None = None,
-) -> None:
-    """Confirm current capacity before applying a lifecycle close event."""
-    from apps.support.capacity_service import capacity_mode, ticket_transaction
-    from apps.support.owner_reconciliation_service import reconcile_ticket
-
-    if capacity_mode() == "off":
-        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
-        return
-    if capacity_mode() == "shadow":
-        try:
-            reconcile_ticket(hubspot_ticket_id, source="close")
-        except Exception:
-            logger.warning("capacity_shadow_close_observation_failed")
-        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
-        return
-    observed = reconcile_ticket(hubspot_ticket_id, source="close")
-    if observed.state != "closed":
-        return
-    with ticket_transaction(hubspot_ticket_id) as locked:
-        if locked.revision != observed.revision or locked.state != "closed":
-            return
-        _apply_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+        if (
+            settings.CONVERSATION_CYCLES_ENFORCED
+            or SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id).exists()
+        ):
+            logger.warning("ticket_close_occurrence", ticket_id=ticket_id, classification="identity_unavailable")
+            return None
+        effective_at = timezone.now()
+    return TicketCloseOccurrence(ticket_id, effective_at, _safe_parse_owner_id(owner_id), source_event_id)
 
 
 def _apply_ticket_closed(
     hubspot_ticket_id: str,
     closed_at_ms: str | int | None = None,
     owner_id: str | None = None,
-) -> None:
-    """Internal implementation of ticket closure — called only after dedup lock is held."""
-    closed_at = _parse_hubspot_timestamp(closed_at_ms)
-    if closed_at is None and bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False)):
-        logger.warning("auto_assign_close_identity_unavailable", ticket_id=hubspot_ticket_id)
-        return
-    closed_at = closed_at or timezone.now()
+    *,
+    provider_snapshot: dict[str, object] | None = None,
+) -> TicketCloseResult:
+    """Apply a provider snapshot already read outside the caller's transaction."""
+    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult, apply_close_occurrence
 
-    active_cycle = (
-        SupportConversationCycle.objects.filter(
-            hubspot_ticket_id=hubspot_ticket_id,
-            state__in=["queued", "assigned", "repair_required"],
-        )
-        .order_by("-entered_stage_at")
-        .first()
-    )
-    if active_cycle is None and bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False)):
-        logger.warning("auto_assign_close_cycle_missing", ticket_id=hubspot_ticket_id)
-        return
-    if active_cycle is not None and closed_at < active_cycle.entered_stage_at:
-        logger.info("auto_assign_close_stale_cycle", ticket_id=hubspot_ticket_id, cycle_id=str(active_cycle.pk))
-        return
-
-    # If the ticket is still pending (never assigned), remove it from the queue
-    # so it is not assigned after closure.
-    pending_qs = NewConversation.objects.filter(hubspot_ticket_id=hubspot_ticket_id)
-    if active_cycle is not None:
-        pending_qs = pending_qs.filter(cycle=active_cycle)
-    pending_conv = pending_qs.first()
-    if pending_conv:
-        pending_conv.delete()
-        logger.info("auto_assign_pending_deleted_on_close", ticket_id=hubspot_ticket_id)
-
-    # Resolve closing agent metadata (only used for audit fields, not count management)
-    closing_owner = _safe_parse_owner_id(owner_id)
-    closing_agent_name: str | None = None
-
-    if closing_owner:
-        closing_agent_obj = Agent.objects.filter(hubspot_owner_id=closing_owner).first()
-        if closing_agent_obj:
-            closing_agent_name = closing_agent_obj.name
-
-    # Use select_for_update to serialize concurrent closures for the same ticket.
-    # If the row is already gone (another process handled it), get() raises
-    # DoesNotExist which falls through to the minimal ClosedConversation path.
-    try:
-        with transaction.atomic():
-            assigned_qs = AssignedConversation.objects.select_for_update().filter(hubspot_ticket_id=hubspot_ticket_id)
-            if active_cycle is not None:
-                assigned_qs = assigned_qs.filter(cycle=active_cycle)
-            assigned = assigned_qs.get()
-
-            handle_time: Decimal | None = None
-            if assigned.assigned_at:
-                delta = closed_at - assigned.assigned_at
-                handle_time = Decimal(str(round(delta.total_seconds() / 60, 2)))
-
-            resolution_time: Decimal | None = None
-            if assigned.entered_queue_at:
-                total_delta = closed_at - assigned.entered_queue_at
-                resolution_time = Decimal(str(round(total_delta.total_seconds() / 60, 2)))
-
-            # Determine closure source
-            closure_source = "agent"
-            if closing_owner and assigned.agent and closing_owner != assigned.hubspot_owner_id:
-                closure_source = "system"  # Closed by someone other than assigned agent
-
-            if not closing_agent_name and assigned.agent:
-                closing_agent_name = assigned.agent.name
-
-            # Decrement the ASSIGNED agent's count — always use assigned.agent,
-            # regardless of who closed the ticket. This matches the increment that
-            # was applied when the ticket was auto-assigned.
-            from apps.support.capacity_service import capacity_enforced
-
-            if assigned.agent and not capacity_enforced():
-                decrement_agent_chat_count(assigned.agent)
-
-            # Move from assigned_conversations → closed_conversations
-            lookup = {"cycle": active_cycle} if active_cycle is not None else {"hubspot_ticket_id": hubspot_ticket_id}
-            ClosedConversation.objects.get_or_create(
-                **lookup,
-                defaults={
-                    "hubspot_ticket_id": hubspot_ticket_id,
-                    "cycle": assigned.cycle,
-                    "agent": assigned.agent,
-                    "hubspot_owner_id": assigned.hubspot_owner_id,
-                    "agent_name": assigned.agent_name,
-                    "pipeline_id": assigned.pipeline_id,
-                    "entered_queue_at": assigned.entered_queue_at,
-                    "assigned_at": assigned.assigned_at,
-                    "closed_at": closed_at,
-                    "closed_by_owner_id": closing_owner,
-                    "closed_by_agent_name": closing_agent_name,
-                    "queue_wait_seconds": assigned.queue_wait_seconds,
-                    "total_handle_time_minutes": handle_time,
-                    "resolution_time_minutes": resolution_time,
-                    "closure_source": closure_source,
-                    "contact_name": assigned.contact_name,
-                    "contact_email": assigned.contact_email,
-                    "priority": assigned.priority,
-                    "subject": assigned.subject,
-                },
-            )
-            assigned.delete()
-            if active_cycle is not None:
-                active_cycle.state = SupportConversationCycle.State.CLOSED
-                active_cycle.closed_at = closed_at
-                active_cycle.save(update_fields=["state", "closed_at", "updated_at"])
-
-    except AssignedConversation.DoesNotExist:
-        # Ticket was closed without ever being assigned (or already processed) —
-        # create a minimal closed record so the event is not silently dropped.
-        logger.info("auto_assign_close_no_assigned_record", ticket_id=hubspot_ticket_id)
-        lookup = {"cycle": active_cycle} if active_cycle is not None else {"hubspot_ticket_id": hubspot_ticket_id}
-        ClosedConversation.objects.get_or_create(
-            **lookup,
-            defaults={
-                "hubspot_ticket_id": hubspot_ticket_id,
-                "cycle": pending_conv.cycle if pending_conv is not None else None,
-                "closed_at": closed_at,
-                "closed_by_owner_id": closing_owner,
-                "closed_by_agent_name": closing_agent_name,
-            },
-        )
-        if active_cycle is not None:
-            active_cycle.state = SupportConversationCycle.State.CLOSED
-            active_cycle.closed_at = closed_at
-            active_cycle.save(update_fields=["state", "closed_at", "updated_at"])
-        _transition_lifecycle_best_effort(
-            hubspot_ticket_id,
-            ["RESOLVED_BY_HUMAN", "CLOSED"],
-            reason="HubSpot ticket closed without assigned conversation record.",
-        )
-        return
-
-    _transition_lifecycle_best_effort(
-        hubspot_ticket_id,
-        ["RESOLVED_BY_HUMAN", "CLOSED"],
-        reason="HubSpot ticket closed by support lifecycle.",
-    )
-
-    logger.info(
-        "auto_assign_ticket_closed",
-        ticket_id=hubspot_ticket_id,
-        cycle_id=str(active_cycle.pk) if active_cycle is not None else None,
-        closed_by_owner_id=closing_owner,
-        handle_time_minutes=float(handle_time) if handle_time is not None else None,
+    occurrence = _close_occurrence(hubspot_ticket_id, closed_at_ms, owner_id)
+    if occurrence is None:
+        return TicketCloseResult(CloseClassification.IDENTITY_UNAVAILABLE)
+    return apply_close_occurrence(
+        occurrence, snapshot=provider_snapshot, allow_legacy=not settings.CONVERSATION_CYCLES_ENFORCED
     )
 
 
