@@ -99,11 +99,11 @@ def recent_close_projection_inconsistencies(since: datetime) -> QuerySet[Support
         source_account_id=OuterRef("source_account_id"),
         hubspot_ticket_id=OuterRef("hubspot_ticket_id"),
         state="closed",
+        observed_at__gte=since,
     )
     closed_projection = ClosedConversation.objects.filter(cycle_id=OuterRef("pk"))
     return (
         SupportConversationCycle.objects.filter(
-            created_at__gte=since,
             state__in=[SupportConversationCycle.State.QUEUED, SupportConversationCycle.State.ASSIGNED],
         )
         .filter(Exists(closed_occupancy))

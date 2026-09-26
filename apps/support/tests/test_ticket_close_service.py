@@ -479,17 +479,22 @@ def test_unexpected_lifecycle_failure_rolls_back_close_and_occupancy(settings):
 
 
 def test_recent_close_projection_detector_is_read_only():
-    """Detector reports only recent active cycles with a closed occupancy."""
+    """Detector uses occupancy observation time without mutating projections."""
     target = cycle()
-    SupportTicketOccupancy.objects.create(
+    SupportConversationCycle.objects.filter(pk=target.pk).update(created_at=T0 - timedelta(days=1))
+    occupancy = SupportTicketOccupancy.objects.create(
         hubspot_ticket_id="close-ticket",
         source_account_id="test-portal",
         cycle=target,
         state="closed",
+        observed_at=T1,
     )
     recent = recent_close_projection_inconsistencies(T0)
     assert list(recent.values_list("pk", flat=True)) == [target.pk]
-    assert not recent_close_projection_inconsistencies(datetime.now(UTC) + timedelta(days=1)).exists()
+    assert not recent_close_projection_inconsistencies(T1 + timedelta(seconds=1)).exists()
+    occupancy.refresh_from_db()
+    assert occupancy.observed_at == T1
+    assert occupancy.state == "closed"
     assert target.state == "assigned"
 
 
