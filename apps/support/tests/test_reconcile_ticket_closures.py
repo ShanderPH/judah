@@ -19,10 +19,10 @@ from apps.support.ticket_close_service import CloseClassification, TicketCloseRe
 from common.exceptions import ExternalServiceError, ForbiddenError
 
 
-def occurrence(settings, suffix=""):
+def occurrence(settings, suffix="", *, ticket_id="close-ticket"):
     """Persist a calculated close event for command replay."""
     instance = ConversationInstance.objects.create(
-        hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED", idempotency_key=f"repair-instance{suffix}"
+        hubspot_ticket_id=ticket_id, state="HUMAN_ASSIGNED", idempotency_key=f"repair-instance{suffix}"
     )
     return ConversationEvent.objects.create(
         instance=instance,
@@ -149,7 +149,8 @@ def test_late_legacy_occurrence_cannot_apply(settings):
     ):
         call_command("reconcile_ticket_closures", apply=True, stdout=output)
     counts = json.loads(output.getvalue())
-    assert counts["legacy_skipped"] == counts["scanned"] == 1
+    assert counts["legacy_skipped"] == 1
+    assert counts["scanned"] == 0
     assert counts["applied"] == 0
     reconcile.assert_not_called()
     assert ConversationEvent.objects.filter(pk=event.pk).exists()
@@ -172,6 +173,46 @@ def test_pre_cutoff_receipt_cannot_apply(settings):
     assert counts["scanned"] == counts["applied"] == 0
     reconcile.assert_not_called()
     assert ConversationEvent.objects.filter(pk=event.pk).exists()
+
+
+def test_apply_pages_only_temporally_resolvable_cycles(settings):
+    """Unrelated, future and unresolved cycles cannot consume the page or reach apply."""
+    cycle_at_cutoff()
+    skipped = [
+        occurrence(settings, "-orphan", ticket_id="orphan"),
+        occurrence(settings, "-future", ticket_id="future"),
+        occurrence(settings, "-unresolved", ticket_id="unresolved"),
+    ]
+    for ticket_id, entered_at in (("future", T1 + timedelta(hours=1)), ("unresolved", None)):
+        SupportConversationCycle.objects.create(
+            cycle_key=f"close:{ticket_id}",
+            source_account_id="test-portal",
+            hubspot_ticket_id=ticket_id,
+            entered_stage_at=entered_at,
+            opened_at=T0,
+            state="assigned",
+        )
+    first = occurrence(settings, "-first")
+    second = occurrence(settings, "-second")
+    for position, event in enumerate([*skipped, first, second], start=1):
+        ConversationEvent.objects.filter(pk=event.pk).update(created_at=T0 + timedelta(seconds=position))
+    output = StringIO()
+    with (
+        patch("apps.support.management.commands.reconcile_ticket_closures.require_routing_writer_authority"),
+        patch(
+            "apps.support.management.commands.reconcile_ticket_closures.reconcile_close_occurrence",
+            return_value=TicketCloseResult(CloseClassification.DUPLICATE),
+        ) as reconcile,
+    ):
+        call_command("reconcile_ticket_closures", apply=True, limit=1, offset=1, stdout=output)
+    counts = json.loads(output.getvalue())
+    assert counts["no_cycle"] == 2
+    assert counts["identity_unavailable"] == 1
+    assert counts["scanned"] == counts["duplicate"] == 1
+    assert counts["applied"] == 0
+    assert reconcile.call_count == 1
+    assert reconcile.call_args.args[0].source_event_id == "repair-event-second"
+    assert ConversationEvent.objects.filter(pk__in=[event.pk for event in skipped]).count() == 3
 
 
 @pytest.mark.parametrize(
