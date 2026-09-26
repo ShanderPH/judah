@@ -55,8 +55,14 @@ def _assigned(ticket_id: str, cycle: SupportConversationCycle, agent: Agent) -> 
 
 
 @pytest.mark.django_db
-def test_two_reopened_cycles_preserve_two_closures() -> None:
+@patch("apps.integrations.hubspot.client.get_hubspot_client")
+def test_two_reopened_cycles_preserve_two_closures(provider, settings) -> None:
     ticket_id = "reopened-1"
+    provider.return_value.get_ticket_details.return_value = {
+        "id": ticket_id,
+        "pipeline": settings.HUBSPOT_SUPPORT_PIPELINE_ID,
+        "stage": settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID,
+    }
     agent = _agent(7001)
     first_entered = timezone.now() - timedelta(hours=2)
     first = _cycle(ticket_id, first_entered)

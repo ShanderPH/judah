@@ -170,6 +170,7 @@ def close_current_service_cycle(
     instance: ConversationInstance,
     *,
     reason: str,
+    occurred_at: datetime | None = None,
 ) -> ConversationServiceCycle:
     """Close the current cycle idempotently and return the effective cycle."""
     locked = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
@@ -183,7 +184,7 @@ def close_current_service_cycle(
     if cycle.status == ConversationServiceCycle.Status.CLOSED:
         return cycle
     cycle.status = ConversationServiceCycle.Status.CLOSED
-    cycle.closed_at = timezone.now()
+    cycle.closed_at = occurred_at or timezone.now()
     cycle.closed_reason = reason
     cycle.save(update_fields=["status", "closed_at", "closed_reason", "updated_at"])
     return cycle

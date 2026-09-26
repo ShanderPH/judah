@@ -108,10 +108,8 @@ class TestHandleTicketClosed:
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 2  # unchanged
 
-    def test_concurrent_closure_via_dedup_lock(self):
-        """Simulates the race condition where both hs_v2_date_entered_939275052
-        and hs_pipeline_stage webhooks fire concurrently for the same ticket.
-        The Redis dedup lock should cause the second call to skip entirely."""
+    def test_old_redis_marker_does_not_discard_a_close(self):
+        """Durable closure must not be discarded by a leftover Redis marker."""
         from django.core.cache import cache
 
         agent = _make_agent("Agent", owner_id=100, chats=2)
@@ -119,17 +117,14 @@ class TestHandleTicketClosed:
 
         lock_key = "ticket_close:T004"
 
-        # Simulate: first call holds the lock (already claimed)
         cache.add(lock_key, "1", timeout=60)
 
         from apps.support.auto_assign_service import handle_ticket_closed
 
-        # This call should be skipped because the lock is already held
         handle_ticket_closed("T004")
 
         agent.refresh_from_db()
-        # Count must NOT be decremented while the lock is held by another process
-        assert agent.current_simultaneous_chats == 2
+        assert agent.current_simultaneous_chats == 1
 
         # Clean up
         cache.delete(lock_key)

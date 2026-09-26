@@ -67,7 +67,7 @@ def _handle_ticket_event(event_type: str, payload: dict, *, source_event_id: str
             _handle_ticket_entered_novo(object_id, property_value, source_event_id=source_event_id)
 
         elif property_name == _PROP_STAGE_CLOSED:
-            _handle_ticket_entered_closed(object_id, property_value, payload)
+            _handle_ticket_entered_closed(object_id, property_value, payload, source_event_id=source_event_id)
 
         elif property_name == _PROP_PIPELINE_STAGE:
             _handle_pipeline_stage_change(object_id, property_value, payload)
@@ -113,7 +113,9 @@ def _handle_ticket_entered_novo(
     )
 
 
-def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict) -> None:
+def _handle_ticket_entered_closed(
+    hubspot_ticket_id: str, closed_at_ms: str | None, payload: dict, *, source_event_id: str = ""
+) -> None:
     """Dispatch ticket closure processing via Celery.
 
     Non-blocking — dispatches a Celery task and returns immediately.
@@ -141,7 +143,10 @@ def _handle_ticket_entered_closed(hubspot_ticket_id: str, closed_at_ms: str | No
             )
             owner_str = None
 
-    task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
+    if source_event_id:
+        task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str, source_event_id)
+    else:
+        task_handle_ticket_closed.delay(hubspot_ticket_id, closed_at_ms, owner_str)
 
 
 def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict | None = None) -> None:

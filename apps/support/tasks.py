@@ -393,6 +393,7 @@ def task_handle_ticket_closed(
     hubspot_ticket_id: str,
     closed_at_ms: str | None = None,
     owner_id: str | None = None,
+    source_event_id: str = "",
 ) -> None:
     """Record ticket closure and compute handle time.
 
@@ -412,7 +413,10 @@ def task_handle_ticket_closed(
         return
 
     try:
-        handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+        if source_event_id:
+            handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id=source_event_id)
+        else:
+            handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
     except Exception as exc:
         logger.warning(
             "task_handle_ticket_closed_retry",

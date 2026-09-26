@@ -125,6 +125,17 @@ class LifecycleRecordResult:
     effect_policy: EffectOrderingPolicy = EffectOrderingPolicy.REVALIDATE_CURRENT_PROVIDER_STATE
 
 
+def _is_authoritative_stage_occurrence(event: NormalizedEvent, decision: RouteDecision) -> bool:
+    if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
+        return True
+    return (
+        event.source == "hubspot"
+        and event.event_type == "ticket_closed"
+        and (event.payload.get("propertyName") or event.payload.get("property_name")) == _PROP_STAGE_CLOSED
+        and decision.route == "CLOSE"
+    )
+
+
 TERMINAL_STATES = {
     ConversationInstance.State.CLOSED,
     ConversationInstance.State.FAILED_TERMINAL,
@@ -384,10 +395,14 @@ class LifecycleEngine:
     ) -> LifecycleRecordResult:
         decision = decision or RoutingPolicyEngine().route(event)
         effect_policy = self.effect_ordering_policy(event, decision)
+        defer_close = decision.route == "CLOSE" and (
+            effect_policy == EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
+            or bool(getattr(settings, "CONVERSATION_CYCLES_ENFORCED", False))
+        )
         with transaction.atomic():
             instance, instance_created = self._get_or_create_instance(event)
             stale_event = self._is_stale_provider_event(instance, event)
-            if not stale_event:
+            if not stale_event and not defer_close:
                 self._refresh_instance_snapshot(instance, event)
             lifecycle_event, event_created = self._append_event(instance, event)
             if event_created and not stale_event:
@@ -414,7 +429,7 @@ class LifecycleEngine:
                         reason="Assigned human agent sent the first outgoing message.",
                         source_event_id=event.source_event_id,
                     )
-                elif decision.route != "IGNORE":
+                elif decision.route != "IGNORE" and not defer_close:
                     can_reopen_terminal = event.event_type == "ticket_entered_n1" or decision.route == "AI_SERVICE"
                     allow_authoritative_queue_entry = (
                         event.event_type == "ticket_entered_n1"
@@ -438,7 +453,7 @@ class LifecycleEngine:
                         reason=decision.reason,
                         source_event_id=event.source_event_id,
                     )
-                if decision.route == "CLOSE" and event.hubspot_ticket_id:
+                if decision.route == "CLOSE" and event.hubspot_ticket_id and not defer_close:
                     self._close_all_ticket_instances(
                         event.hubspot_ticket_id,
                         primary_instance_id=instance.pk,
@@ -464,7 +479,7 @@ class LifecycleEngine:
         decision: RouteDecision,
     ) -> EffectOrderingPolicy:
         """Classify whether a late event may still produce a domain effect."""
-        if event.event_type == "ticket_entered_n1" and decision.route == "AUTO_ASSIGNMENT":
+        if _is_authoritative_stage_occurrence(event, decision):
             return EffectOrderingPolicy.PROCESS_IDEMPOTENT_OCCURRENCE
         if decision.route == "IGNORE":
             return EffectOrderingPolicy.PRESERVE_PROJECTION_ONLY
@@ -528,6 +543,7 @@ class LifecycleEngine:
         source_event_id: str = "",
         allow_terminal_reopen: bool = False,
         allow_authoritative_queue_entry: bool = False,
+        occurred_at: datetime | None = None,
     ) -> ConversationInstance:
         with transaction.atomic():
             locked = ConversationInstance.objects.select_for_update().get(pk=instance.pk)
@@ -559,7 +575,7 @@ class LifecycleEngine:
             locked.state_version += 1
             locked.last_activity_at = now
             if to_state == ConversationInstance.State.CLOSED and locked.closed_at is None:
-                locked.closed_at = now
+                locked.closed_at = occurred_at or now
             elif is_terminal_reopen and to_state not in TERMINAL_STATES:
                 locked.closed_at = None
             update_fields = ["state", "state_version", "last_activity_at", "closed_at", "updated_at"]
@@ -578,7 +594,7 @@ class LifecycleEngine:
                 source_event_id=source_event_id,
             )
             if to_state in TERMINAL_STATES:
-                service_cycle = close_current_service_cycle(locked, reason=reason)
+                service_cycle = close_current_service_cycle(locked, reason=reason, occurred_at=occurred_at)
 
             instance.state = locked.state
             instance.state_version = locked.state_version
@@ -598,11 +614,27 @@ class LifecycleEngine:
         )
         return instance
 
-    def transition_by_ticket(self, ticket_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:
+    def transition_by_ticket(
+        self,
+        ticket_id: str,
+        to_state: str,
+        *,
+        reason: str,
+        actor_id: str = "",
+        source_event_id: str = "",
+        occurred_at: datetime | None = None,
+    ) -> bool:
         instance = find_conversation_instance(ticket_id=str(ticket_id))
         if instance is None:
             return False
-        self.transition(instance, to_state, reason=reason, actor_id=actor_id)
+        self.transition(
+            instance,
+            to_state,
+            reason=reason,
+            actor_id=actor_id,
+            source_event_id=source_event_id,
+            occurred_at=occurred_at,
+        )
         return True
 
     def transition_by_thread(self, thread_id: str, to_state: str, *, reason: str, actor_id: str = "") -> bool:
