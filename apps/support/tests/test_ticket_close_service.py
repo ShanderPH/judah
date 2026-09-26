@@ -3,11 +3,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from django.db import close_old_connections, connection
 
+from apps.integrations.hubspot.client import STAGE_CLOSED_ID, STAGE_NOVO_ID, HubSpotClient
 from apps.support.auto_assign_service import handle_ticket_closed
 from apps.support.models import (
     Agent,
@@ -94,7 +96,60 @@ def test_current_close_and_retries_have_one_effect(settings, mode):
     assert agent.current_simultaneous_chats == 0
 
 
-@pytest.mark.parametrize("value", [None, "", "bad", "123", "999999999999999999"])
+def test_live_crm_iso_close_materializes_current_cycle_and_occupancy(settings, django_capture_on_commit_callbacks):
+    """The production ISO response must close the same cycle exactly once."""
+    settings.SUPPORT_CAPACITY_MODE = "enforce"
+    entered_novo = datetime(2026, 9, 26, 12, 4, 38, 221000, tzinfo=UTC)
+    entered_closed = datetime(2026, 9, 26, 16, 8, 57, 952000, tzinfo=UTC)
+    target = cycle(entered_at=entered_novo)
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    crm_ticket = SimpleNamespace(
+        id="close-ticket",
+        properties={
+            "hs_pipeline": settings.HUBSPOT_SUPPORT_PIPELINE_ID,
+            "hs_pipeline_stage": settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID,
+            f"hs_v2_date_entered_{STAGE_NOVO_ID}": "2026-09-26T12:04:38.221Z",
+            f"hs_v2_date_entered_{STAGE_CLOSED_ID}": "2026-09-26T16:08:57.952Z",
+        },
+        updated_at=entered_closed + timedelta(seconds=5),
+        archived=False,
+    )
+    client = HubSpotClient("test-token")
+    with (
+        patch("apps.integrations.hubspot.client._circuit_breaker.call", return_value=crm_ticket),
+        patch("apps.integrations.hubspot.client.get_hubspot_client", return_value=client),
+        patch("apps.support.ticket_close_service.logger.info") as close_log,
+        django_capture_on_commit_callbacks(execute=True),
+    ):
+        first = handle_ticket_closed("close-ticket", str(int(entered_closed.timestamp() * 1000)))
+        duplicate = handle_ticket_closed("close-ticket", str(int(entered_closed.timestamp() * 1000)))
+
+    assert first.classification == CloseClassification.APPLIED_CURRENT
+    assert duplicate.classification == CloseClassification.DUPLICATE
+    assert any(
+        call.args == ("ticket_close_occurrence",)
+        and call.kwargs.get("classification") == "applied_current"
+        and call.kwargs.get("domain_applied") is True
+        for call in close_log.call_args_list
+    )
+    target.refresh_from_db()
+    occupancy.refresh_from_db()
+    assert target.state == "closed"
+    assert target.closed_at == entered_closed
+    assert ClosedConversation.objects.get(cycle=target).closed_at == entered_closed
+    assert not AssignedConversation.objects.filter(cycle=target).exists()
+    assert occupancy.state == "closed"
+
+
+@pytest.mark.parametrize("value", [None, "", "bad", "123", "999999999999999999", "2026-09-26T16:08:57.952Z"])
 def test_invalid_timestamp_never_mutates(value):
     target = cycle()
     assignment(target)
@@ -125,7 +180,7 @@ def test_unmaterialized_reopen_is_rejected(settings):
     target = cycle()
     assignment(target)
     current = snapshot(settings)
-    current["entered_novo_at"] = str(int((T1 + timedelta(hours=1)).timestamp() * 1000))
+    current["entered_novo_at"] = T1 + timedelta(hours=1)
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
         provider.return_value.get_ticket_details.return_value = current
         result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1))
@@ -425,7 +480,9 @@ def test_capacity_observation_materializes_proven_close_once(settings, mode):
         state="active",
     )
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
-        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        observed = snapshot(settings)
+        observed["entered_closed_at"] = T1
+        provider.return_value.get_ticket_details.return_value = observed
         reconcile_ticket("close-ticket", source="portfolio")
         reconcile_ticket("close-ticket", source="portfolio")
     target.refresh_from_db()
@@ -461,7 +518,10 @@ def test_unexpected_lifecycle_failure_rolls_back_close_and_occupancy(settings):
         ),
         pytest.raises(RuntimeError, match="db"),
     ):
-        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        observed = snapshot(settings)
+        observed["entered_novo_at"] = T0
+        observed["entered_closed_at"] = T1
+        provider.return_value.get_ticket_details.return_value = observed
         handle_ticket_closed("close-ticket", str(int(T1.timestamp() * 1000)))
     occupancy.refresh_from_db()
     target.refresh_from_db()
@@ -470,7 +530,7 @@ def test_unexpected_lifecycle_failure_rolls_back_close_and_occupancy(settings):
     assert not ClosedConversation.objects.filter(cycle=target).exists()
     assert AssignedConversation.objects.filter(cycle=target).exists()
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
-        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        provider.return_value.get_ticket_details.return_value = observed
         result = handle_ticket_closed("close-ticket", str(int(T1.timestamp() * 1000)))
     assert result.classification == CloseClassification.APPLIED_CURRENT
     assert ClosedConversation.objects.filter(cycle=target).count() == 1
