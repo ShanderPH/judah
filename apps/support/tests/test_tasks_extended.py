@@ -172,11 +172,15 @@ def test_matchmaker_drain_task_paths() -> None:
 
 
 def test_ticket_closed_and_owner_change_task_retries() -> None:
+    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult
+
     with patch("apps.support.auto_assign_service.handle_ticket_closed") as closed:
+        closed.return_value = TicketCloseResult(CloseClassification.APPLIED_CURRENT)
         task_handle_ticket_closed.run("ticket", "123", "10")
     closed.assert_called_once_with("ticket", "123", "10")
 
     with patch("apps.support.auto_assign_service.handle_ticket_closed") as closed:
+        closed.return_value = TicketCloseResult(CloseClassification.APPLIED_CURRENT)
         task_handle_ticket_closed.run("ticket", "123", "10", "event-1")
     closed.assert_called_once_with("ticket", "123", "10", source_event_id="event-1")
 

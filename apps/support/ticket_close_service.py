@@ -11,7 +11,7 @@ from uuid import UUID
 import structlog
 from django.conf import settings
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Exists, OuterRef, QuerySet
 
 from apps.support.capacity_service import capacity_enforced, capacity_mode, ticket_transaction
 from apps.support.conversation_cycle_service import InvalidStageTimestampError, parse_stage_entry_timestamp
@@ -21,6 +21,7 @@ from apps.support.models import (
     ClosedConversation,
     NewConversation,
     SupportConversationCycle,
+    SupportTicketOccupancy,
 )
 
 logger = structlog.get_logger(__name__)
@@ -92,6 +93,24 @@ def _cycles(ticket_id: str) -> QuerySet[SupportConversationCycle]:
     return SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id).order_by("pk")
 
 
+def recent_close_projection_inconsistencies(since: datetime) -> QuerySet[SupportConversationCycle]:
+    """Find recent active cycles whose occupancy is closed without a close projection."""
+    closed_occupancy = SupportTicketOccupancy.objects.filter(
+        source_account_id=OuterRef("source_account_id"),
+        hubspot_ticket_id=OuterRef("hubspot_ticket_id"),
+        state="closed",
+        observed_at__gte=since,
+    )
+    closed_projection = ClosedConversation.objects.filter(cycle_id=OuterRef("pk"))
+    return (
+        SupportConversationCycle.objects.filter(
+            state__in=[SupportConversationCycle.State.QUEUED, SupportConversationCycle.State.ASSIGNED],
+        )
+        .filter(Exists(closed_occupancy))
+        .filter(~Exists(closed_projection))
+    )
+
+
 def _provider_decision(occurrence: TicketCloseOccurrence, snapshot: dict[str, object]) -> CloseClassification | None:
     """Reject a close when provider state proves a later active attendance."""
     from apps.integrations.hubspot.client import STAGE_FECHADO_ID, SUPPORT_PIPELINE_ID
@@ -124,21 +143,43 @@ def reconcile_close_occurrence(
 
     initial = resolve_close_target(list(_cycles(occurrence.ticket_id)), occurrence)
     snapshot: dict[str, object] | None = None
-    observed = None
     legacy = allow_legacy and initial.classification == CloseClassification.NO_CYCLE
+    needs_occupancy = (initial.closes_current_lifecycle or legacy) and not dry_run and capacity_mode() != "off"
+    captured_revision = None
+    if needs_occupancy:
+        with ticket_transaction(occurrence.ticket_id) as captured:
+            captured_revision = captured.revision
     if initial.closes_current_lifecycle or (legacy and capacity_mode() != "off"):
-        if dry_run or capacity_mode() == "off":
-            snapshot = get_hubspot_client().get_ticket_details(occurrence.ticket_id)
-        else:
-            snapshot = {}
-            observed = reconcile_ticket(
-                occurrence.ticket_id, source="close", snapshot=snapshot, close_occurrence=occurrence
-            )
-    if observed is not None:
+        snapshot = get_hubspot_client().get_ticket_details(occurrence.ticket_id)
+    if snapshot is not None and needs_occupancy:
         with ticket_transaction(occurrence.ticket_id) as locked:
-            if locked.revision != observed.revision:
-                raise CapacityObservationConflictError("Ticket revision changed after provider reconciliation")
-            return apply_close_occurrence(occurrence, snapshot=snapshot, dry_run=dry_run, allow_legacy=allow_legacy)
+            if locked.revision != captured_revision:
+                raise CapacityObservationConflictError("Ticket revision changed after provider read")
+            reconcile_ticket(
+                occurrence.ticket_id,
+                source="close",
+                provider_data=snapshot,
+                close_occurrence=occurrence,
+            )
+            result = apply_close_occurrence(occurrence, snapshot=snapshot, dry_run=dry_run, allow_legacy=allow_legacy)
+            if result.classification in {
+                CloseClassification.APPLIED_CURRENT,
+                CloseClassification.APPLIED_HISTORICAL,
+                CloseClassification.DUPLICATE,
+            }:
+                return result
+            transaction.set_rollback(True)
+        logger.warning(
+            "ticket_close_occurrence",
+            ticket_id=occurrence.ticket_id,
+            cycle_id=str(result.cycle_id) if result.cycle_id else None,
+            source_event_id=occurrence.source_event_id,
+            classification=result.classification.value,
+            effective_at=occurrence.effective_at.isoformat(),
+            domain_applied=False,
+            retryable=False,
+        )
+        return result
     return apply_close_occurrence(occurrence, snapshot=snapshot, dry_run=dry_run, allow_legacy=allow_legacy)
 
 
@@ -202,13 +243,25 @@ def apply_close_occurrence(
                 result = TicketCloseResult(classification, result.cycle_id)
             elif not dry_run:
                 _materialize(target, occurrence, current=result.closes_current_lifecycle)
-        logger.info(
-            "ticket_close_occurrence",
-            ticket_id=occurrence.ticket_id,
-            cycle_id=str(result.cycle_id) if result.cycle_id else None,
-            source_event_id=occurrence.source_event_id,
-            classification=result.classification.value,
-            effective_at=occurrence.effective_at.isoformat(),
+        domain_applied = (
+            result.classification
+            in {
+                CloseClassification.APPLIED_CURRENT,
+                CloseClassification.APPLIED_HISTORICAL,
+            }
+            and not dry_run
+        )
+        transaction.on_commit(
+            lambda: logger.info(
+                "ticket_close_occurrence",
+                ticket_id=occurrence.ticket_id,
+                cycle_id=str(result.cycle_id) if result.cycle_id else None,
+                source_event_id=occurrence.source_event_id,
+                classification=result.classification.value,
+                effective_at=occurrence.effective_at.isoformat(),
+                domain_applied=domain_applied,
+                retryable=result.classification == CloseClassification.PROVIDER_UNAVAILABLE,
+            )
         )
         return result
 
@@ -275,6 +328,7 @@ def _materialize(target: SupportConversationCycle | None, occurrence: TicketClos
             ["RESOLVED_BY_HUMAN"],
             reason="Proven current support cycle closed.",
             source_event_id=occurrence.source_event_id,
+            strict=True,
         )
         _transition_lifecycle_best_effort(
             occurrence.ticket_id,
@@ -282,4 +336,5 @@ def _materialize(target: SupportConversationCycle | None, occurrence: TicketClos
             reason="Proven current support cycle closed.",
             closed_at=occurrence.effective_at,
             source_event_id=occurrence.source_event_id,
+            strict=True,
         )

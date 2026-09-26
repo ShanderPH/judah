@@ -403,25 +403,48 @@ def task_handle_ticket_closed(
         owner_id: HubSpot owner ID at the time of closure.
     """
     from apps.support.auto_assign_service import handle_ticket_closed
-    from apps.support.availability_runtime import (
-        log_runtime_rejection,
-        may_write_routing_state,
-    )
-
-    if not may_write_routing_state():
-        log_runtime_rejection("task_handle_ticket_closed")
-        return
+    from apps.support.availability_runtime import require_routing_writer_authority
+    from apps.support.ticket_close_service import CloseClassification
 
     try:
+        require_routing_writer_authority("task_handle_ticket_closed")
         if source_event_id:
-            handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id=source_event_id)
+            result = handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id=source_event_id)
         else:
-            handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+            result = handle_ticket_closed(hubspot_ticket_id, closed_at_ms, owner_id)
+        if result.classification not in {
+            CloseClassification.APPLIED_CURRENT,
+            CloseClassification.APPLIED_HISTORICAL,
+            CloseClassification.DUPLICATE,
+        }:
+            logger.warning(
+                "ticket_close_domain_mutation_rejected",
+                ticket_id=hubspot_ticket_id,
+                source_event_id=source_event_id,
+                cycle_id=str(result.cycle_id) if result.cycle_id else None,
+                classification=result.classification.value,
+                domain_applied=False,
+                retryable=False,
+            )
+            from apps.support.models import SupportTicketOccupancy
+
+            if SupportTicketOccupancy.objects.filter(hubspot_ticket_id=hubspot_ticket_id, state="closed").exists():
+                logger.error(
+                    "ticket_close_projection_inconsistency",
+                    ticket_id=hubspot_ticket_id,
+                    source_event_id=source_event_id,
+                    cycle_id=str(result.cycle_id) if result.cycle_id else None,
+                    classification=result.classification.value,
+                    occupancy_state="closed",
+                    domain_applied=False,
+                )
     except Exception as exc:
         logger.warning(
             "task_handle_ticket_closed_retry",
             ticket_id=hubspot_ticket_id,
+            source_event_id=source_event_id,
             exception_type=type(exc).__name__,
+            retryable=True,
         )
         raise self.retry(exc=exc) from exc
 
@@ -460,7 +483,7 @@ def task_handle_owner_change(
     try:
         previous_owner_id = payload.get("previousValue")
         from apps.support.capacity_service import capacity_mode
-        from apps.support.owner_reconciliation_service import reconcile_ticket
+        from apps.support.owner_reconciliation_service import CloseProjectionError, reconcile_ticket
 
         mode = capacity_mode()
         occupancy = None
@@ -471,6 +494,8 @@ def task_handle_owner_change(
                     source="webhook",
                     observation_id=str(payload.get("eventId", "")),
                 )
+            except CloseProjectionError:
+                raise
             except Exception:
                 if mode == "enforce":
                     raise

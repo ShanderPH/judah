@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,8 +15,14 @@ from apps.support.models import (
     ClosedConversation,
     NewConversation,
     SupportConversationCycle,
+    SupportTicketOccupancy,
 )
-from apps.support.ticket_close_service import CloseClassification, TicketCloseOccurrence, reconcile_close_occurrence
+from apps.support.ticket_close_service import (
+    CloseClassification,
+    TicketCloseOccurrence,
+    recent_close_projection_inconsistencies,
+    reconcile_close_occurrence,
+)
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
 T1 = T0 + timedelta(hours=1)
@@ -146,19 +151,22 @@ def test_dry_run_does_not_mutate(settings):
 
 
 def test_revision_change_after_reconciliation_is_retryable(settings):
-    """Revision races raise retryable conflicts before close writes."""
+    """Provider-read races raise retryable conflicts before close writes."""
     from apps.support.owner_reconciliation_service import CapacityObservationConflictError
 
     settings.SUPPORT_CAPACITY_MODE = "shadow"
     target = cycle()
     assignment(target)
+
+    def read(_ticket_id):
+        SupportTicketOccupancy.objects.filter(hubspot_ticket_id="close-ticket").update(revision=2)
+        return snapshot(settings)
+
     with (
-        patch(
-            "apps.support.owner_reconciliation_service.reconcile_ticket",
-            return_value=SimpleNamespace(revision=-1),
-        ),
+        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
         pytest.raises(CapacityObservationConflictError, match="revision changed"),
     ):
+        provider.return_value.get_ticket_details.side_effect = read
         reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1))
     assert AssignedConversation.objects.filter(cycle=target).exists()
     assert not ClosedConversation.objects.exists()
@@ -202,13 +210,24 @@ def test_legacy_close_with_only_prior_closed_row_is_duplicate(settings):
 
 def test_cycle_close_with_existing_closed_row_remains_conflict(settings):
     """Cycle-bound close rows retain conflict classification."""
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
     target = cycle()
-    assignment(target)
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
     ClosedConversation.objects.create(cycle=target, hubspot_ticket_id="close-ticket", closed_at=T0)
     with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
         provider.return_value.get_ticket_details.return_value = snapshot(settings)
         result = reconcile_close_occurrence(TicketCloseOccurrence("close-ticket", T1))
     assert result.classification == CloseClassification.CONFLICT
+    occupancy.refresh_from_db()
+    assert occupancy.state == "active"
     assert AssignedConversation.objects.filter(cycle=target).exists()
     assert ClosedConversation.objects.filter(cycle=target).count() == 1
 
@@ -356,3 +375,222 @@ def test_reopen_during_provider_read_cannot_release_new_occupancy(settings, mode
     assert AssignedConversation.objects.filter(cycle=occupancy.cycle).exists()
     assert agent.current_simultaneous_chats == 1
     assert instance.state == "HUMAN_ASSIGNED"
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_provider_close_without_occurrence_does_not_commit_partial_projection(settings, mode):
+    """A capacity observation cannot close occupancy without close evidence."""
+    from apps.support.owner_reconciliation_service import CapacityObservationConflictError, reconcile_ticket
+
+    settings.SUPPORT_CAPACITY_MODE = mode
+    target = cycle()
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    observed = snapshot(settings)
+    observed["entered_closed_at"] = None
+    with (
+        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
+        pytest.raises(CapacityObservationConflictError),
+    ):
+        provider.return_value.get_ticket_details.return_value = observed
+        reconcile_ticket("close-ticket", source="portfolio")
+    occupancy.refresh_from_db()
+    target.refresh_from_db()
+    assert occupancy.state == "active"
+    assert target.state == "assigned"
+    assert not ClosedConversation.objects.filter(cycle=target).exists()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_capacity_observation_materializes_proven_close_once(settings, mode):
+    """The provider observation commits occupancy and cycle close together."""
+    from apps.support.owner_reconciliation_service import reconcile_ticket
+
+    settings.SUPPORT_CAPACITY_MODE = mode
+    target = cycle()
+    agent = assignment(target)
+    SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        reconcile_ticket("close-ticket", source="portfolio")
+        reconcile_ticket("close-ticket", source="portfolio")
+    target.refresh_from_db()
+    agent.refresh_from_db()
+    occupancy = SupportTicketOccupancy.objects.get(hubspot_ticket_id="close-ticket")
+    assert occupancy.state == "closed"
+    assert target.state == "closed"
+    assert ClosedConversation.objects.filter(cycle=target).count() == 1
+    assert not AssignedConversation.objects.filter(cycle=target).exists()
+    assert agent.current_simultaneous_chats == 0
+
+
+def test_unexpected_lifecycle_failure_rolls_back_close_and_occupancy(settings):
+    """Lifecycle failure must leave every close projection retryable."""
+    from apps.ai_agents.models import ConversationInstance
+
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    target = cycle()
+    agent = assignment(target)
+    ConversationInstance.objects.create(hubspot_ticket_id="close-ticket", state="HUMAN_ASSIGNED")
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    with (
+        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
+        patch(
+            "apps.ai_agents.services.lifecycle.LifecycleEngine.close_ticket_instances", side_effect=RuntimeError("db")
+        ),
+        pytest.raises(RuntimeError, match="db"),
+    ):
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        handle_ticket_closed("close-ticket", str(int(T1.timestamp() * 1000)))
+    occupancy.refresh_from_db()
+    target.refresh_from_db()
+    assert occupancy.state == "active"
+    assert target.state == "assigned"
+    assert not ClosedConversation.objects.filter(cycle=target).exists()
+    assert AssignedConversation.objects.filter(cycle=target).exists()
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = snapshot(settings)
+        result = handle_ticket_closed("close-ticket", str(int(T1.timestamp() * 1000)))
+    assert result.classification == CloseClassification.APPLIED_CURRENT
+    assert ClosedConversation.objects.filter(cycle=target).count() == 1
+    occupancy.refresh_from_db()
+    assert occupancy.state == "closed"
+
+
+def test_recent_close_projection_detector_is_read_only():
+    """Detector uses occupancy observation time without mutating projections."""
+    target = cycle()
+    SupportConversationCycle.objects.filter(pk=target.pk).update(created_at=T0 - timedelta(days=1))
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        state="closed",
+        observed_at=T1,
+    )
+    recent = recent_close_projection_inconsistencies(T0)
+    assert list(recent.values_list("pk", flat=True)) == [target.pk]
+    assert not recent_close_projection_inconsistencies(T1 + timedelta(seconds=1)).exists()
+    occupancy.refresh_from_db()
+    assert occupancy.observed_at == T1
+    assert occupancy.state == "closed"
+    assert target.state == "assigned"
+
+
+def test_non_authoritative_close_task_retries_without_mutating():
+    """A worker without writer authority must not acknowledge a close."""
+    from apps.support.tasks import task_handle_ticket_closed
+
+    target = cycle()
+    assignment(target)
+    with (
+        patch("apps.support.availability_runtime.may_write_routing_state", return_value=False),
+        patch.object(task_handle_ticket_closed, "retry", side_effect=RuntimeError("retried")),
+        pytest.raises(RuntimeError, match="retried"),
+    ):
+        task_handle_ticket_closed.run("close-ticket", str(int(T1.timestamp() * 1000)))
+    target.refresh_from_db()
+    assert target.state == "assigned"
+    assert not ClosedConversation.objects.filter(cycle=target).exists()
+
+
+def test_rejected_close_with_closed_occupancy_emits_inconsistency(settings, caplog):
+    """Rejected domain effect remains visible even after webhook consumption."""
+    from apps.support.tasks import task_handle_ticket_closed
+
+    target = cycle()
+    assignment(target)
+    SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        state="closed",
+    )
+    observed = snapshot(settings)
+    observed["entered_novo_at"] = str(int((T1 + timedelta(hours=1)).timestamp() * 1000))
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        provider.return_value.get_ticket_details.return_value = observed
+        task_handle_ticket_closed.run("close-ticket", str(int(T1.timestamp() * 1000)))
+    assert "ticket_close_projection_inconsistency" in caplog.text
+    assert target.state == "assigned"
+    assert not ClosedConversation.objects.filter(cycle=target).exists()
+
+
+def test_shadow_owner_observation_retries_unmaterialized_close(settings):
+    """Shadow mode cannot swallow a close projection failure in owner processing."""
+    from apps.support.tasks import task_handle_owner_change
+
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    target = cycle()
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    observed = snapshot(settings)
+    observed["entered_closed_at"] = None
+    with (
+        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
+        patch.object(task_handle_owner_change, "retry", side_effect=RuntimeError("retried")),
+        pytest.raises(RuntimeError, match="retried"),
+    ):
+        provider.return_value.get_ticket_details.return_value = observed
+        task_handle_owner_change.run("close-ticket", None, {})
+    occupancy.refresh_from_db()
+    assert occupancy.state == "active"
+    assert AssignedConversation.objects.filter(cycle=target).exists()
+
+
+def test_webhook_processed_only_means_close_was_dispatched(settings):
+    """Webhook consumption completes before the asynchronous domain mutation."""
+    from apps.ai_agents.models import ConversationEvent
+    from apps.webhooks.services import process_webhook_event, record_webhook_event
+
+    target = cycle()
+    assignment(target)
+    event = record_webhook_event(
+        "hubspot",
+        "ticket.propertyChange",
+        {
+            "eventId": "close-event-1",
+            "objectId": "close-ticket",
+            "propertyName": f"hs_v2_date_entered_{settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID}",
+            "propertyValue": str(int(T1.timestamp() * 1000)),
+            "occurredAt": int(T1.timestamp() * 1000),
+        },
+    )
+    with patch("apps.support.tasks.task_handle_ticket_closed.delay") as dispatched:
+        assert process_webhook_event(event.pk) is True
+    dispatched.assert_called_once()
+    assert ConversationEvent.objects.filter(
+        source_event_id="close-event-1",
+        processing_status=ConversationEvent.ProcessingStatus.PROCESSED,
+    ).exists()
+    target.refresh_from_db()
+    assert target.state == "assigned"
+    assert not ClosedConversation.objects.filter(cycle=target).exists()

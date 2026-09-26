@@ -291,7 +291,15 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
         reasons.append("database_application_name_missing")
 
     checks["conversation_cycles"] = _conversation_cycle_checks()
-    cycle_checks = checks["conversation_cycles"]
+    cycle_checks = checks.get("conversation_cycles", {})
+    if cycle_checks.get("migration_applied"):
+        from apps.support.ticket_close_service import recent_close_projection_inconsistencies
+
+        cycle_checks["recent_close_projection_inconsistencies"] = recent_close_projection_inconsistencies(
+            now - timedelta(hours=24)
+        ).count()
+        if cycle_checks["recent_close_projection_inconsistencies"]:
+            reasons.append("recent_close_projection_inconsistency")
     if cycle_checks.get("projection_mismatches"):
         reasons.append("conversation_cycle_projection_mismatch")
     if cycle_checks.get("legacy_writers_detected"):
@@ -365,6 +373,13 @@ def emit_assignment_readiness_metrics(readiness: dict[str, Any]) -> None:
     emit_metric("assignment_queue_ready_depth", checks["ready_queue_depth"], kind="gauge")
     emit_metric("assignment_queue_oldest_age_seconds", checks["oldest_ready_age_seconds"], kind="gauge")
     emit_metric("assignment_capacity_drift_agents", checks["capacity_drift_agents"], kind="gauge")
+    cycle_checks = checks.get("conversation_cycles", {})
+    if "recent_close_projection_inconsistencies" in cycle_checks:
+        emit_metric(
+            "ticket_close_projection_inconsistencies_recent",
+            cycle_checks["recent_close_projection_inconsistencies"],
+            kind="gauge",
+        )
     emit_metric(
         "assignment_cohort_active",
         int(bool(checks.get("opening_cohort_active", False))),
