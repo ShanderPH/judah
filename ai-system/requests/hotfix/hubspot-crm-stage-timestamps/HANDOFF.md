@@ -1,5 +1,7 @@
 # Handoff
 
+PR: https://github.com/ShanderPH/judah/pull/128
+
 ## Resumo
 
 - Corrigida a conversão de timestamps de estágio ISO-8601 na fronteira HubSpot CRM para `datetime` UTC aware.
