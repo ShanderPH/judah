@@ -8,6 +8,7 @@ import pytest
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID
+from apps.integrations.hubspot.team_roster import TeamMember, TeamRoster
 from apps.support import auto_assign_service
 from apps.support.models import Agent, AssignedConversation, NewConversation
 from common.exceptions import ExternalServiceError
@@ -163,23 +164,31 @@ def test_sync_novo_stage_covers_created_skipped_assigned_and_reactivated() -> No
 def test_sync_team_members_creates_only_valid_new_agents() -> None:
     _agent(1, name="Existing")
     client = MagicMock()
-    client.get_team_members.return_value = [
-        {"id": "1", "email": "existing@test.local", "first_name": "Existing"},
-        {"id": "2", "email": "new@test.local", "first_name": "New", "last_name": "Agent"},
-        {"id": "", "email": "missing@test.local"},
-        {"id": "3", "email": ""},
-    ]
+    client.get_team_roster.return_value = TeamRoster(
+        members=(
+            TeamMember("11", "DEFAULT", "active", 1, "existing@test.local", "Existing"),
+            TeamMember("12", "DEFAULT", "active", 2, "new@test.local", "New", "Agent"),
+            TeamMember("13", "DEFAULT", "owner_missing", None, "missing@test.local"),
+            TeamMember("14", "DEFAULT", "active", 3, ""),
+        ),
+        complete=True,
+        next_cursor=None,
+        pages_read=1,
+    )
     with patch.object(auto_assign_service, "get_hubspot_client", return_value=client):
-        assert auto_assign_service.sync_hubspot_team_to_agents("team-1") == 1
+        assert auto_assign_service.sync_hubspot_team_to_agents("8") == 1
     created = Agent.objects.get(hubspot_owner_id=2)
     assert created.name == "New Agent"
-    assert created.team == "team_team-1"
+    assert created.team == "team_8"
     assert created.status_enum == Agent.StatusEnum.OFFLINE
 
 
 @pytest.mark.django_db
 def test_sync_team_members_handles_external_failure() -> None:
     client = MagicMock()
-    client.get_team_members.side_effect = ExternalServiceError("offline")
-    with patch.object(auto_assign_service, "get_hubspot_client", return_value=client):
-        assert auto_assign_service.sync_hubspot_team_to_agents("team-1") == 0
+    client.get_team_roster.side_effect = ExternalServiceError("offline")
+    with (
+        patch.object(auto_assign_service, "get_hubspot_client", return_value=client),
+        pytest.raises(ExternalServiceError),
+    ):
+        auto_assign_service.sync_hubspot_team_to_agents("8")

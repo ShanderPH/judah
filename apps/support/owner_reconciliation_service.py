@@ -14,6 +14,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps.support.assignment_provenance import classify_owner_effect
 from apps.support.capacity_service import (
     capacity_account,
     capacity_enforced,
@@ -69,8 +70,8 @@ def _project_owner(row: SupportTicketOccupancy) -> set[UUID]:
                 cycle=assigned.cycle,
                 from_agent=assigned.agent,
                 from_hubspot_owner_id=assigned.hubspot_owner_id,
-                reassigned_at=timezone.now(),
-                reassignment_source="hubspot_owner_removed",
+                reassigned_at=None,
+                reassignment_source=str(classify_owner_effect()),
             )
             assigned.delete()
         return affected
@@ -101,8 +102,8 @@ def _project_owner(row: SupportTicketOccupancy) -> set[UUID]:
                 from_hubspot_owner_id=old_owner,
                 to_agent=row.agent,
                 to_hubspot_owner_id=row.hubspot_owner_id,
-                reassigned_at=timezone.now(),
-                reassignment_source="hubspot_webhook",
+                reassigned_at=None,
+                reassignment_source=str(classify_owner_effect()),
             )
     elif assigned is None and cycle is not None and cycle.state == "queued":
         queue = NewConversation.objects.filter(cycle=cycle).first()
@@ -127,7 +128,7 @@ def _project_owner(row: SupportTicketOccupancy) -> set[UUID]:
                 agent_name=row.agent.name if row.agent else "",
                 pipeline_id=row.pipeline_id,
                 entered_queue_at=queue.entered_queue_at,
-                assigned_at=timezone.now(),
+                assigned_at=None,
             )
             AssignmentLog.objects.create(
                 ticket_id=row.hubspot_ticket_id,
@@ -135,8 +136,8 @@ def _project_owner(row: SupportTicketOccupancy) -> set[UUID]:
                 agent=row.agent,
                 hubspot_owner_id=row.hubspot_owner_id,
                 agent_name=row.agent.name if row.agent else "",
-                assignment_type="manual",
-                assigned_by="hubspot_manual",
+                assignment_type=str(classify_owner_effect()),
+                assigned_by="",
                 pipeline_id=row.pipeline_id,
                 entered_queue_at=queue.entered_queue_at,
             )
@@ -174,6 +175,48 @@ def reconcile_ticket(
             raise CapacityObservationConflictError("Invalid owner identity")
         owner = int(str(raw_owner)) if raw_owner else None
         updated = _timestamp(data.get("updated_at"))
+        opened = None
+        if (
+            settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off"
+            and str(data["pipeline"]) == SUPPORT_PIPELINE_ID
+            and data["stage"] != STAGE_FECHADO_ID
+            and data.get("entered_novo_at")
+        ):
+            from apps.support.auto_assign_service import _parse_hubspot_timestamp
+            from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence
+
+            entered_at = _parse_hubspot_timestamp(data["entered_novo_at"])
+            if entered_at is not None:
+                opened = open_from_proven_occurrence(
+                    ticket_id=ticket_id,
+                    entered_at=entered_at,
+                    account_id=captured.source_account_id,
+                    evidence_source="crm_readback",
+                    observation_id=observation_id,
+                )
+        proven_close = None
+        if (
+            close_occurrence is None
+            and settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off"
+            and str(data["pipeline"]) == SUPPORT_PIPELINE_ID
+            and data["stage"] == STAGE_FECHADO_ID
+            and data.get("entered_closed_at")
+        ):
+            from apps.support.auto_assign_service import _parse_hubspot_timestamp
+            from apps.support.lifecycle_occurrence_service import record_proven_occurrence
+            from apps.support.models import SupportLifecycleOccurrence
+
+            closed_at = _parse_hubspot_timestamp(data["entered_closed_at"])
+            if closed_at is not None:
+                proven_close = record_proven_occurrence(
+                    account_id=captured.source_account_id,
+                    ticket_id=ticket_id,
+                    occurrence_type=SupportLifecycleOccurrence.Type.CLOSED,
+                    occurred_at=closed_at,
+                    evidence_source="crm_readback",
+                    provider_updated_at=updated,
+                    observation_id=observation_id,
+                )
         with ticket_transaction(ticket_id) as row:
             if close_occurrence is not None:
                 from apps.support.ticket_close_service import classify_close_occurrence
@@ -199,6 +242,35 @@ def reconcile_ticket(
                 and row.hubspot_owner_id != owner
             ):
                 raise CapacityObservationConflictError("Conflicting owners have the same provider revision")
+            if (
+                close_occurrence is None
+                and str(data["pipeline"]) == SUPPORT_PIPELINE_ID
+                and (data.get("archived") is True or data["stage"] == STAGE_FECHADO_ID)
+                and not data.get("entered_closed_at")
+            ):
+                if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "off":
+                    raise CloseProjectionError("Closed ticket has no materialized close time")
+                from apps.support.lifecycle_occurrence_service import record_pending_close
+
+                cycle = (
+                    SupportConversationCycle.objects.filter(
+                        hubspot_ticket_id=ticket_id,
+                        source_account_id=row.source_account_id,
+                        state__in=[SupportConversationCycle.State.QUEUED, SupportConversationCycle.State.ASSIGNED],
+                    )
+                    .order_by("-entered_stage_at")
+                    .first()
+                )
+                record_pending_close(
+                    account_id=row.source_account_id,
+                    ticket_id=ticket_id,
+                    cycle_id=cycle.pk if cycle else None,
+                    provider_updated_at=updated,
+                    observation_id=observation_id,
+                )
+                if snapshot is not None:
+                    snapshot.update(data)
+                return row
             previous_owner = row.hubspot_owner_id
             row.hubspot_owner_id = owner
             row.agent = observed_agent
@@ -215,21 +287,23 @@ def reconcile_ticket(
                 else "unassigned"
             )
             if capacity_enforced():
-                project_cycle = True
+                project_cycle = settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "enforce"
                 if row.state == "active" and data.get("entered_novo_at"):
-                    from apps.support.conversation_cycle_service import open_or_get_cycle
+                    if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "off":
+                        from apps.support.conversation_cycle_service import open_or_get_cycle
 
-                    opened = open_or_get_cycle(
-                        hubspot_ticket_id=ticket_id,
-                        entered_stage_value=data["entered_novo_at"],
-                        source_account_id=row.source_account_id,
-                    )
+                        opened = open_or_get_cycle(
+                            hubspot_ticket_id=ticket_id,
+                            entered_stage_value=data["entered_novo_at"],
+                            source_account_id=row.source_account_id,
+                        )
                     project_cycle = (
-                        opened.admission.classification in {"created", "duplicate"}
+                        opened is not None
+                        and opened.admission.classification in {"created", "duplicate"}
                         and opened.cycle is not None
                         and opened.cycle.state in {"queued", "assigned"}
                     )
-                    if opened.cycle is not None and opened.cycle.state == "queued":
+                    if opened is not None and opened.cycle is not None and opened.cycle.state == "queued":
                         NewConversation.objects.get_or_create(
                             cycle=opened.cycle,
                             defaults={
@@ -239,6 +313,12 @@ def reconcile_ticket(
                                 "automatic_assignment_eligible": False,
                             },
                         )
+                elif row.state == "active" and settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+                    project_cycle = SupportConversationCycle.objects.filter(
+                        source_account_id=row.source_account_id,
+                        hubspot_ticket_id=ticket_id,
+                        state__in=[SupportConversationCycle.State.QUEUED, SupportConversationCycle.State.ASSIGNED],
+                    ).exists()
                 if project_cycle:
                     affected.update(_project_owner(row))
                 else:
@@ -248,7 +328,7 @@ def reconcile_ticket(
                         .exclude(agent_id__isnull=True)
                         .values_list("agent_id", flat=True)
                     )
-                    logger.warning("capacity_projection_cycle_identity_unresolved", ticket_id=ticket_id)
+                    logger.warning("capacity_projection_waiting_for_proven_cycle", ticket_id=ticket_id)
             if (
                 close_occurrence is None
                 and row.state == "closed"
@@ -261,11 +341,6 @@ def reconcile_ticket(
                 from apps.support.auto_assign_service import _apply_ticket_closed
                 from apps.support.ticket_close_service import CloseClassification
 
-                if not data.get("entered_closed_at"):
-                    logger.error(
-                        "ticket_close_projection_inconsistency", ticket_id=ticket_id, reason="missing_close_time"
-                    )
-                    raise CloseProjectionError("Closed provider ticket lacks a close occurrence")
                 try:
                     close_result = _apply_ticket_closed(ticket_id, data["entered_closed_at"], provider_snapshot=data)
                 except Exception as exc:
@@ -283,6 +358,10 @@ def reconcile_ticket(
                         classification=close_result.classification.value,
                     )
                     raise CloseProjectionError("Closed occupancy has no materialized current cycle")
+                if proven_close is not None:
+                    from apps.support.lifecycle_occurrence_service import mark_processed
+
+                    mark_processed(proven_close.pk)
             for reservation in AgentCapacityReservation.objects.select_for_update().filter(occupancy=row, state="held"):
                 affected.add(reservation.agent_id)
                 # Only matching confirmation resolves an in-flight effect. A different

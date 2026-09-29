@@ -14,6 +14,7 @@ from apps.support.models import (
     AgentDailyTimeLog,
     AgentMetrics,
     AssignedConversation,
+    AssignmentLog,
     ConversationReassignment,
     NewConversation,
 )
@@ -237,6 +238,10 @@ def test_manual_assignment_and_force_reassignment() -> None:
     decrement.assert_called_once_with(first)
     increment.assert_called_once_with(second)
     assert ConversationReassignment.objects.filter(hubspot_ticket_id="ticket-1").exists()
+    assert ConversationReassignment.objects.get(hubspot_ticket_id="ticket-1").reassignment_source == (
+        "forced_reassignment:capacity"
+    )
+    assert AssignmentLog.objects.get(ticket_id="ticket-1").assignment_type == "forced_reassignment"
 
     with patch("apps.support.admin_api._ensure_agent_is_currently_eligible"):
         no_op = _call(admin_api._force_reassign_internal, "ticket-1", second)

@@ -17,8 +17,10 @@ from apps.support.models import (
     ClosedConversation,
     NewConversation,
     SupportConversationCycle,
+    SupportLifecycleOccurrence,
     SupportTicketOccupancy,
 )
+from apps.support.owner_reconciliation_service import CloseProjectionError, reconcile_ticket
 from apps.support.ticket_close_service import (
     CloseClassification,
     TicketCloseOccurrence,
@@ -32,8 +34,10 @@ T1 = T0 + timedelta(hours=1)
 
 @pytest.fixture(autouse=True)
 def close_settings(settings):
+    """Use one consistent provider and capacity configuration per close test."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.HUBSPOT_PORTAL_ID = "test-portal"
+    settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "shadow"
     settings.SUPPORT_CAPACITY_MODE = "off"
 
 
@@ -147,6 +151,12 @@ def test_live_crm_iso_close_materializes_current_cycle_and_occupancy(settings, d
     assert ClosedConversation.objects.get(cycle=target).closed_at == entered_closed
     assert not AssignedConversation.objects.filter(cycle=target).exists()
     assert occupancy.state == "closed"
+    assert (
+        SupportLifecycleOccurrence.objects.filter(
+            hubspot_ticket_id="close-ticket", evidence_status="proven", processing_status="processed"
+        ).count()
+        == 1
+    )
 
 
 @pytest.mark.parametrize("value", [None, "", "bad", "123", "999999999999999999", "2026-09-26T16:08:57.952Z"])
@@ -435,7 +445,7 @@ def test_reopen_during_provider_read_cannot_release_new_occupancy(settings, mode
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
 def test_provider_close_without_occurrence_does_not_commit_partial_projection(settings, mode):
     """A capacity observation cannot close occupancy without close evidence."""
-    from apps.support.owner_reconciliation_service import CapacityObservationConflictError, reconcile_ticket
+    from apps.support.owner_reconciliation_service import reconcile_ticket
 
     settings.SUPPORT_CAPACITY_MODE = mode
     target = cycle()
@@ -450,10 +460,7 @@ def test_provider_close_without_occurrence_does_not_commit_partial_projection(se
     )
     observed = snapshot(settings)
     observed["entered_closed_at"] = None
-    with (
-        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
-        pytest.raises(CapacityObservationConflictError),
-    ):
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
         provider.return_value.get_ticket_details.return_value = observed
         reconcile_ticket("close-ticket", source="portfolio")
     occupancy.refresh_from_db()
@@ -461,6 +468,35 @@ def test_provider_close_without_occurrence_does_not_commit_partial_projection(se
     assert occupancy.state == "active"
     assert target.state == "assigned"
     assert not ClosedConversation.objects.filter(cycle=target).exists()
+    assert (
+        SupportLifecycleOccurrence.objects.filter(
+            hubspot_ticket_id="close-ticket", evidence_status="provider_materialization_pending"
+        ).count()
+        == 1
+    )
+
+
+def test_provider_close_without_time_in_off_mode_raises_for_retry(settings):
+    """Default mode must signal a missing close time so callers can retry."""
+    settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "off"
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    target = cycle()
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    observed = snapshot(settings)
+    observed["entered_closed_at"] = None
+    with pytest.raises(CloseProjectionError, match="no materialized close time"):
+        reconcile_ticket("close-ticket", provider_data=observed)
+    occupancy.refresh_from_db()
+    assert occupancy.state == "active"
+    assert not SupportLifecycleOccurrence.objects.filter(hubspot_ticket_id="close-ticket").exists()
 
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
@@ -489,6 +525,12 @@ def test_capacity_observation_materializes_proven_close_once(settings, mode):
     agent.refresh_from_db()
     occupancy = SupportTicketOccupancy.objects.get(hubspot_ticket_id="close-ticket")
     assert occupancy.state == "closed"
+    assert (
+        SupportLifecycleOccurrence.objects.filter(
+            hubspot_ticket_id="close-ticket", evidence_status="proven", processing_status="processed"
+        ).count()
+        == 1
+    )
     assert target.state == "closed"
     assert ClosedConversation.objects.filter(cycle=target).count() == 1
     assert not AssignedConversation.objects.filter(cycle=target).exists()
@@ -597,8 +639,8 @@ def test_rejected_close_with_closed_occupancy_emits_inconsistency(settings, capl
     assert not ClosedConversation.objects.filter(cycle=target).exists()
 
 
-def test_shadow_owner_observation_retries_unmaterialized_close(settings):
-    """Shadow mode cannot swallow a close projection failure in owner processing."""
+def test_shadow_owner_observation_persists_unmaterialized_close(settings):
+    """Shadow mode preserves the active projection while scheduling a readback."""
     from apps.support.tasks import task_handle_owner_change
 
     settings.SUPPORT_CAPACITY_MODE = "shadow"
@@ -614,16 +656,15 @@ def test_shadow_owner_observation_retries_unmaterialized_close(settings):
     )
     observed = snapshot(settings)
     observed["entered_closed_at"] = None
-    with (
-        patch("apps.integrations.hubspot.client.get_hubspot_client") as provider,
-        patch.object(task_handle_owner_change, "retry", side_effect=RuntimeError("retried")),
-        pytest.raises(RuntimeError, match="retried"),
-    ):
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
         provider.return_value.get_ticket_details.return_value = observed
         task_handle_owner_change.run("close-ticket", None, {})
     occupancy.refresh_from_db()
     assert occupancy.state == "active"
     assert AssignedConversation.objects.filter(cycle=target).exists()
+    assert SupportLifecycleOccurrence.objects.filter(
+        hubspot_ticket_id="close-ticket", evidence_status="provider_materialization_pending"
+    ).exists()
 
 
 def test_webhook_processed_only_means_close_was_dispatched(settings):

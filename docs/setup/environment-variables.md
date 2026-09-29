@@ -18,6 +18,11 @@ nomes e defaults é `core/settings/`.
 - `HUBSPOT_ACCESS_TOKEN`, `HUBSPOT_APP_SECRET`, `HUBSPOT_PORTAL_ID`
 - `HUBSPOT_SUPPORT_PIPELINE_ID`, `HUBSPOT_SUPPORT_NEW_STAGE_ID`
 - `HUBSPOT_SUPPORT_CLOSED_STAGE_ID`, `HUBSPOT_N1_TEAM_ID`
+- `HUBSPOT_PROVIDER_CONTRACT_MODE` (default `off`; opções: `off`, `shadow`, `enforce`).
+- `HUBSPOT_TICKETS_WRITE_VERIFIED` (default `false`; ativar somente após comprovar PATCH em sandbox).
+- `HUBSPOT_ROSTER_MAX_AGE_SECONDS` (default `90000`).
+- `SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS` (default `5`).
+- `SUPPORT_LIFECYCLE_RECONCILE_MAX_AGE_SECONDS` (default `3600`).
 - IDs dos pipelines operacionais default e N2 declarados em settings
 
 ## Integrações preservadas

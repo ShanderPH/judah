@@ -21,6 +21,7 @@ from apps.integrations.hubspot.exceptions import (
     HubSpotAPIError,
     HubSpotResourceNotFoundError,
 )
+from apps.support.assignment_provenance import classify_owner_effect
 from apps.support.capacity_service import (
     assignment_transaction,
     capacity_enforced,
@@ -397,17 +398,13 @@ def reserve_next_assignment(
                     "updated_at",
                 ]
             )
+            agent_update_fields = ["last_assignment_at", "updated_at"]
             if not capacity_enforced():
                 locked_agent.current_simultaneous_chats += 1
+                agent_update_fields.append("current_simultaneous_chats")
             locked_agent.last_assignment_at = database_now
             locked_agent.updated_at = database_now
-            locked_agent.save(
-                update_fields=[
-                    "current_simultaneous_chats",
-                    "last_assignment_at",
-                    "updated_at",
-                ]
-            )
+            locked_agent.save(update_fields=agent_update_fields)
             attempt = AssignmentAttempt.objects.create(
                 idempotency_key=_assignment_idempotency_key(
                     queue_row,
@@ -517,17 +514,13 @@ def reserve_manual_assignment(
                 "updated_at",
             ]
         )
+        agent_update_fields = ["last_assignment_at", "updated_at"]
         if not capacity_enforced():
             agent.current_simultaneous_chats += 1
+            agent_update_fields.append("current_simultaneous_chats")
         agent.last_assignment_at = now
         agent.updated_at = now
-        agent.save(
-            update_fields=[
-                "current_simultaneous_chats",
-                "last_assignment_at",
-                "updated_at",
-            ]
-        )
+        agent.save(update_fields=agent_update_fields)
         attempt = AssignmentAttempt.objects.create(
             idempotency_key=_assignment_idempotency_key(
                 queue_row,
@@ -627,6 +620,16 @@ def _execute_assignment_attempt(attempt_id: uuid.UUID) -> str:
         return reconcile_ambiguous_attempt(attempt.pk)
     if attempt.state != AssignmentAttempt.State.RESERVED:
         return attempt.state
+
+    from apps.support.provider_readiness import provider_assignment_allowed
+
+    if not provider_assignment_allowed():
+        compensate_assignment_attempt(
+            attempt.pk,
+            retryable=True,
+            error_code="hubspot_provider_contract_unavailable",
+        )
+        return "retryable_external_error"
 
     client = get_hubspot_client()
     provider_started_at = time.perf_counter()
@@ -776,7 +779,7 @@ def finalize_assignment_attempt(attempt_id: uuid.UUID) -> AssignmentAttempt:
                 "agent": attempt.selected_agent,
                 "agent_name": attempt.selected_agent.name,
                 "hubspot_owner_id": attempt.desired_hubspot_owner_id,
-                "assignment_type": attempt.assignment_type,
+                "assignment_type": str(classify_owner_effect(attempt_type=attempt.assignment_type)),
                 "assigned_by": attempt.requested_by or None,
                 "pipeline_id": queue_row.pipeline_id if queue_row else None,
                 "entered_queue_at": queue_row.entered_queue_at if queue_row else None,
@@ -1070,17 +1073,13 @@ def retry_assignment_attempt(attempt_id: uuid.UUID) -> str:
             or (capacity_enforced() and not capacity_ready(agent))
         ):
             return locked_attempt.state
+        agent_update_fields = ["last_assignment_at", "updated_at"]
         if not capacity_enforced():
             agent.current_simultaneous_chats += 1
+            agent_update_fields.append("current_simultaneous_chats")
         agent.last_assignment_at = database_now
         agent.updated_at = database_now
-        agent.save(
-            update_fields=[
-                "current_simultaneous_chats",
-                "last_assignment_at",
-                "updated_at",
-            ]
-        )
+        agent.save(update_fields=agent_update_fields)
         locked_attempt.state = AssignmentAttempt.State.RESERVED
         locked_attempt.reserved_at = database_now
         locked_attempt.compensation_started_at = None

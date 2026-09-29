@@ -17,6 +17,7 @@ from django.utils import timezone
 from apps.support.models import (
     Agent,
     AssignedConversation,
+    AssignmentLog,
     ClosedConversation,
     ConversationReassignment,
     NewConversation,
@@ -67,7 +68,11 @@ class TestHandleTicketClosed:
 
         from apps.support.auto_assign_service import handle_ticket_closed
 
-        handle_ticket_closed("T001", owner_id=str(closing_agent.hubspot_owner_id))
+        handle_ticket_closed(
+            "T001",
+            closed_at_ms=str(int(timezone.now().timestamp() * 1000)),
+            owner_id=str(closing_agent.hubspot_owner_id),
+        )
 
         assigned_agent.refresh_from_db()
         closing_agent.refresh_from_db()
@@ -98,13 +103,14 @@ class TestHandleTicketClosed:
         from apps.support.auto_assign_service import handle_ticket_closed
 
         # First call should process normally
-        handle_ticket_closed("T003")
+        proven_close_time = str(int(timezone.now().timestamp() * 1000))
+        handle_ticket_closed("T003", proven_close_time)
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 2  # decremented once
 
         # Second call — ticket is gone (no AssignedConversation), dedup lock already
         # cleared. Even without the lock, the DoesNotExist path should not decrement.
-        handle_ticket_closed("T003")
+        handle_ticket_closed("T003", proven_close_time)
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 2  # unchanged
 
@@ -121,7 +127,7 @@ class TestHandleTicketClosed:
 
         from apps.support.auto_assign_service import handle_ticket_closed
 
-        handle_ticket_closed("T004")
+        handle_ticket_closed("T004", str(int(timezone.now().timestamp() * 1000)))
 
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 1
@@ -139,7 +145,7 @@ class TestHandleTicketClosed:
 
         from apps.support.auto_assign_service import handle_ticket_closed
 
-        handle_ticket_closed("T005")
+        handle_ticket_closed("T005", str(int(timezone.now().timestamp() * 1000)))
 
         assert not NewConversation.objects.filter(hubspot_ticket_id="T005").exists()
         closed = ClosedConversation.objects.filter(hubspot_ticket_id="T005").first()
@@ -149,7 +155,7 @@ class TestHandleTicketClosed:
         """Ticket closed before ever being assigned: create a minimal ClosedConversation."""
         from apps.support.auto_assign_service import handle_ticket_closed
 
-        handle_ticket_closed("T_NEVER_ASSIGNED", owner_id="100")
+        handle_ticket_closed("T_NEVER_ASSIGNED", str(int(timezone.now().timestamp() * 1000)), owner_id="100")
 
         assert ClosedConversation.objects.filter(hubspot_ticket_id="T_NEVER_ASSIGNED").exists()
 
@@ -242,7 +248,7 @@ class TestHandleOwnerChange:
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 0
 
-    def test_initial_manual_owner_consumes_queued_projection_idempotently(self):
+    def test_initial_external_owner_consumes_queued_projection_idempotently(self):
         agent = _make_agent("ManualAgent", owner_id=201, chats=0)
         queue_row = NewConversation.objects.create(
             hubspot_ticket_id="T013-QUEUED",
@@ -257,6 +263,7 @@ class TestHandleOwnerChange:
 
         assert not NewConversation.objects.filter(pk=queue_row_id).exists()
         assert AssignedConversation.objects.filter(hubspot_ticket_id="T013-QUEUED").count() == 1
+        assert AssignmentLog.objects.get(ticket_id="T013-QUEUED").assignment_type == "unknown_external"
         agent.refresh_from_db()
         assert agent.current_simultaneous_chats == 1
 

@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 from django.conf import settings
+from django.core.cache import cache
+from django.db import transaction
 from django.utils import timezone
 
 from apps.integrations.hubspot.client import SUPPORT_PIPELINE_ID, get_hubspot_client
@@ -262,7 +264,7 @@ def handle_ticket_closed(
 ) -> TicketCloseResult:
     """Reconcile one occurrence; transient provider errors reach the task retry."""
     from apps.support.availability_runtime import require_routing_writer_authority
-    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult, reconcile_close_occurrence
+    from apps.support.ticket_close_service import CloseClassification, TicketCloseResult
 
     require_routing_writer_authority("handle_ticket_closed")
     occurrence = _close_occurrence(hubspot_ticket_id, closed_at_ms, owner_id, source_event_id)
@@ -274,37 +276,32 @@ def handle_ticket_closed(
         source_event_id=source_event_id,
         effective_at=occurrence.effective_at.isoformat(),
     )
-    return reconcile_close_occurrence(occurrence, allow_legacy=not settings.CONVERSATION_CYCLES_ENFORCED)
+    from apps.support.lifecycle_occurrence_service import project_close_occurrence
+
+    return project_close_occurrence(occurrence)
 
 
 def _close_occurrence(
     ticket_id: str, closed_at_ms: str | int | None, owner_id: str | None, source_event_id: str = ""
 ) -> TicketCloseOccurrence | None:
-    """Parse a closed-stage occurrence, retaining legacy timestamp fallback."""
+    """Parse only a provider-proven closed-stage timestamp."""
     from apps.support.conversation_cycle_service import InvalidStageTimestampError, parse_stage_entry_timestamp
     from apps.support.ticket_close_service import TicketCloseOccurrence
 
     try:
         effective_at = parse_stage_entry_timestamp(closed_at_ms)
     except InvalidStageTimestampError:
-        from apps.support.models import SupportConversationCycle
-
-        if (
-            settings.CONVERSATION_CYCLES_ENFORCED
-            or SupportConversationCycle.objects.filter(hubspot_ticket_id=ticket_id).exists()
-        ):
-            logger.warning(
-                "ticket_close_occurrence",
-                ticket_id=ticket_id,
-                source_event_id=source_event_id,
-                cycle_id=None,
-                classification="identity_unavailable",
-                effective_at=None,
-                domain_applied=False,
-                retryable=False,
-            )
-            return None
-        effective_at = timezone.now()
+        logger.warning(
+            "ticket_close_occurrence",
+            ticket_id=ticket_id,
+            source_event_id=source_event_id,
+            cycle_id=None,
+            classification="identity_unavailable",
+            effective_at=None,
+            domain_applied=False,
+            retryable=False,
+        )
+        return None
     return TicketCloseOccurrence(ticket_id, effective_at, _safe_parse_owner_id(owner_id), source_event_id)
 
 
@@ -486,10 +483,17 @@ def sync_novo_stage_tickets() -> dict:
             open_or_get_cycle,
         )
 
-        cycle_result = open_or_get_cycle(
-            hubspot_ticket_id=ticket_id,
-            entered_stage_value=entered_at,
-        )
+        if settings.HUBSPOT_PORTAL_ID and settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off":
+            from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence
+
+            cycle_result = open_from_proven_occurrence(
+                ticket_id=ticket_id,
+                entered_at=entered_at,
+                account_id=settings.HUBSPOT_PORTAL_ID,
+                evidence_source="crm_readback",
+            )
+        else:
+            cycle_result = open_or_get_cycle(hubspot_ticket_id=ticket_id, entered_stage_value=entered_at)
         cycle = (
             cycle_result.cycle
             if cycle_result.admission.classification in (CycleClassification.CREATED, CycleClassification.DUPLICATE)
@@ -551,17 +555,7 @@ def sync_novo_stage_tickets() -> dict:
 
 
 def sync_hubspot_team_to_agents(team_id: str) -> int:
-    """Sync HubSpot team members into the local agents table.
-
-    For each team member not yet in the agents table, creates an Agent record.
-    Existing agents are not modified (preserves manual configurations).
-
-    Args:
-        team_id: The HubSpot team ID to sync.
-
-    Returns:
-        Number of new agents created.
-    """
+    """Sync only a complete provider roster into local agent identities."""
     from apps.support.availability_runtime import (
         is_authoritative_availability_runtime,
         log_runtime_rejection,
@@ -571,40 +565,51 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
         log_runtime_rejection("sync_hubspot_team_to_agents")
         return 0
 
-    try:
-        client = get_hubspot_client()
-        members = client.get_team_members(team_id)
-    except ExternalServiceError:
-        logger.error("auto_assign_team_sync_failed", team_id=team_id)
-        return 0
+    from apps.integrations.hubspot.exceptions import HubSpotAPIError
+
+    roster = get_hubspot_client().get_team_roster(team_id)
+    if not roster.complete:
+        raise HubSpotAPIError("HubSpot team roster is incomplete.", retryable=True)
 
     created_count = 0
-    for member in members:
-        owner_id = member.get("id")
-        email = member.get("email", "")
-        first = member.get("first_name", "")
-        last = member.get("last_name", "")
-        name = f"{first} {last}".strip() or email
+    current_user_ids = {member.user_id for member in roster.members}
+    with transaction.atomic():
+        Agent.objects.filter(team=f"team_{team_id}", hubspot_user_id__isnull=False).exclude(
+            hubspot_user_id__in=current_user_ids
+        ).update(is_active=False, auto_assign_enabled=False)
+        for member in roster.members:
+            if member.state != "active":
+                Agent.objects.filter(hubspot_user_id=member.user_id).update(is_active=False, auto_assign_enabled=False)
+                continue
+            if member.owner_id is None or not member.email:
+                continue
+            name = f"{member.first_name} {member.last_name}".strip() or member.email
+            agent, created = Agent.objects.get_or_create(
+                hubspot_owner_id=member.owner_id,
+                defaults={
+                    "name": name,
+                    "agent_email": member.email,
+                    "hubspot_user_id": member.user_id,
+                    "status_enum": Agent.StatusEnum.OFFLINE,
+                    "current_simultaneous_chats": 0,
+                    "max_simultaneous_chats": 5,
+                    "auto_assign_enabled": True,
+                    "is_active": True,
+                    "team": f"team_{team_id}",
+                },
+            )
+            if created:
+                created_count += 1
+            else:
+                if agent.hubspot_user_id not in {None, member.user_id}:
+                    raise HubSpotAPIError("HubSpot user-to-owner mapping changed.", retryable=False)
+                agent.hubspot_user_id = member.user_id
+                agent.is_active = True
+                agent.team = f"team_{team_id}"
+                agent.name = name
+                agent.agent_email = member.email
+                agent.save(update_fields=["hubspot_user_id", "is_active", "team", "name", "agent_email"])
 
-        if not owner_id or not email:
-            continue
-
-        _, created = Agent.objects.get_or_create(
-            hubspot_owner_id=int(owner_id),
-            defaults={
-                "name": name,
-                "agent_email": email,
-                "status_enum": Agent.StatusEnum.OFFLINE,
-                "current_simultaneous_chats": 0,
-                "max_simultaneous_chats": 5,
-                "auto_assign_enabled": True,
-                "is_active": True,
-                "team": f"team_{team_id}",
-            },
-        )
-        if created:
-            created_count += 1
-            logger.info("auto_assign_agent_synced", email=email, hubspot_owner_id=owner_id)
-
-    logger.info("auto_assign_team_sync_complete", team_id=team_id, created=created_count)
+    cache.set(f"hubspot_roster_complete_at:{team_id}", timezone.now().isoformat(), timeout=86400 * 2)
+    logger.info("auto_assign_team_sync_complete", team_id=team_id, created=created_count, pages=roster.pages_read)
     return created_count

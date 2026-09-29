@@ -413,6 +413,73 @@ class SupportConversationCycle(models.Model):
         return f"Cycle {self.hubspot_ticket_id} entered={self.entered_stage_at} state={self.state}"
 
 
+class SupportLifecycleOccurrence(models.Model):
+    """Provider evidence for one support lifecycle event or pending materialization."""
+
+    class Type(models.TextChoices):
+        ENTERED_SUPPORT_QUEUE = "entered_support_queue", "Entered Support Queue"
+        CLOSED = "closed", "Closed"
+        OWNER_CHANGED = "owner_changed", "Owner Changed"
+
+    class EvidenceStatus(models.TextChoices):
+        PROVEN = "proven", "Proven"
+        PROVIDER_MATERIALIZATION_PENDING = "provider_materialization_pending", "Provider Materialization Pending"
+        AMBIGUOUS = "ambiguous", "Ambiguous"
+        REJECTED = "rejected", "Rejected"
+
+    class ProcessingStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSED = "processed", "Processed"
+        REPAIR_REQUIRED = "repair_required", "Repair Required"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_system = models.CharField(max_length=32, default="hubspot")
+    source_account_id = models.CharField(max_length=64)
+    hubspot_ticket_id = models.TextField()
+    occurrence_type = models.CharField(max_length=32, choices=Type.choices)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    evidence_status = models.CharField(max_length=40, choices=EvidenceStatus.choices)
+    evidence_source = models.CharField(max_length=64)
+    evidence_key = models.TextField(unique=True)
+    source_event_id = models.TextField(blank=True, default="")
+    provider_updated_at = models.DateTimeField(null=True, blank=True)
+    observation_id = models.CharField(max_length=128, blank=True, default="")
+    processing_status = models.CharField(
+        max_length=24, choices=ProcessingStatus.choices, default=ProcessingStatus.PENDING
+    )
+    retry_count = models.PositiveIntegerField(default=0)
+    next_reconcile_at = models.DateTimeField(null=True, blank=True)
+    last_error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "support_lifecycle_occurrences"
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=~models.Q(evidence_status="proven") | models.Q(occurred_at__isnull=False),
+                name="ck_occ_proven_has_time",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(evidence_status="provider_materialization_pending")
+                | ~models.Q(processing_status="processed"),
+                name="ck_occ_pending_unprocessed",
+            ),
+            models.CheckConstraint(condition=models.Q(retry_count__gte=0), name="ck_occ_retry_nonnegative"),
+            models.UniqueConstraint(
+                fields=["source_system", "source_account_id", "hubspot_ticket_id", "occurrence_type", "occurred_at"],
+                condition=models.Q(occurred_at__isnull=False),
+                name="uq_occ_temporal_identity",
+            ),
+        ]
+        indexes = [  # noqa: RUF012
+            models.Index(
+                fields=["hubspot_ticket_id", "occurrence_type", "occurred_at"], name="idx_occ_ticket_type_time"
+            ),
+            models.Index(fields=["processing_status", "next_reconcile_at"], name="idx_occ_status_reconcile"),
+        ]
+
+
 class NewConversation(models.Model):
     """Ticket that entered the NOVO stage and is awaiting automatic assignment.
 
@@ -557,7 +624,7 @@ class AssignedConversation(models.Model):
     agent_name = models.TextField()
     pipeline_id = models.TextField(default=default_support_pipeline_id)
     entered_queue_at = models.DateTimeField(null=True, blank=True)
-    assigned_at = models.DateTimeField(db_index=True)
+    assigned_at = models.DateTimeField(null=True, blank=True, db_index=True)
     queue_wait_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     closed_by_owner_id = models.BigIntegerField(null=True, blank=True)
@@ -884,7 +951,7 @@ class ConversationReassignment(models.Model):
     )
     to_hubspot_owner_id = models.BigIntegerField(null=True, blank=True)
     to_agent_name = models.TextField(null=True, blank=True)
-    reassigned_at = models.DateTimeField(db_index=True)
+    reassigned_at = models.DateTimeField(null=True, blank=True, db_index=True)
     time_with_previous_agent_seconds = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     reassignment_source = models.TextField(default="hubspot_webhook")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1112,6 +1179,8 @@ class ConversationInstanceAttendant(models.Model):
         MANUAL_ASSIGNMENT = "manual_assignment", "Manual assignment"
         OWNER_CHANGE = "owner_change", "Owner change"
         FORCED_REASSIGNMENT = "forced_reassignment", "Forced reassignment"
+        EXTERNAL_INTEGRATION = "external_integration", "External integration"
+        UNKNOWN_EXTERNAL = "unknown_external", "Unknown external origin"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     instance = models.ForeignKey(
