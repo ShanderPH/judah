@@ -1,5 +1,17 @@
 # Handoff para VERIFY
 
+## Gate operacional de scopes e preflight — 2026-09-29
+
+- Manifesto do app agora explicita `crm.objects.tickets.read`, `crm.objects.tickets.write` e `crm.objects.owners.read`; preserva `tickets` e os scopes de Conversations já publicados.
+- Comando `check_hubspot_provider_contract` roda em `off`, só faz GET, produz JSON sem PII/token e falha quando portal, capability obrigatória ou roster não passa.
+- Build HubSpot 21 publicado no portal `47354717` e app estático reinstalado; readback de app/webhooks sem drift obrigatório. Webhooks publicados foram preservados byte a byte.
+- Preflight com token real: quatro leituras obrigatórias `available`, time `54655589`, roster completo com 7 membros ativos e zero owners ausentes; `tickets_write=unverified`.
+- `READY_FOR_SHADOW=true` como gate técnico para revisão. Nenhuma flag foi promovida, nenhum PATCH/POST/DELETE CRM foi feito, nenhum backend foi implantado.
+
+**Arquivos deste gate:** `hubspot-app/src/app/app-hsmeta.json`, `apps/integrations/hubspot/team_roster.py`, `apps/support/management/commands/check_hubspot_provider_contract.py`, `apps/support/tests/test_hubspot_provider_preflight.py`, `ai-system/requests/refactor/hubspot-provider-contract-2026-09/{00-context/hubspot-capability-matrix.md,03-verification/*,STATUS.md,HANDOFF.md}`.
+
+**Primeiro VERIFY:** repetir o preflight com credential Railway em `mode=off`, conferir `portal.matches_expected`, `roster.complete`, `owners_read` e exit code; comparar downloads oficiais do build publicado com manifests. Não executar suíte pytest contra banco não local. Mutation de tickets somente em sandbox antes de ENFORCE.
+
 ## Implementado
 
 - Registry de capabilities, transporte HTTP tipado, preflight e adapter versionado de Tickets selecionado em `enforce`.
@@ -36,7 +48,7 @@ DJANGO_ENV=test DATABASE_URL="$LOCAL_TEST_DATABASE_URL" JUDAH_CAPACITY_REDIS_URL
 
 ## Riscos e primeiros pontos de VERIFY
 
-- Contratos reais Tickets 2026-09, Teams/Users/Owners e webhook publicado sem validação de sandbox/readback remoto.
+- Leituras reais Tickets 2026-09, Teams/Users/Owners e webhook publicado foram verificadas com token de produção e download do build 21. PATCH de Tickets segue sem validação sandbox.
 - ARCH-03 ainda aberto. Mensagens históricas sem prova de ator não foram reprocessadas; owner anterior fica fora da métrica. Validar `A-<hubspot_user_id>` e o vínculo thread/ticket no sandbox. Medir custo da agregação histórica em shadow.
 - Reverse de `0035` só é seguro antes de persistir horários nulos; não usar como rollback de produção.
 - Conferir permutações de reopen/owner/close e source do attendant; comparar shadow antes de qualquer `enforce`.
