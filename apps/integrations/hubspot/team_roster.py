@@ -71,13 +71,15 @@ class TeamRosterProvider:
                     )
                 user_id = str(item["userId"])
                 memberships[user_id] = str(item.get("type") or "")
-            paging = body.get("paging") or {}
+            paging = body.get("paging", {})
             if not isinstance(paging, dict):
                 raise HubSpotAPIError("Invalid HubSpot paging data.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
-            next_page = paging.get("next") or {}
+            next_page = paging.get("next", {})
             if not isinstance(next_page, dict):
                 raise HubSpotAPIError("Invalid HubSpot paging data.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
-            new_cursor = str(next_page.get("after")) if next_page.get("after") else None
+            new_cursor = next_page.get("after")
+            if "next" in paging and (not isinstance(new_cursor, str) or not new_cursor.strip()):
+                raise HubSpotAPIError("Invalid team roster cursor.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
             if new_cursor is None:
                 next_cursor = None
                 break
@@ -115,13 +117,18 @@ class TeamRosterProvider:
                 if owner_id is None or not str(owner_id).isdigit():
                     raise HubSpotAPIError("Invalid CRM owner ID.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
                 owner_ids[str(user_id)] = int(owner_id)
-            paging = body.get("paging") or {}
-            if not isinstance(paging, dict) or not isinstance(paging.get("next") or {}, dict):
+            paging = body.get("paging", {})
+            if not isinstance(paging, dict):
                 raise HubSpotAPIError("Invalid owner paging.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
-            next_cursor = (paging.get("next") or {}).get("after")
-            if not next_cursor:
+            next_page = paging.get("next", {})
+            if not isinstance(next_page, dict):
+                raise HubSpotAPIError("Invalid owner paging.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
+            next_cursor = next_page.get("after")
+            if "next" in paging and (not isinstance(next_cursor, str) or not next_cursor.strip()):
+                raise HubSpotAPIError("Invalid owner cursor.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
+            if next_cursor is None:
                 return owner_ids
-            cursor = str(next_cursor)
+            cursor = next_cursor
             if cursor in seen_cursors:
                 raise HubSpotAPIError("Repeated owner cursor.", error_code=HubSpotFailureKind.MALFORMED_RESPONSE)
             seen_cursors.add(cursor)

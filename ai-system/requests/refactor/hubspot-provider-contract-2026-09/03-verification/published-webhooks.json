@@ -1,0 +1,55 @@
+{
+  "uid": "judah_webhooks",
+  "type": "webhooks",
+  "config": {
+    "settings": {
+      "targetUrl": "https://judah-production.up.railway.app/api/v1/webhooks/hubspot/",
+      "maxConcurrentRequests": 10
+    },
+    "subscriptions": {
+      "legacyCrmObjects": [
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939275049",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939271304",
+          "active": false
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939275052",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_v2_date_entered_939271307",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_pipeline_stage",
+          "active": false
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hubspot_owner_id",
+          "active": true
+        },
+        {
+          "subscriptionType": "ticket.propertyChange",
+          "propertyName": "hs_last_message_from_visitor",
+          "active": false
+        }
+      ],
+      "hubEvents": [
+        {
+          "subscriptionType": "conversation.newMessage",
+          "active": true
+        }
+      ]
+    }
+  }
+}

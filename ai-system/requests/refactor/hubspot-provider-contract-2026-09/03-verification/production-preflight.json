@@ -1,0 +1,30 @@
+{
+  "capabilities": {
+    "conversations_read": "not_found",
+    "journal_read": "unverified",
+    "owners_read": "available",
+    "teams_membership": "available",
+    "tickets_read": "available",
+    "tickets_write": "unverified",
+    "users_read": "available"
+  },
+  "mode": "off",
+  "portal": {
+    "matches_expected": true,
+    "outcome": "available",
+    "portal_id": 47354717
+  },
+  "ready": true,
+  "roster": {
+    "active_count": 7,
+    "complete": true,
+    "member_count": 7,
+    "membership_type_counts": {
+      "DEFAULT": 7
+    },
+    "outcome": "available",
+    "owner_missing_count": 0,
+    "pages_read": 1
+  },
+  "team_id": "54655589"
+}
