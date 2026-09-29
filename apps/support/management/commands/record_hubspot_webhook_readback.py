@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from django.conf import settings
 from django.core.cache import cache
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.utils import timezone
 
 from apps.integrations.hubspot.webhook_config import compare_app_config, compare_webhook_config
@@ -19,21 +20,34 @@ class Command(BaseCommand):
 
     help = "Compare published HubSpot app/webhook readback exports with versioned manifests"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
+        """Add paths to published HubSpot readback exports.
+
+        Args:
+            parser: Django command argument parser.
+        """
         parser.add_argument("--published-webhooks", type=Path, required=True)
         parser.add_argument("--published-app", type=Path, required=True)
 
-    def handle(self, *args, **options) -> None:
+    def handle(self, *args: object, **options: object) -> None:
+        """Compare published exports and cache readiness.
+
+        Args:
+            *args: Positional command arguments.
+            **options: Parsed command options.
+        """
         desired_webhooks = settings.BASE_DIR / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json"
         desired_app = settings.BASE_DIR / "hubspot-app/src/app/app-hsmeta.json"
+        published_webhooks = cast(Path, options["published_webhooks"])
+        published_app = cast(Path, options["published_app"])
         try:
             webhook_result = compare_webhook_config(
                 json.loads(desired_webhooks.read_text(encoding="utf-8")),
-                json.loads(options["published_webhooks"].read_text(encoding="utf-8")),
+                json.loads(published_webhooks.read_text(encoding="utf-8")),
             )
             app_result = compare_app_config(
                 json.loads(desired_app.read_text(encoding="utf-8")),
-                json.loads(options["published_app"].read_text(encoding="utf-8")),
+                json.loads(published_app.read_text(encoding="utf-8")),
             )
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise CommandError("Invalid HubSpot readback export") from exc

@@ -69,6 +69,7 @@ def attributed_agent_cycles(cycle_ids: set[UUID] | None = None) -> set[tuple[UUI
 
     attributed = {(cycle_id, owner_id) for cycle_id, owner_id in owner_by_cycle.items()}
     transfer_starts: dict[tuple[UUID, int], datetime] = {}
+    message_windows: dict[tuple[str, str, str], list[tuple[datetime, datetime, UUID, int]]] = defaultdict(list)
     for transfer in transfers:
         from_owner = transfer.from_hubspot_owner_id
         to_owner = transfer.to_hubspot_owner_id
@@ -93,20 +94,27 @@ def attributed_agent_cycles(cycle_ids: set[UUID] | None = None) -> set[tuple[UUI
         ended_at = min(transfer_at, transfer.cycle.closed_at or transfer_at)
         if start >= ended_at:
             continue
+        actor_id = f"A-{next(iter(user_ids))}"
+        message_windows[(transfer.cycle.source_account_id, transfer.hubspot_ticket_id, actor_id)].append(
+            (start, ended_at, cycle_id, from_owner)
+        )
+
+    windows = list(message_windows.items())
+    for offset in range(0, len(windows), 100):
+        batch = dict(windows[offset : offset + 100])
+        starts = [start for intervals in batch.values() for start, _, _, _ in intervals]
+        ends = [end for intervals in batch.values() for _, end, _, _ in intervals]
         messages = WebhookEvent.objects.filter(
             source="hubspot",
-            portal_id=transfer.cycle.source_account_id,
-            hubspot_ticket_id=transfer.hubspot_ticket_id,
+            portal_id__in={key[0] for key in batch},
+            hubspot_ticket_id__in={key[1] for key in batch},
             ignored_reason="outgoing_message",
-            occurred_at__gte=start,
-            occurred_at__lt=ended_at,
-        ).values_list("payload", flat=True)
-        actor_id = f"A-{next(iter(user_ids))}"
-        if any(
-            isinstance(payload, dict)
-            and isinstance(payload.get("_agent_message_evidence"), dict)
-            and payload["_agent_message_evidence"].get("actor_id") == actor_id
-            for payload in messages
-        ):
-            attributed.add(key)
+            occurred_at__gte=min(starts),
+            occurred_at__lt=max(ends),
+            payload___agent_message_evidence__actor_id__in={key[2] for key in batch},
+        ).values_list("portal_id", "hubspot_ticket_id", "occurred_at", "payload___agent_message_evidence__actor_id")
+        for portal_id, ticket_id, occurred_at, actor_id in messages.iterator(chunk_size=1000):
+            for start, end, cycle_id, owner_id in batch.get((portal_id, ticket_id, actor_id), ()):
+                if start <= occurred_at < end:
+                    attributed.add((cycle_id, owner_id))
     return attributed

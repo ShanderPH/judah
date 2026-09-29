@@ -19,6 +19,8 @@ from apps.integrations.hubspot.platform_contract import (
     check_hubspot_capabilities,
 )
 
+# Cache snapshots and provider probes contain JSON values without a shared schema.
+
 CAPABILITY_CACHE_KEY = "hubspot_capabilities_snapshot"
 WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
 
@@ -123,6 +125,7 @@ def provider_contract_checks(now: datetime | None = None) -> dict[str, Any]:
             for row in SupportLifecycleOccurrence.objects.values("evidence_status").annotate(count=Count("id"))
         }
         pending = SupportLifecycleOccurrence.objects.filter(
+            occurrence_type=SupportLifecycleOccurrence.Type.CLOSED,
             evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVIDER_MATERIALIZATION_PENDING,
             processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
         )

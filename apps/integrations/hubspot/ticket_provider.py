@@ -11,6 +11,7 @@ from apps.integrations.hubspot.platform_contract import HubSpotTransport
 
 
 def _stage_time(value: object) -> datetime | None:
+    """Parse an aware HubSpot stage timestamp into UTC."""
     if value is None or value == "":
         return None
     if not isinstance(value, str):
@@ -34,6 +35,7 @@ class HubSpotTicketProvider:
 
     @staticmethod
     def _path(ticket_id: str) -> str:
+        """Build a ticket path after validating its numeric identifier."""
         if not ticket_id.isdigit():
             raise ValueError("HubSpot ticket ID must be numeric")
         return f"/crm/objects/2026-09/tickets/{quote(ticket_id, safe='')}"

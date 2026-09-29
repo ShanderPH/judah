@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Manifest and readback are untyped JSON documents at this boundary.
+
 
 def _config(document: dict[str, Any]) -> dict[str, Any]:
+    """Extract the configuration section from either supported export shape."""
     config = document.get("config", document)
     if not isinstance(config, dict):
         raise ValueError("Invalid HubSpot webhook configuration")
@@ -17,17 +20,27 @@ def _config(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subscriptions(config: dict[str, Any]) -> set[tuple[str, str]]:
+    """Identify active subscriptions by event and required property."""
     subscriptions = config.get("subscriptions")
     if not isinstance(subscriptions, dict):
         raise ValueError("Missing HubSpot webhook subscriptions")
     entries = subscriptions.get("legacyCrmObjects")
     if not isinstance(entries, list):
         raise ValueError("Missing legacy CRM webhook subscriptions")
-    return {
-        (str(entry["subscriptionType"]), str(entry["propertyName"]))
-        for entry in entries
-        if isinstance(entry, dict) and entry.get("active") is True
-    }
+    active = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("active") is not True:
+            continue
+        event = entry.get("subscriptionType")
+        if not isinstance(event, str) or not event:
+            raise ValueError("Active webhook subscription has no subscriptionType")
+        property_name = ""
+        if event.endswith(".propertyChange"):
+            property_name = entry.get("propertyName")
+            if not isinstance(property_name, str) or not property_name:
+                raise ValueError("Property-change webhook subscription has no propertyName")
+        active.add((event, property_name))
+    return active
 
 
 def compare_webhook_config(desired: dict[str, Any], published: dict[str, Any]) -> dict[str, Any]:
@@ -42,7 +55,9 @@ def compare_webhook_config(desired: dict[str, Any], published: dict[str, Any]) -
         "target_url_matches": expected_settings.get("targetUrl") == observed_settings.get("targetUrl"),
         "concurrency_matches": expected_settings.get("maxConcurrentRequests")
         == observed_settings.get("maxConcurrentRequests"),
-        "missing_active_subscriptions": [f"{event}:{property_name}" for event, property_name in missing],
+        "missing_active_subscriptions": [
+            f"{event}:{property_name}" if property_name else event for event, property_name in missing
+        ],
         "ready": (
             desired.get("uid") == published.get("uid")
             and expected_settings.get("targetUrl") == observed_settings.get("targetUrl")

@@ -20,6 +20,7 @@ from apps.support.models import (
     SupportLifecycleOccurrence,
     SupportTicketOccupancy,
 )
+from apps.support.owner_reconciliation_service import CloseProjectionError, reconcile_ticket
 from apps.support.ticket_close_service import (
     CloseClassification,
     TicketCloseOccurrence,
@@ -33,6 +34,7 @@ T1 = T0 + timedelta(hours=1)
 
 @pytest.fixture(autouse=True)
 def close_settings(settings):
+    """Use one consistent provider and capacity configuration per close test."""
     settings.CONVERSATION_CYCLES_ENFORCED = True
     settings.HUBSPOT_PORTAL_ID = "test-portal"
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "shadow"
@@ -472,6 +474,29 @@ def test_provider_close_without_occurrence_does_not_commit_partial_projection(se
         ).count()
         == 1
     )
+
+
+def test_provider_close_without_time_in_off_mode_raises_for_retry(settings):
+    """Default mode must signal a missing close time so callers can retry."""
+    settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "off"
+    settings.SUPPORT_CAPACITY_MODE = "shadow"
+    target = cycle()
+    agent = assignment(target)
+    occupancy = SupportTicketOccupancy.objects.create(
+        hubspot_ticket_id="close-ticket",
+        source_account_id="test-portal",
+        cycle=target,
+        agent=agent,
+        hubspot_owner_id=700,
+        state="active",
+    )
+    observed = snapshot(settings)
+    observed["entered_closed_at"] = None
+    with pytest.raises(CloseProjectionError, match="no materialized close time"):
+        reconcile_ticket("close-ticket", provider_data=observed)
+    occupancy.refresh_from_db()
+    assert occupancy.state == "active"
+    assert not SupportLifecycleOccurrence.objects.filter(hubspot_ticket_id="close-ticket").exists()
 
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])

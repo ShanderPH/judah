@@ -40,4 +40,4 @@ DJANGO_ENV=test DATABASE_URL="$LOCAL_TEST_DATABASE_URL" JUDAH_CAPACITY_REDIS_URL
 - ARCH-03 ainda aberto. Mensagens históricas sem prova de ator não foram reprocessadas; owner anterior fica fora da métrica. Validar `A-<hubspot_user_id>` e o vínculo thread/ticket no sandbox. Medir custo da agregação histórica em shadow.
 - Reverse de `0035` só é seguro antes de persistir horários nulos; não usar como rollback de produção.
 - Conferir permutações de reopen/owner/close e source do attendant; comparar shadow antes de qualquer `enforce`.
-- Default `off` preserva adapter legado; fechamento sem horário agora espera materialização mesmo nesse modo, de forma conservadora.
+- Default `off` preserva adapter legado; fechamento sem horário lança `CloseProjectionError` para manter o retry explícito. `shadow` e `enforce` registram fechamento pendente para reconciliação.

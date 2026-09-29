@@ -143,6 +143,7 @@ def test_assign_ticket_owner_success_and_generic_failure() -> None:
 
 
 def test_owner_and_team_queries() -> None:
+    """Client owner and team reads must follow the configured API contract."""
     client = _client()
     team = SimpleNamespace(id="8", name="N1")
     owner = SimpleNamespace(
@@ -171,6 +172,7 @@ def test_owner_and_team_queries() -> None:
 
 
 def test_owner_queries_handle_errors() -> None:
+    """Owner detail failures fall back; team roster failures propagate."""
     client = _client()
     client.get_team_roster = Mock(side_effect=ExternalServiceError("HubSpot", "offline"))
     with patch("apps.integrations.hubspot.client._circuit_breaker.call", side_effect=RuntimeError("offline")):

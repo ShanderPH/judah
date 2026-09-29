@@ -14,6 +14,7 @@ from apps.integrations.hubspot.ticket_provider import HubSpotTicketProvider
 
 
 def test_versioned_ticket_read_maps_stage_times_and_archived_fallback() -> None:
+    """Ticket reads must map stage times and retry archived records."""
     transport = Mock()
     transport.get_json.side_effect = [
         HubSpotAPIError("not found", external_status=404, retryable=False),
@@ -39,6 +40,7 @@ def test_versioned_ticket_read_maps_stage_times_and_archived_fallback() -> None:
 
 
 def test_versioned_ticket_write_patches_only_owner() -> None:
+    """Owner updates must patch only the owner property."""
     transport = Mock()
     transport.patch_json.return_value = {"id": "42"}
     provider = HubSpotTicketProvider(transport, new_stage_id="1", closed_stage_id="2")
@@ -49,6 +51,7 @@ def test_versioned_ticket_write_patches_only_owner() -> None:
 
 
 def test_client_enforce_mode_routes_ticket_read_to_versioned_adapter(settings) -> None:
+    """Enforcement must route ticket reads through the versioned adapter."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     client = HubSpotClient.__new__(HubSpotClient)
     client._access_token = "test-token"
@@ -68,6 +71,7 @@ def test_client_enforce_mode_routes_ticket_read_to_versioned_adapter(settings) -
 
 @pytest.mark.parametrize("status, retryable", [(401, False), (403, False), (429, True), (503, True)])
 def test_transport_preserves_http_status(status: int, retryable: bool) -> None:
+    """Transport failures must preserve the provider HTTP status."""
     response = Mock(status_code=status)
     with (
         patch("apps.integrations.hubspot.platform_contract.requests.request", return_value=response),

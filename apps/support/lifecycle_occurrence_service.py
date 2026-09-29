@@ -22,21 +22,25 @@ class InvalidOccurrenceEvidenceError(ValueError):
 
 
 def _proven_time(value: datetime) -> datetime:
+    """Normalize a proven timestamp to UTC and reject naive values."""
     if value.tzinfo is None:
         raise InvalidOccurrenceEvidenceError("Occurrence timestamp must be timezone-aware")
     return value.astimezone(UTC)
 
 
 def _require_identity(account_id: str, ticket_id: str) -> None:
+    """Reject lifecycle evidence without account or ticket identity."""
     if not account_id.strip() or not ticket_id.strip():
         raise InvalidOccurrenceEvidenceError("Occurrence requires account and ticket identities")
 
 
 def _temporal_key(account_id: str, ticket_id: str, occurrence_type: str, occurred_at: datetime) -> str:
+    """Build the stable key for a timed provider occurrence."""
     return f"hubspot:{account_id}:{ticket_id}:{occurrence_type}:{occurred_at.isoformat()}"
 
 
 def _pending_key(account_id: str, ticket_id: str, cycle_id: UUID | None) -> str:
+    """Build the stable key for an unresolved close on one cycle."""
     return f"hubspot:{account_id}:{ticket_id}:closed:pending:{cycle_id or 'unresolved'}"
 
 

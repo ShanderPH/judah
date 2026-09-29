@@ -96,6 +96,7 @@ class TestTaskAggregateAgentMetrics:
         assert metrics.total_chats == 3
 
     def test_enforce_counts_each_cycle_once_across_logs_and_closures(self, settings) -> None:
+        """Agent totals must deduplicate logs and closures by cycle."""
         settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
         agent = _make_agent("CycleAgent", 301)
         entered_at = timezone.now()
@@ -139,6 +140,32 @@ class TestTaskAggregateAgentMetrics:
         metrics = AgentMetrics.objects.get(agent_id=agent.hubspot_owner_id)
         assert metrics.total_chats == 2
         assert metrics.chats_closed == 1
+
+    def test_enforce_keeps_historical_cycles_in_cumulative_total(self, settings) -> None:
+        """Cumulative agent totals must retain cycles older than 30 days."""
+        settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
+        agent = _make_agent("HistoricalAgent", 302)
+        entered_at = timezone.now() - timedelta(days=45)
+        cycle = SupportConversationCycle.objects.create(
+            cycle_key="metrics:historical",
+            source_account_id="test-portal",
+            hubspot_ticket_id="historical-ticket",
+            entered_stage_at=entered_at,
+            opened_at=entered_at,
+            state=SupportConversationCycle.State.CLOSED,
+            closed_at=entered_at + timedelta(hours=1),
+        )
+        ClosedConversation.objects.create(
+            hubspot_ticket_id="historical-ticket",
+            cycle=cycle,
+            agent=agent,
+            hubspot_owner_id=agent.hubspot_owner_id,
+            closed_at=entered_at + timedelta(hours=1),
+        )
+
+        task_aggregate_agent_metrics()
+
+        assert AgentMetrics.objects.get(agent_id=agent.hubspot_owner_id).total_chats == 1
 
     def test_computes_average_handle_time(self) -> None:
         agent = _make_agent("Ester", 400)

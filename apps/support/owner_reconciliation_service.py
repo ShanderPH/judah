@@ -248,6 +248,8 @@ def reconcile_ticket(
                 and (data.get("archived") is True or data["stage"] == STAGE_FECHADO_ID)
                 and not data.get("entered_closed_at")
             ):
+                if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "off":
+                    raise CloseProjectionError("Closed ticket has no materialized close time")
                 from apps.support.lifecycle_occurrence_service import record_pending_close
 
                 cycle = (
@@ -259,14 +261,13 @@ def reconcile_ticket(
                     .order_by("-entered_stage_at")
                     .first()
                 )
-                if settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off":
-                    record_pending_close(
-                        account_id=row.source_account_id,
-                        ticket_id=ticket_id,
-                        cycle_id=cycle.pk if cycle else None,
-                        provider_updated_at=updated,
-                        observation_id=observation_id,
-                    )
+                record_pending_close(
+                    account_id=row.source_account_id,
+                    ticket_id=ticket_id,
+                    cycle_id=cycle.pk if cycle else None,
+                    provider_updated_at=updated,
+                    observation_id=observation_id,
+                )
                 if snapshot is not None:
                     snapshot.update(data)
                 return row

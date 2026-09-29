@@ -136,6 +136,7 @@ def _first_sender(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _associated_ticket_id(thread: dict[str, Any]) -> str | None:
+    """Return a ticket only when thread associations identify exactly one."""
     associations = thread.get("threadAssociations")
     if isinstance(associations, dict):
         ticket_id = associations.get("associatedTicketId")
@@ -191,6 +192,7 @@ def _n8n_payload(
     idempotency_key: str,
     delivery_method: str,
 ) -> dict[str, Any]:
+    """Build the outbound message body from the persisted event and thread."""
     sender = _first_sender(message)
     ticket_id = _associated_ticket_id(thread)
     occurred_at = _parse_datetime(message.get("createdAt"))

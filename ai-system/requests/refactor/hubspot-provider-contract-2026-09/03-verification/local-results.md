@@ -43,3 +43,13 @@ O valor de `SALOMAO_V1_BASE_URL` neutraliza uma configuração local que faz um 
 6. Exercitar rollback em ambiente seguro e executar dry-run histórico apenas após cutover estável.
 
 **Conclusão:** a implementação local está verificável; o P0 e o rollout não estão concluídos.
+
+## Revisão do PR #130
+
+- Testes de regressão foram escritos antes das correções: cinco falhas reproduziram os achados funcionais e de consultas; a asserção de unicidade do log passou desde o início.
+- `off` voltou a lançar `CloseProjectionError` quando o fechamento não tem horário; `shadow` e `enforce` mantêm a ocorrência pendente.
+- Readback aceita assinaturas ativas sem `propertyName` quando não são `*.propertyChange`; assinaturas de mudança de propriedade exigem esse campo.
+- Readiness conta apenas fechamentos pendentes. A atribuição de mensagens usa lookup JSON no banco e uma consulta por lote de até 100 chaves de portal/ticket/ator, sem consulta por transferência.
+- A sugestão de janela de 30 dias não foi aplicada: `AgentMetrics.total_chats` é acumulado e remover ciclos antigos reduziria o total. Teste de ciclo com 45 dias protege esse contrato. O custo histórico ainda exige medição em shadow antes de `enforce`.
+- Verificação após correções: suíte SQLite local com 987 testes aprovados e 47 pulados; `ruff check .`, `ruff format --check .` e `mypy .` limpos. Nenhum banco não local foi acessado.
+- Cobertura local de docstrings nas funções alteradas: 125/141 (88,7%), apurada pelo diff contra `origin/main` com AST. O CodeRabbit havia reportado 51,66% em 151 funções no commit anterior; a contagem exata do serviço depende de novo processamento do PR.

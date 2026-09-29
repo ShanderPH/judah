@@ -11,6 +11,7 @@ from django.apps import apps
 from django.core.cache import cache
 from django.core.management import call_command
 from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.integrations.hubspot.exceptions import HubSpotAPIError
@@ -88,6 +89,7 @@ def test_team_sync_propagates_provider_failure() -> None:
 
 
 def test_team_roster_page_budget_stays_partial() -> None:
+    """A page limit must leave an unfinished roster explicitly partial."""
     transport = Mock()
     transport.get_json.return_value = {"results": [], "paging": {"next": {"after": "next"}}}
     roster = TeamRosterProvider(transport).fetch("8", max_pages=1)
@@ -96,6 +98,7 @@ def test_team_roster_page_budget_stays_partial() -> None:
 
 
 def test_owner_resolution_reads_all_current_owner_pages() -> None:
+    """Owner resolution must follow every provider cursor."""
     transport = Mock()
     transport.get_json.side_effect = [
         {"results": [{"userId": 1, "id": "101"}], "paging": {"next": {"after": "next"}}},
@@ -108,6 +111,7 @@ def test_owner_resolution_reads_all_current_owner_pages() -> None:
 
 
 def test_incomplete_owner_resolution_never_completes_roster() -> None:
+    """An exhausted owner page budget must fail roster completion."""
     transport = Mock()
     transport.get_json.side_effect = [
         {"results": [{"userId": "1"}]},
@@ -119,6 +123,7 @@ def test_incomplete_owner_resolution_never_completes_roster() -> None:
 
 @pytest.mark.parametrize("member_count", [0, 1, 100, 101])
 def test_team_roster_boundary_sizes_are_complete(member_count: int) -> None:
+    """Roster pagination must handle empty and full boundary pages."""
     transport = Mock()
     identifiers = [str(index) for index in range(1, member_count + 1)]
     pages = [identifiers[index : index + 100] for index in range(0, member_count, 100)] or [[]]
@@ -144,9 +149,11 @@ def test_team_roster_boundary_sizes_are_complete(member_count: int) -> None:
 
 
 def test_capability_preflight_keeps_auth_failures_distinct() -> None:
+    """Capability checks must distinguish missing access from unavailable endpoints."""
     transport = Mock()
 
     def read(path: str, **_kwargs):
+        """Simulate capability-specific authorization responses."""
         if "teams" in path:
             raise HubSpotAPIError("forbidden", external_status=403, retryable=False)
         if "users" in path:
@@ -162,6 +169,7 @@ def test_capability_preflight_keeps_auth_failures_distinct() -> None:
 
 @pytest.mark.parametrize("status, expected", [(429, "rate_limited"), (503, "server_error")])
 def test_capability_preflight_classifies_retryable_provider_failures(status, expected) -> None:
+    """Retryable provider statuses must retain their distinct outcomes."""
     transport = Mock()
     transport.get_json.side_effect = HubSpotAPIError("failed", external_status=status)
     results = check_hubspot_capabilities(transport)
@@ -169,6 +177,7 @@ def test_capability_preflight_classifies_retryable_provider_failures(status, exp
 
 
 def test_provider_readiness_blocks_unverified_write_and_stale_roster(settings) -> None:
+    """Enforcement must reject unverified writes and an expired roster."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     settings.HUBSPOT_N1_TEAM_ID = "8"
     now = timezone.now()
@@ -195,6 +204,7 @@ def test_provider_readiness_blocks_unverified_write_and_stale_roster(settings) -
 
 
 def test_published_webhook_readback_controls_enforce_gate(settings, tmp_path) -> None:
+    """Published webhook evidence must control the enforcement gate."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     settings.SUPPORT_CAPACITY_MODE = "enforce"
     settings.HUBSPOT_N1_TEAM_ID = "8"
@@ -235,6 +245,7 @@ def test_published_webhook_readback_controls_enforce_gate(settings, tmp_path) ->
 
 
 def test_webhook_governance_detects_missing_required_subscription() -> None:
+    """Missing required subscriptions must block webhook readiness."""
     desired = {
         "uid": "judah_webhooks",
         "config": {
@@ -258,7 +269,52 @@ def test_webhook_governance_detects_missing_required_subscription() -> None:
     assert result["missing_active_subscriptions"] == ["ticket.propertyChange:hubspot_owner_id"]
 
 
+def test_webhook_governance_accepts_non_property_subscription_without_property_name() -> None:
+    """Extra creation subscriptions must not require a property name."""
+    desired = {
+        "uid": "judah_webhooks",
+        "config": {
+            "settings": {"targetUrl": "https://example.test/hubspot", "maxConcurrentRequests": 10},
+            "subscriptions": {
+                "legacyCrmObjects": [
+                    {"subscriptionType": "ticket.propertyChange", "propertyName": "hubspot_owner_id", "active": True},
+                ]
+            },
+        },
+    }
+    published = {
+        "uid": "judah_webhooks",
+        "config": {
+            "settings": {"targetUrl": "https://example.test/hubspot", "maxConcurrentRequests": 10},
+            "subscriptions": {
+                "legacyCrmObjects": [
+                    {"subscriptionType": "ticket.propertyChange", "propertyName": "hubspot_owner_id", "active": True},
+                    {"subscriptionType": "ticket.creation", "active": True},
+                ]
+            },
+        },
+    }
+    assert compare_webhook_config(desired, published)["ready"] is True
+
+
+def test_webhook_governance_requires_property_name_for_property_change() -> None:
+    """Property-change subscriptions must declare the changed property."""
+    document = {
+        "uid": "judah_webhooks",
+        "config": {
+            "subscriptions": {
+                "legacyCrmObjects": [
+                    {"subscriptionType": "ticket.propertyChange", "active": True},
+                ]
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="propertyName"):
+        compare_webhook_config(document, document)
+
+
 def test_app_governance_detects_scope_drift() -> None:
+    """Published app scopes must match the required scope set."""
     desired = {"uid": "judah_app", "config": {"auth": {"requiredScopes": ["tickets", "settings.users.read"]}}}
     published = {"uid": "judah_app", "config": {"auth": {"requiredScopes": ["tickets"]}}}
     result = compare_app_config(desired, published)
@@ -267,6 +323,7 @@ def test_app_governance_detects_scope_drift() -> None:
 
 
 def test_owner_effect_needs_evidence_to_be_called_manual() -> None:
+    """Owner provenance must identify manual effects only with evidence."""
     assert classify_owner_effect() == AssignmentProvenance.UNKNOWN_EXTERNAL
     assert classify_owner_effect(attempt_type="manual") == AssignmentProvenance.MANUAL_ASSIGNMENT
     assert classify_owner_effect(attempt_type="automatic") == AssignmentProvenance.AUTOMATIC_ASSIGNMENT
@@ -274,6 +331,7 @@ def test_owner_effect_needs_evidence_to_be_called_manual() -> None:
 
 
 def test_proven_occurrence_requires_account_and_ticket_identity() -> None:
+    """Proven lifecycle evidence must include both tenant and ticket identity."""
     with pytest.raises(InvalidOccurrenceEvidenceError, match="account and ticket"):
         record_proven_occurrence(
             account_id="",
@@ -285,6 +343,7 @@ def test_proven_occurrence_requires_account_and_ticket_identity() -> None:
 
 
 def test_administrative_owner_effect_blocks_without_provider_proof() -> None:
+    """Administrative owner changes must stop when provider proof is absent."""
     target = Agent(hubspot_owner_id=700, name="Agent")
     with (
         patch("apps.support.availability_runtime.require_routing_writer_authority"),
@@ -297,6 +356,7 @@ def test_administrative_owner_effect_blocks_without_provider_proof() -> None:
 
 
 def test_occurrence_table_has_postgres_runtime_guard() -> None:
+    """PostgreSQL must reject lifecycle rows that violate evidence constraints."""
     if connection.vendor != "postgresql":
         pytest.skip("PostgreSQL runtime guard")
     with connection.cursor() as cursor:
@@ -363,6 +423,7 @@ def test_close_without_materialized_time_is_persisted_pending(settings) -> None:
 
 
 def test_owner_before_proven_entry_keeps_lifecycle_uninvented(settings) -> None:
+    """An owner snapshot must not invent a cycle before proven entry."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     settings.SUPPORT_CAPACITY_MODE = "enforce"
     settings.HUBSPOT_PORTAL_ID = "test-portal"
@@ -403,6 +464,7 @@ def test_owner_before_proven_entry_keeps_lifecycle_uninvented(settings) -> None:
 
 
 def test_owner_webhook_waits_for_cycle_then_projects_proven_occurrence(settings) -> None:
+    """A proven owner event must wait until its cycle exists."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     settings.SUPPORT_CAPACITY_MODE = "enforce"
     settings.HUBSPOT_PORTAL_ID = "test-portal"
@@ -444,6 +506,7 @@ def test_owner_webhook_waits_for_cycle_then_projects_proven_occurrence(settings)
 
 
 def test_stale_owner_occurrence_cannot_claim_new_cycle(settings) -> None:
+    """An older owner event must not attach to a later cycle."""
     settings.HUBSPOT_PORTAL_ID = "test-portal"
     entered_at = datetime(2026, 9, 2, tzinfo=UTC)
     opened = open_from_proven_occurrence(
@@ -464,6 +527,7 @@ def test_stale_owner_occurrence_cannot_claim_new_cycle(settings) -> None:
 
 
 def test_owner_retry_keeps_proven_evidence_on_capability_failure(settings) -> None:
+    """A failed provider retry must retain proven owner evidence."""
     settings.HUBSPOT_PORTAL_ID = "test-portal"
     settings.SUPPORT_CAPACITY_MODE = "enforce"
     occurrence = record_proven_occurrence(
@@ -485,6 +549,7 @@ def test_owner_retry_keeps_proven_evidence_on_capability_failure(settings) -> No
 
 
 def test_enforce_queue_metrics_count_reopened_ticket_by_cycle(settings) -> None:
+    """Queue metrics must count reopened ticket cycles separately."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     agent = Agent.objects.create(
         hubspot_owner_id=713, hubspot_user_id="713", name="Metrics", agent_email="metrics@example.test"
@@ -596,6 +661,7 @@ def test_enforce_queue_metrics_count_reopened_ticket_by_cycle(settings) -> None:
 
 
 def test_intermediate_owner_counts_only_after_sending_during_tenure() -> None:
+    """Transfer attribution must require a message during each owner tenure."""
     agents = [
         Agent.objects.create(
             hubspot_owner_id=owner_id,
@@ -661,10 +727,45 @@ def test_intermediate_owner_counts_only_after_sending_during_tenure() -> None:
         ignored_reason="outgoing_message",
         payload={"_agent_message_evidence": {"actor_id": "A-802"}},
     )
-    assert attributed_agent_cycles({cycle.pk}) == {(cycle.pk, 801), (cycle.pk, 802), (cycle.pk, 803)}
+    with CaptureQueriesContext(connection) as queries:
+        assert attributed_agent_cycles({cycle.pk}) == {(cycle.pk, 801), (cycle.pk, 802), (cycle.pk, 803)}
+    assert sum('FROM "webhook_events"' in query["sql"] for query in queries) == 1
+
+
+def test_readiness_counts_only_pending_closes(settings) -> None:
+    """Readiness close lag must ignore pending events of other types."""
+    settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
+    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_AGE_SECONDS = 3600
+    now = timezone.now()
+    SupportLifecycleOccurrence.objects.create(
+        source_account_id="test-portal",
+        hubspot_ticket_id="owner-only",
+        occurrence_type=SupportLifecycleOccurrence.Type.OWNER_CHANGED,
+        evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVIDER_MATERIALIZATION_PENDING,
+        evidence_source="provider_observation",
+        evidence_key="owner-only:pending",
+    )
+    close = SupportLifecycleOccurrence.objects.create(
+        source_account_id="test-portal",
+        hubspot_ticket_id="close-pending",
+        occurrence_type=SupportLifecycleOccurrence.Type.CLOSED,
+        evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVIDER_MATERIALIZATION_PENDING,
+        evidence_source="provider_observation",
+        evidence_key="close-pending:pending",
+    )
+    SupportLifecycleOccurrence.objects.filter(hubspot_ticket_id="owner-only").update(
+        created_at=now - timedelta(hours=2)
+    )
+    checks = provider_contract_checks(now)
+    assert checks["pending_close_count"] == 1
+    assert "lifecycle_close_materialization_stale" not in provider_contract_reasons(checks)
+    SupportLifecycleOccurrence.objects.filter(pk=close.pk).update(created_at=now - timedelta(hours=2))
+    checks = provider_contract_checks(now)
+    assert "lifecycle_close_materialization_stale" in provider_contract_reasons(checks)
 
 
 def test_owner_snapshot_without_event_time_keeps_transfer_time_unknown(settings) -> None:
+    """Owner snapshots must not invent a transfer timestamp."""
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
     settings.SUPPORT_CAPACITY_MODE = "enforce"
     settings.HUBSPOT_PORTAL_ID = "test-portal"
@@ -715,6 +816,7 @@ def test_owner_snapshot_without_event_time_keeps_transfer_time_unknown(settings)
 
 
 def test_pending_close_converges_once_after_provider_materializes_time(settings) -> None:
+    """A pending close must converge exactly once after provider readback."""
     settings.HUBSPOT_PORTAL_ID = "test-portal"
     settings.SUPPORT_CAPACITY_MODE = "shadow"
     settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "shadow"
@@ -772,6 +874,7 @@ def test_pending_close_converges_once_after_provider_materializes_time(settings)
 
 
 def test_pending_close_exhausts_bounded_budget_without_time(settings) -> None:
+    """Missing close time must eventually require repair after its retry budget."""
     settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
     pending = record_pending_close(
         account_id="test-portal",
@@ -794,6 +897,7 @@ def test_pending_close_exhausts_bounded_budget_without_time(settings) -> None:
 
 @pytest.mark.parametrize("status", [401, 403])
 def test_pending_close_capability_failure_needs_repair(settings, status: int) -> None:
+    """A capability failure must mark pending close evidence for repair."""
     pending = record_pending_close(
         account_id="test-portal",
         ticket_id=f"missing-scope-{status}",
@@ -815,6 +919,7 @@ def test_pending_close_capability_failure_needs_repair(settings, status: int) ->
 
 
 def test_lost_lifecycle_callback_is_recovered_by_due_scan() -> None:
+    """The due scan must recover a lost lifecycle task callback."""
     pending = record_pending_close(
         account_id="test-portal", ticket_id="scan-pending", cycle_id=None, provider_updated_at=None, schedule=False
     )

@@ -500,6 +500,7 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
         occurrence.save(update_fields=["retry_count", "next_reconcile_at", "updated_at"])
 
     def retry_later(error_code: str) -> str:
+        """Keep a pending occurrence scheduled until its retry budget expires."""
         with transaction.atomic():
             current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
             if current.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
@@ -524,6 +525,7 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
             return "pending"
 
     def fail_capability() -> str:
+        """Require repair when provider capability cannot verify an occurrence."""
         with transaction.atomic():
             current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
             if current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN:
