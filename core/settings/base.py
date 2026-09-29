@@ -250,10 +250,22 @@ SAT_OFF_HOURS_REFRESH_SECONDS = max(
 )
 ASSIGNMENT_CLAIM_TTL_SECONDS = config("ASSIGNMENT_CLAIM_TTL_SECONDS", default=90, cast=int)
 ASSIGNMENT_STUCK_AFTER_SECONDS = config("ASSIGNMENT_STUCK_AFTER_SECONDS", default=120, cast=int)
+SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = config("SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS", default=5, cast=int)
+SUPPORT_LIFECYCLE_RECONCILE_MAX_AGE_SECONDS = config(
+    "SUPPORT_LIFECYCLE_RECONCILE_MAX_AGE_SECONDS", default=3600, cast=int
+)
 
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    "scan-lifecycle-occurrences": {
+        "task": "support.task_scan_lifecycle_occurrences",
+        "schedule": 30,
+    },
+    "check-hubspot-capabilities": {
+        "task": "support.task_check_hubspot_capabilities",
+        "schedule": 300,
+    },
     # Sync HubSpot N1 team members daily at 06:00 AM (São Paulo)
     "sync-hubspot-team-members-daily": {
         "task": "support.task_sync_hubspot_team_members",
@@ -399,6 +411,11 @@ HUBSPOT_WEBHOOK_MAX_BATCH_SIZE = config("HUBSPOT_WEBHOOK_MAX_BATCH_SIZE", defaul
 # cycle-opening writer must fail closed (identity_unavailable); reads are not
 # affected. The concrete value is a Stop Gate A decision.
 HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
+HUBSPOT_ROSTER_MAX_AGE_SECONDS = config("HUBSPOT_ROSTER_MAX_AGE_SECONDS", default=90000, cast=int)
+HUBSPOT_TICKETS_WRITE_VERIFIED = config("HUBSPOT_TICKETS_WRITE_VERIFIED", default=False, cast=bool)
+HUBSPOT_PROVIDER_CONTRACT_MODE = config("HUBSPOT_PROVIDER_CONTRACT_MODE", default="off")
+if HUBSPOT_PROVIDER_CONTRACT_MODE not in {"off", "shadow", "enforce"}:
+    raise ImproperlyConfigured("HUBSPOT_PROVIDER_CONTRACT_MODE must be one of: off, shadow, enforce")
 SUPPORT_CAPACITY_MODE = config("SUPPORT_CAPACITY_MODE", default="off")
 SUPPORT_CAPACITY_FRESHNESS_SECONDS = config("SUPPORT_CAPACITY_FRESHNESS_SECONDS", default=60, cast=int)
 SUPPORT_CAPACITY_MAX_SCAN_TICKETS = config("SUPPORT_CAPACITY_MAX_SCAN_TICKETS", default=200, cast=int)

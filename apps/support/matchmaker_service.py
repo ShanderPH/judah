@@ -364,11 +364,23 @@ def enqueue_new_ticket(
     # only and the legacy flow below is byte-for-byte unchanged. With
     # enforcement on, the same condition fails closed before any effect.
     confirmed_entered_at = entered_at_ms or ticket_data.get("entered_novo_at")
-    cycle_result = open_or_get_cycle(
-        hubspot_ticket_id=hubspot_ticket_id,
-        entered_stage_value=confirmed_entered_at,
-        source_event_id=source_event_id,
-    )
+    proven_entry_at = _parse_hubspot_timestamp(confirmed_entered_at)
+    if proven_entry_at is not None and settings.HUBSPOT_PORTAL_ID and settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off":
+        from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence
+
+        cycle_result = open_from_proven_occurrence(
+            ticket_id=hubspot_ticket_id,
+            entered_at=proven_entry_at,
+            account_id=settings.HUBSPOT_PORTAL_ID,
+            evidence_source="webhook_property" if entered_at_ms else "crm_readback",
+            source_event_id=source_event_id,
+        )
+    else:
+        cycle_result = open_or_get_cycle(
+            hubspot_ticket_id=hubspot_ticket_id,
+            entered_stage_value=confirmed_entered_at,
+            source_event_id=source_event_id,
+        )
     if cycle_result.admission.classification not in _ATTACHABLE_CYCLE_CLASSIFICATIONS:
         logger.warning(
             "conversation_cycle_admission_blocked",
@@ -379,7 +391,7 @@ def enqueue_new_ticket(
         if settings.CONVERSATION_CYCLES_ENFORCED:
             return None
 
-    entered_queue_at = _parse_hubspot_timestamp(confirmed_entered_at)
+    entered_queue_at = proven_entry_at
     if entered_queue_at is None:
         logger.warning(
             "conversation_cycle_identity_unavailable",

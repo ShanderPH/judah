@@ -17,6 +17,7 @@ from apps.integrations.hubspot.exceptions import (
     HubSpotFailureKind,
     HubSpotResourceNotFoundError,
 )
+from apps.integrations.hubspot.team_roster import TeamRoster
 from common.circuit_breaker import CircuitBreaker
 from common.exceptions import ExternalServiceError
 
@@ -207,6 +208,15 @@ class HubSpotClient:
             "email",
         ]
         fetch_props = properties or default_props
+        if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+            from apps.integrations.hubspot.platform_contract import HubSpotTransport
+            from apps.integrations.hubspot.ticket_provider import HubSpotTicketProvider
+
+            return HubSpotTicketProvider(
+                HubSpotTransport(self._access_token),
+                new_stage_id=STAGE_NOVO_ID,
+                closed_stage_id=STAGE_CLOSED_ID,
+            ).get_details(ticket_id, fetch_props)
         try:
             try:
                 ticket = _circuit_breaker.call(
@@ -238,9 +248,33 @@ class HubSpotClient:
                 "updated_at": ticket.updated_at.isoformat() if getattr(ticket, "updated_at", None) else None,
                 "archived": getattr(ticket, "archived", False),
             }
+        except ApiException as exc:
+            status = int(exc.status) if exc.status is not None else None
+            kind = (
+                HubSpotFailureKind.UNAUTHORIZED
+                if status == 401
+                else HubSpotFailureKind.FORBIDDEN
+                if status == 403
+                else HubSpotFailureKind.NOT_FOUND
+                if status == 404
+                else HubSpotFailureKind.RATE_LIMITED
+                if status == 429
+                else HubSpotFailureKind.SERVER_ERROR
+                if status is not None and status >= 500
+                else HubSpotFailureKind.UNKNOWN
+            )
+            logger.warning("hubspot_get_ticket_details_failed", ticket_id=ticket_id, external_status=status)
+            raise HubSpotAPIError(
+                "Ticket read failed.",
+                external_status=status,
+                retryable=status is None or status == 429 or status >= 500,
+                error_code=kind,
+            ) from exc
+        except HubSpotAPIError:
+            raise
         except Exception as exc:
-            logger.error("hubspot_get_ticket_details_failed", ticket_id=ticket_id, error=str(exc))
-            raise ExternalServiceError("HubSpot", str(exc)) from exc
+            logger.warning("hubspot_get_ticket_details_failed", ticket_id=ticket_id, exception_type=type(exc).__name__)
+            raise HubSpotAPIError("Ticket read failed.", retryable=True) from exc
 
     def assign_ticket_owner(self, ticket_id: str, owner_id: int) -> dict[str, Any]:
         """Assign a HubSpot ticket to an owner (agent) by their owner ID.
@@ -258,6 +292,15 @@ class HubSpotClient:
         Raises:
             ExternalServiceError: On API failure.
         """
+        if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+            from apps.integrations.hubspot.platform_contract import HubSpotTransport
+            from apps.integrations.hubspot.ticket_provider import HubSpotTicketProvider
+
+            return HubSpotTicketProvider(
+                HubSpotTransport(self._access_token),
+                new_stage_id=STAGE_NOVO_ID,
+                closed_stage_id=STAGE_CLOSED_ID,
+            ).assign_owner(ticket_id, owner_id)
         try:
             update_input = TicketUpdateInput(properties={"hubspot_owner_id": str(owner_id)})
             ticket = _circuit_breaker.call(
@@ -346,36 +389,29 @@ class HubSpotClient:
             return {}
 
     def get_team_members(self, team_id: str) -> list[dict[str, Any]]:
-        """Fetch all owners that belong to a HubSpot team.
+        """Return active members from a complete, versioned team roster."""
+        from apps.integrations.hubspot.exceptions import HubSpotAPIError
 
-        Args:
-            team_id: The HubSpot team ID.
+        roster = self.get_team_roster(team_id)
+        if not roster.complete:
+            raise HubSpotAPIError("HubSpot team roster pagination is incomplete.", retryable=True)
+        return [
+            {
+                "id": member.owner_id,
+                "email": member.email,
+                "first_name": member.first_name,
+                "last_name": member.last_name,
+            }
+            for member in roster.members
+            if member.state == "active" and member.owner_id is not None
+        ]
 
-        Returns:
-            List of owner dicts with id, email, first_name, last_name.
-        """
-        try:
-            result = _circuit_breaker.call(
-                self._client.crm.owners.owners_api.get_page,
-                limit=100,
-            )
-            members = []
-            for owner in result.results or []:
-                owner_teams = getattr(owner, "teams", None) or []
-                if any(str(getattr(t, "id", "")) == str(team_id) for t in owner_teams):
-                    members.append(
-                        {
-                            "id": owner.id,
-                            "email": getattr(owner, "email", ""),
-                            "first_name": getattr(owner, "first_name", ""),
-                            "last_name": getattr(owner, "last_name", ""),
-                        }
-                    )
-            logger.info("hubspot_team_members_fetched", team_id=team_id, count=len(members))
-            return members
-        except Exception as exc:
-            logger.error("hubspot_get_team_members_failed", team_id=team_id, error=str(exc))
-            raise ExternalServiceError("HubSpot", str(exc)) from exc
+    def get_team_roster(self, team_id: str) -> TeamRoster:
+        """Fetch Teams 2026-09 membership with complete cursor accounting."""
+        from apps.integrations.hubspot.platform_contract import HubSpotTransport
+        from apps.integrations.hubspot.team_roster import TeamRosterProvider
+
+        return TeamRosterProvider(HubSpotTransport(self._access_token)).fetch(team_id)
 
     def search_tickets_in_novo_stage(self) -> list[dict[str, Any]]:
         """Fetch all tickets in the NOVO stage of the support pipeline.

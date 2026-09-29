@@ -117,7 +117,7 @@ def test_finalize_and_redelivery_have_one_effect() -> None:
     assert agent.current_simultaneous_chats == 1
     assert agent.total_assignments == 1
     assert AssignedConversation.objects.filter(hubspot_ticket_id="9001").count() == 1
-    assert AssignmentLog.objects.filter(assignment_attempt=attempt).count() == 1
+    assert AssignmentLog.objects.get(assignment_attempt=attempt).assignment_type == "automatic_assignment"
     assert not NewConversation.objects.filter(hubspot_ticket_id="9001").exists()
 
 

@@ -157,8 +157,7 @@ def _handle_pipeline_stage_change(object_id: str, new_stage: str, payload: dict 
     support_closed_stage = str(settings.HUBSPOT_SUPPORT_CLOSED_STAGE_ID)
 
     if new_stage == support_new_stage:
-        entered_at_ms = payload.get("occurredAt") or payload.get("occurred_at")
-        _handle_ticket_entered_novo(object_id, str(entered_at_ms) if entered_at_ms else None)
+        _handle_ticket_entered_novo(object_id, None)
     elif new_stage == support_closed_stage:
         logger.info(
             "hubspot_ticket_pipeline_stage_fechado_logged",

@@ -135,6 +135,21 @@ def _first_sender(message: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _associated_ticket_id(thread: dict[str, Any]) -> str | None:
+    associations = thread.get("threadAssociations")
+    if isinstance(associations, dict):
+        ticket_id = associations.get("associatedTicketId")
+        return str(ticket_id) if ticket_id is not None else None
+    if isinstance(associations, list):
+        ticket_ids = {
+            str(association["associatedTicketId"])
+            for association in associations
+            if isinstance(association, dict) and association.get("associatedTicketId") is not None
+        }
+        return next(iter(ticket_ids)) if len(ticket_ids) == 1 else None
+    return None
+
+
 def _ignored_reason(message: dict[str, Any]) -> str | None:
     if str(message.get("type") or "MESSAGE").upper() != "MESSAGE":
         return "non_message_event"
@@ -177,8 +192,7 @@ def _n8n_payload(
     delivery_method: str,
 ) -> dict[str, Any]:
     sender = _first_sender(message)
-    associations = thread.get("threadAssociations")
-    ticket_id = associations.get("associatedTicketId") if isinstance(associations, dict) else None
+    ticket_id = _associated_ticket_id(thread)
     occurred_at = _parse_datetime(message.get("createdAt"))
     return {
         "action": "PROCESS_NEW_MESSAGE",
@@ -277,12 +291,18 @@ def ingest_hubspot_message(
             )
 
         occurred_at = _parse_datetime(message.get("createdAt"))
-        associations = thread.get("threadAssociations")
-        ticket_id = associations.get("associatedTicketId") if isinstance(associations, dict) else None
+        ticket_id = _associated_ticket_id(thread)
         event.hubspot_ticket_id = str(ticket_id or "")
         event.hubspot_contact_id = str(thread.get("associatedContactId") or "")
         event.occurred_at = occurred_at
         event.message_type = str(message.get("type") or "")
+        if ignored_reason == "outgoing_message":
+            payload = dict(event.payload)
+            payload.pop("_agent_message_evidence", None)
+            actor_id = str(_first_sender(message).get("actorId") or message.get("senderActorId") or "")
+            if actor_id.startswith("A-") and actor_id != str(settings.N8N_BOT_SENDER_ACTOR_ID or ""):
+                payload["_agent_message_evidence"] = {"actor_id": actor_id}
+            event.payload = payload
         event.processed = True
         event.processed_at = timezone.now()
         event.error_message = ""

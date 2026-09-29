@@ -238,7 +238,10 @@ def get_last_assigned_owner_id() -> int | None:
     from apps.support.models import AssignmentLog
 
     last = (
-        AssignmentLog.objects.filter(assignment_type="automatic", hubspot_owner_id__isnull=False)
+        AssignmentLog.objects.filter(
+            assignment_type__in=("automatic", "automatic_assignment"),
+            hubspot_owner_id__isnull=False,
+        )
         .order_by("-assigned_at")
         .values_list("hubspot_owner_id", flat=True)
         .first()

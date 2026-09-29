@@ -24,12 +24,14 @@ Tasks are organized into three groups:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import structlog
+from django.conf import settings
 from django.db.models import Avg, Count, Max, Min
 from django.utils import timezone
 
+from apps.support.assignment_provenance import classify_owner_effect
 from apps.support.error_catalog import cataloged_error_context
 from celery import shared_task
 
@@ -449,6 +451,192 @@ def task_handle_ticket_closed(
         raise self.retry(exc=exc) from exc
 
 
+@shared_task(name="support.task_reconcile_lifecycle_occurrence")
+def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
+    """Read back one pending close with a persisted retry and age budget."""
+    from uuid import UUID
+
+    from django.db import transaction
+
+    from apps.integrations.hubspot.client import get_hubspot_client
+    from apps.integrations.hubspot.exceptions import HubSpotAPIError
+    from apps.support.lifecycle_occurrence_service import (
+        mark_processed,
+        owner_occurrence_matches_cycle,
+        record_proven_occurrence,
+    )
+    from apps.support.models import SupportLifecycleOccurrence
+    from apps.support.ticket_close_service import CloseClassification, TicketCloseOccurrence, reconcile_close_occurrence
+
+    now = timezone.now()
+    max_attempts = int(getattr(settings, "SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS", 5))
+    max_age = timedelta(seconds=int(getattr(settings, "SUPPORT_LIFECYCLE_RECONCILE_MAX_AGE_SECONDS", 3600)))
+    with transaction.atomic():
+        occurrence = SupportLifecycleOccurrence.objects.select_for_update().filter(pk=UUID(occurrence_id)).first()
+        if occurrence is None:
+            return "not_found"
+        if occurrence.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
+            return occurrence.processing_status
+        if occurrence.next_reconcile_at and occurrence.next_reconcile_at > now:
+            return "not_due"
+        if occurrence.retry_count >= max_attempts or now - occurrence.created_at >= max_age:
+            if occurrence.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN:
+                occurrence.evidence_status = SupportLifecycleOccurrence.EvidenceStatus.AMBIGUOUS
+            occurrence.processing_status = SupportLifecycleOccurrence.ProcessingStatus.REPAIR_REQUIRED
+            occurrence.last_error_code = "reconcile_budget_exhausted"
+            occurrence.next_reconcile_at = None
+            occurrence.save(
+                update_fields=[
+                    "evidence_status",
+                    "processing_status",
+                    "last_error_code",
+                    "next_reconcile_at",
+                    "updated_at",
+                ]
+            )
+            return "repair_required"
+        occurrence.retry_count += 1
+        occurrence.next_reconcile_at = now + timedelta(seconds=min(15 * 2**occurrence.retry_count, 300))
+        occurrence.save(update_fields=["retry_count", "next_reconcile_at", "updated_at"])
+
+    def retry_later(error_code: str) -> str:
+        with transaction.atomic():
+            current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
+            if current.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
+                return current.processing_status
+            current.last_error_code = error_code
+            if current.retry_count >= max_attempts or timezone.now() - current.created_at >= max_age:
+                if current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN:
+                    current.evidence_status = SupportLifecycleOccurrence.EvidenceStatus.AMBIGUOUS
+                current.processing_status = SupportLifecycleOccurrence.ProcessingStatus.REPAIR_REQUIRED
+                current.next_reconcile_at = None
+                current.save(
+                    update_fields=[
+                        "last_error_code",
+                        "evidence_status",
+                        "processing_status",
+                        "next_reconcile_at",
+                        "updated_at",
+                    ]
+                )
+                return "repair_required"
+            current.save(update_fields=["last_error_code", "updated_at"])
+            return "pending"
+
+    def fail_capability() -> str:
+        with transaction.atomic():
+            current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
+            if current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN:
+                current.evidence_status = SupportLifecycleOccurrence.EvidenceStatus.AMBIGUOUS
+            current.processing_status = SupportLifecycleOccurrence.ProcessingStatus.REPAIR_REQUIRED
+            current.last_error_code = "provider_capability_failure"
+            current.next_reconcile_at = None
+            current.save(
+                update_fields=[
+                    "evidence_status",
+                    "processing_status",
+                    "last_error_code",
+                    "next_reconcile_at",
+                    "updated_at",
+                ]
+            )
+        return "repair_required"
+
+    if occurrence.occurrence_type == SupportLifecycleOccurrence.Type.OWNER_CHANGED:
+        from apps.support.owner_reconciliation_service import reconcile_ticket
+
+        try:
+            occupancy = reconcile_ticket(
+                occurrence.hubspot_ticket_id,
+                source="lifecycle_retry",
+                observation_id=occurrence.source_event_id,
+            )
+        except HubSpotAPIError as exc:
+            if exc.external_status in {401, 403}:
+                return fail_capability()
+            return retry_later(str(exc.error_code))
+        except Exception as exc:
+            return retry_later(type(exc).__name__)
+        if not owner_occurrence_matches_cycle(occurrence, occupancy.cycle_id):
+            return retry_later("owner_cycle_pending")
+        mark_processed(occurrence.pk)
+        return "processed"
+
+    if occurrence.evidence_status == SupportLifecycleOccurrence.EvidenceStatus.PROVEN:
+        proven = occurrence
+    else:
+        try:
+            snapshot = get_hubspot_client().get_ticket_details(occurrence.hubspot_ticket_id)
+        except HubSpotAPIError as exc:
+            if exc.external_status in {401, 403}:
+                return fail_capability()
+            return retry_later(str(exc.error_code))
+        except Exception as exc:
+            return retry_later(type(exc).__name__)
+        closed_at = snapshot.get("entered_closed_at")
+        if not isinstance(closed_at, datetime) or timezone.is_naive(closed_at):
+            return retry_later("provider_materialization_pending")
+        proven = record_proven_occurrence(
+            account_id=occurrence.source_account_id,
+            ticket_id=occurrence.hubspot_ticket_id,
+            occurrence_type=SupportLifecycleOccurrence.Type.CLOSED,
+            occurred_at=closed_at,
+            evidence_source="crm_readback",
+            provider_updated_at=occurrence.provider_updated_at,
+            observation_id=occurrence.observation_id,
+        )
+    try:
+        result = reconcile_close_occurrence(TicketCloseOccurrence(proven.hubspot_ticket_id, proven.occurred_at))
+    except Exception as exc:
+        return retry_later(type(exc).__name__)
+    if result.classification in {
+        CloseClassification.APPLIED_CURRENT,
+        CloseClassification.APPLIED_HISTORICAL,
+        CloseClassification.DUPLICATE,
+    }:
+        mark_processed(proven.pk)
+        if proven.pk != occurrence.pk:
+            SupportLifecycleOccurrence.objects.filter(
+                pk=occurrence.pk,
+                evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVIDER_MATERIALIZATION_PENDING,
+            ).update(
+                evidence_status=SupportLifecycleOccurrence.EvidenceStatus.REJECTED,
+                processing_status=SupportLifecycleOccurrence.ProcessingStatus.PROCESSED,
+                last_error_code="duplicate_proven_occurrence",
+                next_reconcile_at=None,
+            )
+        return "processed"
+    return retry_later(result.classification.value)
+
+
+@shared_task(name="support.task_scan_lifecycle_occurrences")
+def task_scan_lifecycle_occurrences() -> int:
+    """Recover due lifecycle readbacks after worker or broker restarts."""
+    from apps.support.models import SupportLifecycleOccurrence
+
+    due_ids = list(
+        SupportLifecycleOccurrence.objects.filter(
+            processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
+            next_reconcile_at__lte=timezone.now(),
+        )
+        .order_by("next_reconcile_at")
+        .values_list("pk", flat=True)[:100]
+    )
+    for occurrence_id in due_ids:
+        task_reconcile_lifecycle_occurrence.delay(str(occurrence_id))
+    return len(due_ids)
+
+
+@shared_task(name="support.task_check_hubspot_capabilities")
+def task_check_hubspot_capabilities() -> dict[str, str]:
+    """Refresh the read-only HubSpot capability snapshot used by readiness."""
+    if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "off":
+        return {"mode": "off"}
+    from apps.support.provider_readiness import refresh_hubspot_capabilities
+
+    return refresh_hubspot_capabilities()
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=15, name="support.task_handle_owner_change")
 def task_handle_owner_change(
     self,
@@ -482,10 +670,28 @@ def task_handle_owner_change(
 
     try:
         previous_owner_id = payload.get("previousValue")
+        owner_occurrence = None
+        if settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "off" and settings.HUBSPOT_PORTAL_ID:
+            from apps.support.auto_assign_service import _parse_hubspot_timestamp
+            from apps.support.lifecycle_occurrence_service import record_proven_occurrence
+            from apps.support.models import SupportLifecycleOccurrence
+
+            occurred_at = _parse_hubspot_timestamp(payload.get("occurredAt"))
+            if occurred_at is not None:
+                owner_occurrence = record_proven_occurrence(
+                    account_id=str(settings.HUBSPOT_PORTAL_ID),
+                    ticket_id=hubspot_ticket_id,
+                    occurrence_type=SupportLifecycleOccurrence.Type.OWNER_CHANGED,
+                    occurred_at=occurred_at,
+                    evidence_source="webhook_property",
+                    source_event_id=str(payload.get("eventId") or ""),
+                )
         from apps.support.capacity_service import capacity_mode
         from apps.support.owner_reconciliation_service import CloseProjectionError, reconcile_ticket
 
         mode = capacity_mode()
+        if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce" and mode != "enforce":
+            raise RuntimeError("Canonical capacity writer is required for provider contract enforcement")
         occupancy = None
         if mode != "off":
             try:
@@ -502,6 +708,23 @@ def task_handle_owner_change(
                 logger.warning("capacity_shadow_observation_failed")
                 occupancy = None
             if mode == "enforce":
+                if occupancy is not None and owner_occurrence is not None:
+                    from apps.support.lifecycle_occurrence_service import mark_processed, owner_occurrence_matches_cycle
+                    from apps.support.models import SupportLifecycleOccurrence
+
+                    if (
+                        owner_occurrence.processing_status == SupportLifecycleOccurrence.ProcessingStatus.PENDING
+                        and owner_occurrence_matches_cycle(owner_occurrence, occupancy.cycle_id)
+                    ):
+                        mark_processed(owner_occurrence.pk)
+                    else:
+                        SupportLifecycleOccurrence.objects.filter(
+                            pk=owner_occurrence.pk,
+                            processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
+                        ).update(
+                            next_reconcile_at=timezone.now() + timedelta(seconds=30),
+                            last_error_code="owner_cycle_pending",
+                        )
                 return
 
         prev_owner_int = _safe_parse_owner_id(previous_owner_id)
@@ -547,6 +770,10 @@ def task_handle_owner_change(
                 prev_owner_int=prev_owner_int,
                 new_owner_int=new_owner_int,
             )
+            if owner_occurrence is not None:
+                from apps.support.lifecycle_occurrence_service import mark_processed
+
+                mark_processed(owner_occurrence.pk)
         finally:
             lock.release()
 
@@ -660,8 +887,8 @@ def _do_handle_owner_change(
                     agent=to_agent,
                     agent_name=to_agent.name if to_agent else "",
                     hubspot_owner_id=new_owner_int,
-                    assignment_type="manual",
-                    assigned_by="hubspot_manual",
+                    assignment_type=str(classify_owner_effect()),
+                    assigned_by="",
                     pipeline_id=queue_row.pipeline_id,
                     entered_queue_at=queue_row.entered_queue_at,
                     queue_wait_seconds=wait_seconds,
@@ -684,7 +911,7 @@ def _do_handle_owner_change(
                     record_ticket_attendant(
                         ticket_id=hubspot_ticket_id,
                         agent=to_agent,
-                        source=ConversationInstanceAttendant.Source.OWNER_CHANGE,
+                        source=ConversationInstanceAttendant.Source.UNKNOWN_EXTERNAL,
                         metadata={"support_cycle_id": str(assigned_conv.cycle_id or "")},
                     )
                 return
@@ -730,7 +957,7 @@ def _do_handle_owner_change(
             to_agent_name=to_agent.name if to_agent else None,
             reassigned_at=now,
             time_with_previous_agent_seconds=time_with_prev_seconds,
-            reassignment_source="hubspot_webhook",
+            reassignment_source=str(classify_owner_effect()),
         )
 
     if to_agent:
@@ -739,7 +966,7 @@ def _do_handle_owner_change(
         record_ticket_attendant(
             ticket_id=hubspot_ticket_id,
             agent=to_agent,
-            source=ConversationInstanceAttendant.Source.OWNER_CHANGE,
+            source=ConversationInstanceAttendant.Source.UNKNOWN_EXTERNAL,
             metadata={"support_cycle_id": str(assigned_conv.cycle_id or "")},
         )
 
@@ -783,34 +1010,84 @@ def task_aggregate_queue_metrics() -> None:
 
     Should run once daily (e.g., at 00:05 AM) to aggregate the previous day.
     """
-    from apps.support.models import AssignedConversation, ClosedConversation, NewConversation, QueuePerformanceMetrics
+    from apps.support.models import (
+        AssignedConversation,
+        AssignmentLog,
+        ClosedConversation,
+        NewConversation,
+        QueuePerformanceMetrics,
+        SupportConversationCycle,
+    )
 
     today = timezone.localdate()
     yesterday = today - timedelta(days=1)
 
-    entered = NewConversation.objects.filter(entered_queue_at__date=yesterday).count()
-
     assigned_qs = AssignedConversation.objects.filter(assigned_at__date=yesterday)
-    assigned_count = assigned_qs.count()
+    if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+        from decimal import Decimal
+
+        from apps.support.agent_message_evidence import attributed_agent_cycles
+
+        entered = SupportConversationCycle.objects.filter(entered_stage_at__date=yesterday).count()
+        entered += NewConversation.objects.filter(cycle__isnull=True, entered_queue_at__date=yesterday).count()
+        assignment_rows = list(assigned_qs.values("pk", "cycle_id", "hubspot_owner_id", "queue_wait_seconds"))
+        assignment_rows.extend(
+            ClosedConversation.objects.filter(assigned_at__date=yesterday).values(
+                "pk", "cycle_id", "hubspot_owner_id", "queue_wait_seconds"
+            )
+        )
+        assignments_by_cycle = {}
+        for position, row in enumerate(assignment_rows):
+            key = row["cycle_id"] if row["cycle_id"] is not None else ("legacy", position)
+            assignments_by_cycle.setdefault(key, row)
+        assigned_count = len(assignments_by_cycle)
+        wait_values = sorted(
+            row["queue_wait_seconds"] for row in assignments_by_cycle.values() if row["queue_wait_seconds"] is not None
+        )
+        wait_agg = {
+            "avg": sum(wait_values, Decimal(0)) / len(wait_values) if wait_values else None,
+            "min": wait_values[0] if wait_values else None,
+            "max": wait_values[-1] if wait_values else None,
+        }
+        daily_cycle_ids = {key for key in assignments_by_cycle if not isinstance(key, tuple)}
+        daily_cycle_ids.update(
+            AssignmentLog.objects.filter(assigned_at__date=yesterday, cycle__isnull=False).values_list(
+                "cycle_id", flat=True
+            )
+        )
+        agent_cycle_assignments = attributed_agent_cycles(daily_cycle_ids)
+        agent_cycle_assignments.update(
+            (key, row["hubspot_owner_id"])
+            for key, row in assignments_by_cycle.items()
+            if isinstance(key, tuple) and row["hubspot_owner_id"] is not None
+        )
+        assignments_by_agent: dict[str, int] = {}
+        for _cycle_id, observed_owner_id in agent_cycle_assignments:
+            owner_id = str(observed_owner_id)
+            assignments_by_agent[owner_id] = assignments_by_agent.get(owner_id, 0) + 1
+    else:
+        entered = NewConversation.objects.filter(entered_queue_at__date=yesterday).count()
+        assigned_count = assigned_qs.count()
+        wait_agg = assigned_qs.filter(queue_wait_seconds__isnull=False).aggregate(
+            avg=Avg("queue_wait_seconds"),
+            min=Min("queue_wait_seconds"),
+            max=Max("queue_wait_seconds"),
+        )
+        wait_values = list(
+            assigned_qs.filter(queue_wait_seconds__isnull=False)
+            .order_by("queue_wait_seconds")
+            .values_list("queue_wait_seconds", flat=True)
+        )
+        assignments_by_agent = {}
+        for row in assigned_qs.values("hubspot_owner_id").annotate(cnt=Count("id")):
+            assignments_by_agent[str(row["hubspot_owner_id"])] = row["cnt"]
 
     closed_qs = ClosedConversation.objects.filter(closed_at__date=yesterday)
     closed_count = closed_qs.count()
 
-    # Queue wait time aggregates
-    wait_agg = assigned_qs.filter(queue_wait_seconds__isnull=False).aggregate(
-        avg=Avg("queue_wait_seconds"),
-        min=Min("queue_wait_seconds"),
-        max=Max("queue_wait_seconds"),
-    )
-
     # Percentile calculation (p50, p95)
     p50: float | None = None
     p95: float | None = None
-    wait_values = list(
-        assigned_qs.filter(queue_wait_seconds__isnull=False)
-        .order_by("queue_wait_seconds")
-        .values_list("queue_wait_seconds", flat=True)
-    )
     if wait_values:
         n = len(wait_values)
         p50_idx = int(n * 0.50)
@@ -822,11 +1099,6 @@ def task_aggregate_queue_metrics() -> None:
     handle_agg = closed_qs.filter(total_handle_time_minutes__isnull=False).aggregate(
         avg=Avg("total_handle_time_minutes")
     )
-
-    # Breakdown by agent
-    assignments_by_agent: dict[str, int] = {}
-    for row in assigned_qs.values("hubspot_owner_id").annotate(cnt=Count("id")):
-        assignments_by_agent[str(row["hubspot_owner_id"])] = row["cnt"]
 
     QueuePerformanceMetrics.objects.update_or_create(
         metric_date=yesterday,
@@ -996,9 +1268,21 @@ def task_aggregate_agent_metrics() -> dict:
     Returns:
         Dict with ``updated`` and ``skipped`` counts.
     """
-    from apps.support.models import Agent, AgentDailyTimeLog, AgentMetrics, AssignmentLog, ClosedConversation
+    from apps.support.models import (
+        Agent,
+        AgentDailyTimeLog,
+        AgentMetrics,
+        AssignmentLog,
+        ClosedConversation,
+    )
 
     agents = list(Agent.objects.exclude(is_active=False))
+    if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+        from apps.support.agent_message_evidence import attributed_agent_cycles
+
+        attributed_counts: dict[int, int] = {}
+        for _cycle_id, owner_id in attributed_agent_cycles():
+            attributed_counts[owner_id] = attributed_counts.get(owner_id, 0) + 1
     now = timezone.now()
     yesterday = timezone.localdate() - timedelta(days=1)
     updated = 0
@@ -1015,10 +1299,20 @@ def task_aggregate_agent_metrics() -> dict:
         avg_handle = float(closed_agg["avg_handle"] or 0.0)
         avg_wait_min = float(closed_agg["avg_wait"] or 0.0) / 60.0
 
-        total_auto = AssignmentLog.objects.filter(
-            agent=agent,
-            assignment_type="automatic",
-        ).count()
+        if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+            legacy_closed = ClosedConversation.objects.filter(agent=agent, cycle__isnull=True).count()
+            legacy_auto = AssignmentLog.objects.filter(
+                agent=agent,
+                cycle__isnull=True,
+                assignment_type__in=("automatic", "automatic_assignment"),
+            ).count()
+            total_handled = attributed_counts.get(agent.hubspot_owner_id, 0) + legacy_closed + legacy_auto
+        else:
+            total_auto = AssignmentLog.objects.filter(
+                agent=agent,
+                assignment_type__in=("automatic", "automatic_assignment"),
+            ).count()
+            total_handled = total_chats + total_auto
 
         # Compute average online/away time from daily logs (last 30 days)
         # aggregate() returns None for empty querysets — no need for exists() guard
@@ -1035,7 +1329,7 @@ def task_aggregate_agent_metrics() -> dict:
         _, upserted = AgentMetrics.objects.update_or_create(
             agent_id=agent.hubspot_owner_id,
             defaults={
-                "total_chats": total_chats + total_auto,
+                "total_chats": total_handled,
                 "chats_closed": total_chats,
                 "average_ticket_time_min": avg_handle,
                 "average_response_time_min": avg_wait_min,

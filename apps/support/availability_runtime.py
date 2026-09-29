@@ -124,6 +124,11 @@ def may_assign() -> bool:
         return False
     if not bool(settings.AUTO_ASSIGNMENT_ENABLED):
         return False
+    if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+        from apps.support.provider_readiness import provider_assignment_allowed
+
+        if not provider_assignment_allowed():
+            return False
 
     configured_canary = _configured_canary_values()
     canary_ids = automatic_assignment_canary_agent_ids()

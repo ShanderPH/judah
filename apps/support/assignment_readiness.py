@@ -309,6 +309,11 @@ def evaluate_assignment_readiness() -> dict[str, Any]:
     if cycle_checks.get("enforced") and not cycle_checks.get("enforcement_ready"):
         reasons.append("conversation_cycle_enforcement_unsafe")
 
+    from apps.support.provider_readiness import provider_contract_checks, provider_contract_reasons
+
+    checks["provider_contract"] = provider_contract_checks(now)
+    reasons.extend(provider_contract_reasons(checks["provider_contract"]))
+
     try:
         from apps.webhooks.models import DeadLetterQueue, OutboxEvent, WebhookEvent
 
@@ -374,6 +379,14 @@ def emit_assignment_readiness_metrics(readiness: dict[str, Any]) -> None:
     emit_metric("assignment_queue_oldest_age_seconds", checks["oldest_ready_age_seconds"], kind="gauge")
     emit_metric("assignment_capacity_drift_agents", checks["capacity_drift_agents"], kind="gauge")
     cycle_checks = checks.get("conversation_cycles", {})
+    provider_checks = checks.get("provider_contract", {})
+    if provider_checks.get("mode") != "off":
+        emit_metric(
+            "hubspot_capability_ready", int(bool(provider_checks.get("mandatory_capabilities_available"))), kind="gauge"
+        )
+        emit_metric("hubspot_roster_fresh", int(bool(provider_checks.get("roster_fresh"))), kind="gauge")
+        emit_metric("support_lifecycle_pending_close", provider_checks.get("pending_close_count", 0), kind="gauge")
+        emit_metric("support_lifecycle_repair_required", provider_checks.get("repair_required_count", 0), kind="gauge")
     if "recent_close_projection_inconsistencies" in cycle_checks:
         emit_metric(
             "ticket_close_projection_inconsistencies_recent",

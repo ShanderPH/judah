@@ -165,6 +165,33 @@ def queue(identity: str = "cap-1") -> NewConversation:
     )
 
 
+def test_reservation_does_not_overwrite_canonical_count(provider):
+    from django.db.models.signals import pre_save
+
+    from apps.support.capacity_service import hold_capacity
+
+    target = agent(200)
+    queue()
+    provider.get_ticket_details.return_value = ticket("")
+
+    def concurrent_projection(sender, instance, update_fields, **kwargs):
+        if instance.pk == target.pk and update_fields and "last_assignment_at" in update_fields:
+            Agent.objects.filter(pk=target.pk).update(current_simultaneous_chats=3)
+
+    def check_before_reservation(*args, **kwargs):
+        assert Agent.objects.get(pk=target.pk).current_simultaneous_chats == 3
+        return hold_capacity(*args, **kwargs)
+
+    pre_save.connect(concurrent_projection, sender=Agent, weak=False)
+    try:
+        with patch("apps.support.durable_assignment_service.hold_capacity", side_effect=check_before_reservation):
+            reservation = reserve_next_assignment("cap-1")
+    finally:
+        pre_save.disconnect(concurrent_projection, sender=Agent)
+
+    assert reservation.attempt is not None
+
+
 def test_confirmed_effect_and_webhook_share_one_unit(provider):
     target = agent(200)
     queue()
@@ -260,6 +287,7 @@ def test_portfolio_bootstrap_resumes_after_bounded_historical_batches(provider, 
     provider.get_ticket_details.side_effect = lambda identity: {
         **ticket("", identity),
         "stage": STAGE_FECHADO_ID,
+        "entered_closed_at": timezone.now(),
     }
 
     assert not refresh_agent_capacity(target, force=True)
@@ -384,9 +412,14 @@ def test_close_without_cycle_releases_only_current_ticket(provider):
     target = agent(200)
     provider.get_ticket_details.return_value = ticket(200)
     reconcile_ticket("cap-1")
-    provider.get_ticket_details.return_value = {**ticket(200), "stage": STAGE_FECHADO_ID}
-    handle_ticket_closed("cap-1")
-    handle_ticket_closed("cap-1")
+    closed_at_ms = str(int(timezone.now().timestamp() * 1000))
+    provider.get_ticket_details.return_value = {
+        **ticket(200),
+        "stage": STAGE_FECHADO_ID,
+        "entered_closed_at": timezone.now(),
+    }
+    handle_ticket_closed("cap-1", closed_at_ms)
+    handle_ticket_closed("cap-1", closed_at_ms)
     target.refresh_from_db()
     assert target.current_simultaneous_chats == 0
 
@@ -483,6 +516,7 @@ def test_explicit_bootstrap_uses_identity_bound_instead_of_runtime_deadline(prov
     provider.get_ticket_details.return_value = {
         **ticket("", "historical-bootstrap"),
         "stage": STAGE_FECHADO_ID,
+        "entered_closed_at": timezone.now(),
     }
 
     with patch(
@@ -735,7 +769,7 @@ def test_confirmed_archive_releases_held_capacity_without_finalizing(provider):
     queue()
     attempt = reserve_next_assignment("cap-1").attempt
     assert attempt is not None
-    provider.get_ticket_details.return_value = {**ticket(200), "archived": True}
+    provider.get_ticket_details.return_value = {**ticket(200), "archived": True, "entered_closed_at": timezone.now()}
     assert reconcile_ambiguous_attempt(attempt.pk) == "stale_ticket"
     target.refresh_from_db()
     assert target.current_simultaneous_chats == 0

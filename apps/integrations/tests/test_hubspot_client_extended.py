@@ -10,6 +10,7 @@ from django.test import override_settings
 from apps.integrations.hubspot import client as hubspot_module
 from apps.integrations.hubspot.client import HubSpotClient
 from apps.integrations.hubspot.exceptions import HubSpotAPIError
+from apps.integrations.hubspot.team_roster import TeamMember, TeamRoster
 from common.exceptions import ExternalServiceError
 
 
@@ -152,9 +153,12 @@ def test_owner_and_team_queries() -> None:
         user_id=99,
         teams=[team],
     )
-    other = SimpleNamespace(id=11, email="b@example.com", first_name="B", last_name="C", teams=[])
     client._client.crm.owners.owners_api.get_by_id.return_value = owner
-    client._client.crm.owners.owners_api.get_page.return_value = SimpleNamespace(results=[owner, other])
+    client.get_team_roster = Mock(
+        return_value=TeamRoster(
+            (TeamMember("99", "DEFAULT", "active", 10, "ana@example.com", "Ana", "Silva"),), True, None, 1
+        )
+    )
     with patch(
         "apps.integrations.hubspot.client._circuit_breaker.call",
         side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs),
@@ -168,6 +172,7 @@ def test_owner_and_team_queries() -> None:
 
 def test_owner_queries_handle_errors() -> None:
     client = _client()
+    client.get_team_roster = Mock(side_effect=ExternalServiceError("HubSpot", "offline"))
     with patch("apps.integrations.hubspot.client._circuit_breaker.call", side_effect=RuntimeError("offline")):
         assert client.get_owner_details(10) == {}
         with pytest.raises(ExternalServiceError):

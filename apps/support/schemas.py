@@ -136,7 +136,7 @@ class AssignedConversationResponse(Schema):
     hubspot_owner_id: int
     pipeline_id: str
     entered_queue_at: datetime | None = None
-    assigned_at: datetime
+    assigned_at: datetime | None = None
     queue_wait_seconds: Decimal | None = None
     closed_at: datetime | None = None
     closed_by_agent_name: str | None = None
@@ -513,7 +513,7 @@ class ConversationReassignmentResponse(Schema):
     from_hubspot_owner_id: int | None = None
     to_agent_name: str | None = None
     to_hubspot_owner_id: int | None = None
-    reassigned_at: datetime
+    reassigned_at: datetime | None = None
     time_with_previous_agent_seconds: Decimal | None = None
     reassignment_source: str
 

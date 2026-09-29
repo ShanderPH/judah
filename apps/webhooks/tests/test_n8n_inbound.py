@@ -243,6 +243,48 @@ def test_non_customer_messages_are_audited_without_outbox(message_overrides: dic
 
 
 @pytest.mark.django_db
+@override_settings(N8N_BOT_SENDER_ACTOR_ID="A-bot")
+def test_hydrated_agent_reply_records_sender_evidence_without_message_text() -> None:
+    envelope = {"portalId": "47354717", "objectId": "thread-1", "messageId": "agent-reply"}
+    first = record_hubspot_message_envelope(envelope)
+    thread = {**_thread(), "threadAssociations": [{"associatedTicketId": "ticket-1"}]}
+    result = ingest_hubspot_message(
+        portal_id="47354717",
+        thread=thread,
+        message=_message(id="agent-reply", direction="OUTGOING", senders=[{"actorId": "A-713"}]),
+        delivery_method="webhook",
+        raw_payload=envelope,
+        existing_event_id=first.event_id,
+    )
+
+    event = WebhookEvent.objects.get(pk=result.event_id)
+    assert result.ignored is True
+    assert event.hubspot_ticket_id == "ticket-1"
+    assert event.payload["_agent_message_evidence"] == {"actor_id": "A-713"}
+    assert "text" not in event.payload
+
+    bot = ingest_hubspot_message(
+        portal_id="47354717",
+        thread=_thread(),
+        message=_message(id="bot-reply", direction="OUTGOING", senders=[{"actorId": "A-bot"}]),
+        delivery_method="reconciliation",
+        raw_payload={"_agent_message_evidence": {"actor_id": "A-713"}},
+    )
+    assert "_agent_message_evidence" not in WebhookEvent.objects.get(pk=bot.event_id).payload
+
+    ambiguous = ingest_hubspot_message(
+        portal_id="47354717",
+        thread={
+            **_thread(),
+            "threadAssociations": [{"associatedTicketId": "ticket-1"}, {"associatedTicketId": "ticket-2"}],
+        },
+        message=_message(id="ambiguous-reply", direction="OUTGOING", senders=[{"actorId": "A-713"}]),
+        delivery_method="reconciliation",
+    )
+    assert WebhookEvent.objects.get(pk=ambiguous.event_id).hubspot_ticket_id == ""
+
+
+@pytest.mark.django_db
 def test_missing_message_id_is_explicitly_ignored() -> None:
     result = record_hubspot_message_envelope({"portalId": "1", "objectId": "thread-1"})
     assert result.ignored is True

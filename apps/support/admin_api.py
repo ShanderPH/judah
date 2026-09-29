@@ -22,6 +22,7 @@ from django.db.models import Avg, Count, Q, Sum
 from django.utils import timezone
 from ninja import Router
 
+from apps.support.assignment_provenance import administrative_source, classify_owner_effect
 from apps.support.models import (
     Agent,
     AgentDailyTimeLog,
@@ -537,8 +538,11 @@ def _force_reassign_internal(
 ) -> dict:
     """Force-reassign a ticket already present in assigned_conversations."""
     from apps.support.availability_runtime import require_routing_writer_authority
+    from apps.support.provider_readiness import provider_assignment_allowed
 
     require_routing_writer_authority("admin_force_reassign")
+    if not provider_assignment_allowed():
+        raise ValidationError("HubSpot provider contract is unavailable for assignment.")
     from apps.support.capacity_service import capacity_enforced
 
     if capacity_enforced():
@@ -585,14 +589,14 @@ def _force_reassign_internal(
             to_agent_name=target_agent.name,
             reassigned_at=now,
             time_with_previous_agent_seconds=duration_with_previous,
-            reassignment_source=f"{reason or 'admin_force_reassign'}:reserved",
+            reassignment_source=administrative_source(reason, reserved=True),
         )
 
     _hubspot_assign(hubspot_ticket_id, target_agent.hubspot_owner_id)
 
     with transaction.atomic():
         assigned = AssignedConversation.objects.select_for_update().get(pk=assigned.pk)
-        reassignment.reassignment_source = reason or "admin_force_reassign"
+        reassignment.reassignment_source = administrative_source(reason)
         reassignment.save(update_fields=["reassignment_source"])
         assigned.agent = target_agent
         assigned.hubspot_owner_id = target_agent.hubspot_owner_id
@@ -615,7 +619,7 @@ def _force_reassign_internal(
             agent=target_agent,
             agent_name=target_agent.name,
             hubspot_owner_id=target_agent.hubspot_owner_id,
-            assignment_type="forced_reassign",
+            assignment_type=str(classify_owner_effect(administrative_reassignment=True)),
             assigned_by=actor_email,
             pipeline_id=assigned.pipeline_id,
         )
@@ -707,7 +711,7 @@ def _capacity_force_reassign(
             to_hubspot_owner_id=target.hubspot_owner_id,
             to_agent_name=target.name,
             reassigned_at=timezone.now(),
-            reassignment_source="admin_force_reassign:reserved",
+            reassignment_source=administrative_source(reason, reserved=True),
         )
         hold_capacity(occupancy, target, reassignment=intent)
     try:
@@ -720,7 +724,7 @@ def _capacity_force_reassign(
         degrade_agents({target.pk})
         raise ValidationError("Transfer remains unconfirmed; capacity reservation is retained.")
     with ticket_transaction(ticket_id):
-        intent.reassignment_source = reason or "admin_force_reassign"
+        intent.reassignment_source = administrative_source(reason)
         intent.save(update_fields=["reassignment_source"])
         AssignmentLog.objects.create(
             ticket_id=ticket_id,
@@ -728,7 +732,7 @@ def _capacity_force_reassign(
             agent=target,
             agent_name=target.name,
             hubspot_owner_id=target.hubspot_owner_id,
-            assignment_type="forced_reassign",
+            assignment_type=str(classify_owner_effect(administrative_reassignment=True)),
             assigned_by=actor_email,
             pipeline_id=assigned.pipeline_id,
         )
