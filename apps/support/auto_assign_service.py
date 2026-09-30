@@ -578,9 +578,7 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
 
     team_key = f"team_{team_id}"
     active_owner_ids = {
-        member.owner_id
-        for member in roster.members
-        if member.state == "active" and member.owner_id is not None
+        member.owner_id for member in roster.members if member.state == "active" and member.owner_id is not None
     }
     created_count = 0
     with transaction.atomic():
