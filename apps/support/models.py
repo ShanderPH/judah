@@ -7,6 +7,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from apps.support.assignment_provenance import AssignmentProvenance
+
 
 def default_support_pipeline_id() -> str:
     """Return the configured support pipeline for newly persisted queue rows."""
@@ -905,6 +907,14 @@ class AssignmentLog(models.Model):
         ordering = ["-assigned_at"]  # noqa: RUF012
         indexes = [  # noqa: RUF012
             models.Index(fields=["assignment_type", "-assigned_at"], name="idx_alog_type_assigned_desc"),
+        ]
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(
+                    assignment_type__in=["auto", "automatic", "manual", *AssignmentProvenance],
+                ),
+                name="assignment_logs_assignment_type_check",
+            ),
         ]
 
     def __str__(self) -> str:
