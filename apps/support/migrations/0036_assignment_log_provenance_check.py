@@ -57,13 +57,16 @@ def replace_check(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> N
         schema_editor: Migration connection used for validation and replacement.
     """
     if schema_editor.connection.vendor != "postgresql":
-        schema_editor.add_constraint(
-            apps.get_model("support", "AssignmentLog"),
-            models.CheckConstraint(
-                condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
-                name=CONSTRAINT_NAME,
-            ),
+        model = apps.get_model("support", "AssignmentLog")
+        constraint = models.CheckConstraint(
+            condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
+            name=CONSTRAINT_NAME,
         )
+        model._meta.constraints = [
+            item for item in model._meta.constraints if item.name != CONSTRAINT_NAME
+        ]
+        model._meta.constraints = [*model._meta.constraints, constraint]
+        schema_editor.add_constraint(model, constraint)
         return
 
     current = _constraint_definition(schema_editor, CONSTRAINT_NAME)
@@ -100,13 +103,15 @@ def restore_legacy_check(apps: StateApps, schema_editor: BaseDatabaseSchemaEdito
         IntegrityError: Existing canonical-only values prevent legacy validation.
     """
     if schema_editor.connection.vendor != "postgresql":
-        schema_editor.remove_constraint(
-            apps.get_model("support", "AssignmentLog"),
-            models.CheckConstraint(
-                condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
-                name=CONSTRAINT_NAME,
-            ),
+        model = apps.get_model("support", "AssignmentLog")
+        constraint = models.CheckConstraint(
+            condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
+            name=CONSTRAINT_NAME,
         )
+        model._meta.constraints = [
+            item for item in model._meta.constraints if item.name != CONSTRAINT_NAME
+        ]
+        schema_editor.remove_constraint(model, constraint)
         return
 
     current = _constraint_definition(schema_editor, CONSTRAINT_NAME)
