@@ -203,6 +203,7 @@ def test_sync_team_members_keeps_crm_user_identity_separate_from_settings_user_i
     assert stale.is_active is False
     assert stale.auto_assign_enabled is False
 
+
 @pytest.mark.django_db
 def test_sync_team_members_handles_external_failure() -> None:
     client = MagicMock()
