@@ -555,7 +555,12 @@ def sync_novo_stage_tickets() -> dict:
 
 
 def sync_hubspot_team_to_agents(team_id: str) -> int:
-    """Sync only a complete provider roster into local agent identities."""
+    """Sync a complete provider roster without mixing HubSpot user-ID namespaces.
+
+    Team membership / Settings APIs expose the account user ID while SAT stores
+    the CRM Users object ID in Agent.hubspot_user_id. The CRM owner ID is the
+    stable cross-API identity used for roster membership and agent upserts.
+    """
     from apps.support.availability_runtime import (
         is_authoritative_availability_runtime,
         log_runtime_rejection,
@@ -571,44 +576,48 @@ def sync_hubspot_team_to_agents(team_id: str) -> int:
     if not roster.complete:
         raise HubSpotAPIError("HubSpot team roster is incomplete.", retryable=True)
 
+    team_key = f"team_{team_id}"
+    active_owner_ids = {
+        member.owner_id for member in roster.members if member.state == "active" and member.owner_id is not None
+    }
     created_count = 0
-    current_user_ids = {member.user_id for member in roster.members}
     with transaction.atomic():
-        Agent.objects.filter(team=f"team_{team_id}", hubspot_user_id__isnull=False).exclude(
-            hubspot_user_id__in=current_user_ids
-        ).update(is_active=False, auto_assign_enabled=False)
+        # Settings-team user IDs and CRM Users object IDs are different namespaces.
+        # Deactivate only by resolved owner identity; SAT remains the sole writer
+        # of Agent.hubspot_user_id.
+        Agent.objects.filter(team=team_key).exclude(hubspot_owner_id__in=active_owner_ids).update(
+            is_active=False,
+            auto_assign_enabled=False,
+        )
+
         for member in roster.members:
-            if member.state != "active":
-                Agent.objects.filter(hubspot_user_id=member.user_id).update(is_active=False, auto_assign_enabled=False)
+            if member.state != "active" or member.owner_id is None or not member.email:
                 continue
-            if member.owner_id is None or not member.email:
-                continue
+
             name = f"{member.first_name} {member.last_name}".strip() or member.email
             agent, created = Agent.objects.get_or_create(
                 hubspot_owner_id=member.owner_id,
                 defaults={
                     "name": name,
                     "agent_email": member.email,
-                    "hubspot_user_id": member.user_id,
+                    "hubspot_user_id": None,
                     "status_enum": Agent.StatusEnum.OFFLINE,
                     "current_simultaneous_chats": 0,
                     "max_simultaneous_chats": 5,
                     "auto_assign_enabled": True,
                     "is_active": True,
-                    "team": f"team_{team_id}",
+                    "team": team_key,
                 },
             )
             if created:
                 created_count += 1
-            else:
-                if agent.hubspot_user_id not in {None, member.user_id}:
-                    raise HubSpotAPIError("HubSpot user-to-owner mapping changed.", retryable=False)
-                agent.hubspot_user_id = member.user_id
-                agent.is_active = True
-                agent.team = f"team_{team_id}"
-                agent.name = name
-                agent.agent_email = member.email
-                agent.save(update_fields=["hubspot_user_id", "is_active", "team", "name", "agent_email"])
+                continue
+
+            agent.is_active = True
+            agent.team = team_key
+            agent.name = name
+            agent.agent_email = member.email
+            agent.save(update_fields=["is_active", "team", "name", "agent_email"])
 
     cache.set(f"hubspot_roster_complete_at:{team_id}", timezone.now().isoformat(), timeout=86400 * 2)
     logger.info("auto_assign_team_sync_complete", team_id=team_id, created=created_count, pages=roster.pages_read)

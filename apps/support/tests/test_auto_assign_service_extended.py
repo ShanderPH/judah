@@ -161,26 +161,47 @@ def test_sync_novo_stage_covers_created_skipped_assigned_and_reactivated() -> No
 
 
 @pytest.mark.django_db
-def test_sync_team_members_creates_only_valid_new_agents() -> None:
-    _agent(1, name="Existing")
+def test_sync_team_members_keeps_crm_user_identity_separate_from_settings_user_id() -> None:
+    existing = _agent(1, name="Existing")
+    existing.hubspot_user_id = "crm-user-object-11"
+    existing.team = "team_8"
+    existing.save(update_fields=["hubspot_user_id", "team"])
+
+    stale = _agent(9, name="Stale")
+    stale.hubspot_user_id = "crm-user-object-99"
+    stale.team = "team_8"
+    stale.save(update_fields=["hubspot_user_id", "team"])
+
     client = MagicMock()
     client.get_team_roster.return_value = TeamRoster(
         members=(
-            TeamMember("11", "DEFAULT", "active", 1, "existing@test.local", "Existing"),
-            TeamMember("12", "DEFAULT", "active", 2, "new@test.local", "New", "Agent"),
-            TeamMember("13", "DEFAULT", "owner_missing", None, "missing@test.local"),
-            TeamMember("14", "DEFAULT", "active", 3, ""),
+            TeamMember("settings-user-11", "DEFAULT", "active", 1, "existing@test.local", "Existing"),
+            TeamMember("settings-user-12", "DEFAULT", "active", 2, "new@test.local", "New", "Agent"),
+            TeamMember("settings-user-13", "DEFAULT", "owner_missing", None, "missing@test.local"),
+            TeamMember("settings-user-14", "DEFAULT", "active", 3, ""),
         ),
         complete=True,
         next_cursor=None,
         pages_read=1,
     )
+
     with patch.object(auto_assign_service, "get_hubspot_client", return_value=client):
         assert auto_assign_service.sync_hubspot_team_to_agents("8") == 1
+
+    existing.refresh_from_db()
+    assert existing.hubspot_user_id == "crm-user-object-11"
+    assert existing.is_active is True
+    assert existing.team == "team_8"
+
     created = Agent.objects.get(hubspot_owner_id=2)
     assert created.name == "New Agent"
     assert created.team == "team_8"
     assert created.status_enum == Agent.StatusEnum.OFFLINE
+    assert created.hubspot_user_id is None
+
+    stale.refresh_from_db()
+    assert stale.is_active is False
+    assert stale.auto_assign_enabled is False
 
 
 @pytest.mark.django_db
