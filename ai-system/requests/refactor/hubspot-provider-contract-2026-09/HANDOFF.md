@@ -1,5 +1,21 @@
 # Handoff para VERIFY
 
+## Atualização de provenance — 2026-09-30
+
+- `AssignmentLog` agora declara CHECK compatível com três valores legados e seis valores canônicos; migration `0036` troca o CHECK físico sem janela sem validação e guarda a presença anterior para reverse.
+- Regressão PostgreSQL reproduz o CHECK legado, testa forward/reverse e acompanha owner observado sem prova de ator por occurrence, ciclo, occupancy, capacidade e retry.
+- Auditoria de ARCH-03 e plano pós-merge estão em `03-verification/architecture-audit.md` e `05-deployment/release-and-rollback.md`.
+
+**Arquivos desta atualização:** `apps/support/models.py`, `apps/support/migrations/0036_assignment_log_provenance_check.py`, `apps/support/tests/test_assignment_provenance_postgres.py`, `ai-system/requests/refactor/hubspot-provider-contract-2026-09/{STATUS.md,HANDOFF.md,03-verification/architecture-audit.md,05-deployment/release-and-rollback.md}`.
+
+**Teste local:** `SALOMAO_V1_BASE_URL= .venv/bin/python run_tests_local.py`; para PostgreSQL 16 local descartável, `DJANGO_ENV=test DATABASE_URL=<URL-local-judah_test> .venv/bin/pytest apps/support/tests/test_assignment_provenance_postgres.py -q --no-cov`. Nunca apontar testes para banco não local.
+
+**Gates locais:** suíte SQLite: 1003 passed / 50 skipped, cobertura 90,69% (piso 90%); suíte PostgreSQL 16: 1047 passed / 6 skipped. Após ajustes finais de docstrings e tipagem, regressão PostgreSQL: 3 passed; Ruff check/format, mypy (`apps core common`), Django checks e migration drift aprovados. As suítes completas precedem esses ajustes de documentação e tipagem; a regressão focada valida a versão final.
+
+**Docstrings:** auditoria AST dos dois módulos novos: 10/10 definições documentadas (módulos, classe e funções, incluindo helpers privados). Funções públicas da migration possuem parâmetros/retorno tipados e docstrings com argumentos e falhas de rollback.
+
+**Primeiro VERIFY:** conferir CHECK após `0036`, papel `judah_schema_migration` e ausência de dupla gravação por rota; executar canário com readback e comparar contagens por ciclo. Reverse é bloqueado quando já existem valores canônicos exclusivos. `48989048943` está sem owner atual; não criar atribuição histórica sem prova do provider.
+
 ## Gate operacional de scopes e preflight — 2026-09-29
 
 - Manifesto do app agora explicita `crm.objects.tickets.read`, `crm.objects.tickets.write` e `crm.objects.owners.read`; preserva `tickets` e os scopes de Conversations já publicados.
