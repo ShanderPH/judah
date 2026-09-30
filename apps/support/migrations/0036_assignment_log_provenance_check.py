@@ -62,9 +62,7 @@ def replace_check(apps: StateApps, schema_editor: BaseDatabaseSchemaEditor) -> N
             condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
             name=CONSTRAINT_NAME,
         )
-        model._meta.constraints = [
-            item for item in model._meta.constraints if item.name != CONSTRAINT_NAME
-        ]
+        model._meta.constraints = [item for item in model._meta.constraints if item.name != CONSTRAINT_NAME]
         model._meta.constraints = [*model._meta.constraints, constraint]
         schema_editor.add_constraint(model, constraint)
         return
@@ -108,9 +106,7 @@ def restore_legacy_check(apps: StateApps, schema_editor: BaseDatabaseSchemaEdito
             condition=models.Q(assignment_type__in=(*LEGACY_TYPES, *CANONICAL_TYPES)),
             name=CONSTRAINT_NAME,
         )
-        model._meta.constraints = [
-            item for item in model._meta.constraints if item.name != CONSTRAINT_NAME
-        ]
+        model._meta.constraints = [item for item in model._meta.constraints if item.name != CONSTRAINT_NAME]
         schema_editor.remove_constraint(model, constraint)
         return
 
