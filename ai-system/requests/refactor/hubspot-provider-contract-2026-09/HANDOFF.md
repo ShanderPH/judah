@@ -1,5 +1,19 @@
 # Handoff para VERIFY
 
+## Baseline pós-deploy — 2026-10-02
+
+- Produção e `main` convergiram no SHA `0ca25b842ef55607af210419a8c17c4b56d6074f` do PR #133; API, worker e beat estão com deployment SUCCESS.
+- A migration `0036` está aplicada em produção e o CHECK físico aceita os valores históricos e canônicos de provenance.
+- Roster local pós-hotfix: 7 agentes ativos no time N1, nenhum sem owner ID; 8 agentes ativos no total com owner ID e CRM user ID.
+- Baseline de invariantes: zero double-cycle live, zero duplicate occupancy, zero duplicate assignment log por ticket/cycle e zero drift de capacidade nos agentes ativos.
+- Pós-cutover, assignments materializados convergem: 49 automáticos `confirmed_by_read`; logs `unknown_external` permanecem sem attempt artificial e com cycle.
+- Novo blocker operacional: 229 `owner_changed` estão em `repair_required`; 24 dessas ocorrências hoje já cabem temporalmente em um ciclo válido, mas `repair_required` não é retomado pelo scanner automático.
+- Há ainda 3 `entered_support_queue` em `pending`, sem `next_reconcile_at`, sem retry e sem ciclo exato. Esse estado não entra no scanner atual e precisa de classificação.
+- Relatório detalhado: `03-verification/post-deploy-baseline-2026-10-02.md`.
+- Nenhum replay, repair, backfill, mutation HubSpot ou novo deploy foi executado nesta etapa.
+
+**Próximo VERIFY:** classificar o backlog de lifecycle e fechar a lacuna de convergência antes do V-03 sandbox/canário final.
+
 ## Atualização de provenance — 2026-09-30
 
 - `AssignmentLog` agora declara CHECK compatível com três valores legados e seis valores canônicos; migration `0036` troca o CHECK físico sem janela sem validação e guarda a presença anterior para reverse.
