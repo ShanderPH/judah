@@ -1,5 +1,18 @@
 # Handoff para VERIFY
 
+## Hotfix do PR #134 — 2026-10-02
+
+- Corrigidas entradas comprovadas pending sem agendamento: criação agenda e scanner recupera entradas sem horário, dentro do orçamento existente.
+- Retry de entrada agora chama o writer canônico de abertura; não interpreta entrada como fechamento. Conflito, stale e evidência insuficiente permanecem bounded e não alteram ciclo mais novo.
+- Next.js e preset ESLint atualizados para 16.3.8 com lockfile validado por `npm ci`; auditoria de produção sem vulnerabilidades.
+- 12 casos de regressão de entrada adicionados. Suíte completa SQLite: 1.016 passed / 50 skipped, cobertura 90,75%; regressões PostgreSQL local: 52 passed. WebApp: 66 testes e build aprovados; Ruff/mypy/Django/migration drift aprovados.
+
+**Arquivos:** `apps/support/{lifecycle_occurrence_service.py,tasks.py,tests/test_lifecycle_entry_recovery.py}`, `webapp/{package.json,package-lock.json}` e os artefatos desta request. Checkout: `/tmp/judah-pr134-review`.
+
+**Como testar:** comandos exatos e avisos não bloqueantes em `03-verification/pr-134-hotfix-review.md`. Plano e critérios em `01-plan/pr-134-hotfix.md`.
+
+**Primeiro VERIFY:** revisar o ramo de entrada, idempotência por identidade temporal, conflito/stale, budgets e exclusão de repair. As três entradas antigas expiradas serão classificadas como repair; não declarar recuperação de produção com base nos testes locais. Recovery dos 229 owners e 15 closes continua separado. V-03/ARCH-03 permanecem abertos; conferir deployments reais, pois CD contém passos placeholder.
+
 ## Baseline pós-deploy — 2026-10-02
 
 - Produção e `main` convergiram no SHA `0ca25b842ef55607af210419a8c17c4b56d6074f` do PR #133; API, worker e beat estão com deployment SUCCESS.
