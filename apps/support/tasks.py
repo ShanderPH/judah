@@ -453,7 +453,7 @@ def task_handle_ticket_closed(
 
 @shared_task(name="support.task_reconcile_lifecycle_occurrence")
 def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
-    """Read back one pending close with a persisted retry and age budget."""
+    """Reconcile one pending lifecycle occurrence within its retry and age budget."""
     from uuid import UUID
 
     from django.db import transaction
@@ -462,6 +462,7 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
     from apps.integrations.hubspot.exceptions import HubSpotAPIError
     from apps.support.lifecycle_occurrence_service import (
         mark_processed,
+        open_from_proven_occurrence,
         owner_occurrence_matches_cycle,
         record_proven_occurrence,
     )
@@ -544,6 +545,33 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
             )
         return "repair_required"
 
+    if occurrence.occurrence_type == SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE:
+        from apps.support.conversation_cycle_service import CycleClassification
+
+        try:
+            with transaction.atomic():
+                current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
+                if current.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
+                    return current.processing_status
+                if (
+                    current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN
+                    or current.occurred_at is None
+                ):
+                    return retry_later("entry_evidence_unproven")
+                entry_result = open_from_proven_occurrence(
+                    ticket_id=current.hubspot_ticket_id,
+                    entered_at=current.occurred_at,
+                    account_id=current.source_account_id,
+                    evidence_source=current.evidence_source,
+                    source_event_id=current.source_event_id,
+                    observation_id=current.observation_id,
+                )
+        except Exception as exc:
+            return retry_later(type(exc).__name__)
+        if entry_result.admission.classification in {CycleClassification.CREATED, CycleClassification.DUPLICATE}:
+            return "processed"
+        return retry_later(entry_result.admission.classification.value)
+
     if occurrence.occurrence_type == SupportLifecycleOccurrence.Type.OWNER_CHANGED:
         from apps.support.owner_reconciliation_service import reconcile_ticket
 
@@ -614,12 +642,18 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
 @shared_task(name="support.task_scan_lifecycle_occurrences")
 def task_scan_lifecycle_occurrences() -> int:
     """Recover due lifecycle readbacks after worker or broker restarts."""
+    from django.db.models import Q
+
     from apps.support.models import SupportLifecycleOccurrence
 
     due_ids = list(
         SupportLifecycleOccurrence.objects.filter(
+            Q(next_reconcile_at__lte=timezone.now())
+            | Q(
+                occurrence_type=SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE,
+                next_reconcile_at__isnull=True,
+            ),
             processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
-            next_reconcile_at__lte=timezone.now(),
         )
         .order_by("next_reconcile_at")
         .values_list("pk", flat=True)[:100]

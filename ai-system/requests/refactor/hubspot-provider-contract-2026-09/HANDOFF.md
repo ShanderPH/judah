@@ -1,5 +1,36 @@
 # Handoff para VERIFY
 
+## Release conjunto #134/#135 — continuação do proof
+
+Não promover #134 isoladamente. A fonte desejada agora é contrato privado de `HUBSPOT_PROVIDER_CONFIG_JSON`; antes de promover, validar contrato privado, readback publicado novo, substituição do writer legado e todos os gates do SHA final. A concorrência terminal na entrada de #134 foi corrigida na revisão de #135, com regressão permanente e contenção real PostgreSQL. Evidências atuais: `ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/review-comments.md`, relativo à raiz do checkout.
+
+## Hotfix do PR #134 — 2026-10-02
+
+- Corrigidas entradas comprovadas pending sem agendamento: criação agenda e scanner recupera entradas sem horário, dentro do orçamento existente.
+- Retry de entrada agora chama o writer canônico de abertura; não interpreta entrada como fechamento. Conflito, stale e evidência insuficiente permanecem bounded e não alteram ciclo mais novo.
+- Next.js e preset ESLint atualizados para 16.3.8 com lockfile validado por `npm ci`; auditoria de produção sem vulnerabilidades.
+- 12 casos de regressão de entrada adicionados. Suíte completa SQLite: 1.016 passed / 50 skipped, cobertura 90,75%; regressões PostgreSQL local: 52 passed. WebApp: 66 testes e build aprovados; Ruff/mypy/Django/migration drift aprovados.
+
+**Arquivos:** `apps/support/{lifecycle_occurrence_service.py,tasks.py,tests/test_lifecycle_entry_recovery.py}`, `webapp/{package.json,package-lock.json}` e os artefatos desta request. Checkout: `/tmp/judah-pr134-review`.
+
+**Como testar:** comandos exatos e avisos não bloqueantes em `03-verification/pr-134-hotfix-review.md`. Plano e critérios em `01-plan/pr-134-hotfix.md`.
+
+**Primeiro VERIFY:** revisar o ramo de entrada, idempotência por identidade temporal, conflito/stale, budgets e exclusão de repair. As três entradas antigas expiradas serão classificadas como repair; não declarar recuperação de produção com base nos testes locais. Recovery dos 229 owners e 15 closes continua separado. V-03/ARCH-03 permanecem abertos; conferir deployments reais, pois CD contém passos placeholder.
+
+## Baseline pós-deploy — 2026-10-02
+
+- Produção e `main` convergiram no SHA `0ca25b842ef55607af210419a8c17c4b56d6074f` do PR #133; API, worker e beat estão com deployment SUCCESS.
+- A migration `0036` está aplicada em produção e o CHECK físico aceita os valores históricos e canônicos de provenance.
+- Roster local pós-hotfix: 7 agentes ativos no time N1, nenhum sem owner ID; 8 agentes ativos no total com owner ID e CRM user ID.
+- Baseline de invariantes: zero double-cycle live, zero duplicate occupancy, zero duplicate assignment log por ticket/cycle e zero drift de capacidade nos agentes ativos.
+- Pós-cutover, assignments materializados convergem: 49 automáticos `confirmed_by_read`; logs `unknown_external` permanecem sem attempt artificial e com cycle.
+- Novo blocker operacional: 229 `owner_changed` estão em `repair_required`; 24 dessas ocorrências hoje já cabem temporalmente em um ciclo válido, mas `repair_required` não é retomado pelo scanner automático.
+- Há ainda 3 `entered_support_queue` em `pending`, sem `next_reconcile_at`, sem retry e sem ciclo exato. Esse estado não entra no scanner atual e precisa de classificação.
+- Relatório detalhado: `03-verification/post-deploy-baseline-2026-10-02.md`.
+- Nenhum replay, repair, backfill, mutation HubSpot ou novo deploy foi executado nesta etapa.
+
+**Próximo VERIFY:** classificar o backlog de lifecycle e fechar a lacuna de convergência antes do V-03 sandbox/canário final.
+
 ## Atualização de provenance — 2026-09-30
 
 - `AssignmentLog` agora declara CHECK compatível com três valores legados e seis valores canônicos; migration `0036` troca o CHECK físico sem janela sem validação e guarda a presença anterior para reverse.

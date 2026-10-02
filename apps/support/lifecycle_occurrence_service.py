@@ -135,7 +135,11 @@ def record_proven_occurrence(
                     observation_id=observation_id[:128],
                     next_reconcile_at=(
                         timezone.now() + timedelta(seconds=30)
-                        if occurrence_type == SupportLifecycleOccurrence.Type.CLOSED
+                        if occurrence_type
+                        in {
+                            SupportLifecycleOccurrence.Type.CLOSED,
+                            SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE,
+                        }
                         else None
                     ),
                 )
@@ -189,6 +193,7 @@ def mark_processed(occurrence_id: UUID) -> None:
     SupportLifecycleOccurrence.objects.filter(
         pk=occurrence_id,
         evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVEN,
+        processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
     ).update(processing_status=SupportLifecycleOccurrence.ProcessingStatus.PROCESSED, next_reconcile_at=None)
 
 

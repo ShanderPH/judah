@@ -141,14 +141,13 @@ def process_queue_item(
     exclude_queue_row_ids: set[uuid.UUID] | None = None,
 ) -> QueueItemResult:
     """Process one distinct queue row and return an exhaustive result."""
-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
+    from apps.support.availability_runtime import may_assign
     from apps.support.durable_assignment_service import (
         execute_assignment_attempt,
         reserve_next_assignment,
     )
 
-    if not may_assign():
-        log_runtime_rejection("matchmaker_assign_next")
+    if not may_assign(operation="matchmaker_assign_next"):
         return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, None, None, False)
     reservation = reserve_next_assignment(ticket_id, exclude_queue_row_ids=exclude_queue_row_ids)
     row_id = reservation.queue_row_id
@@ -224,11 +223,10 @@ def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
 
 def matchmaker_drain_queue() -> dict:
     """Process ready conversations in FIFO order with a bounded loop."""
-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
+    from apps.support.availability_runtime import may_assign
     from apps.support.queue_service import get_eligible_agents
 
-    if not may_assign():
-        log_runtime_rejection("matchmaker_drain_queue")
+    if not may_assign(operation="matchmaker_drain_queue"):
         total_pending = _active_queue().count()
         return {
             "assigned": 0,

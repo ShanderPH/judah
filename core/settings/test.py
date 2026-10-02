@@ -1,10 +1,33 @@
 """Test settings — optimised for speed."""
 
+import json
+
 from .base import *
 
 SECRET_KEY = "test-secret-key-not-for-production"
 
 DEBUG = False
+
+# Synthetic provider contract: tests never load deployed configuration or manifests.
+HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(
+    {
+        "contract_version": "1",
+        "app": {"uid": "test_app", "config": {"auth": {"requiredScopes": ["tickets", "settings.users.read"]}}},
+        "webhooks": {
+            "uid": "test_webhooks",
+            "config": {
+                "settings": {"targetUrl": "https://example.test/webhooks/hubspot", "maxConcurrentRequests": 10},
+                "subscriptions": {
+                    "hubEvents": [],
+                    "legacyCrmObjects": [
+                        {"subscriptionType": "ticket.propertyChange", "propertyName": name, "active": True}
+                        for name in ("hs_v2_date_entered_101", "hs_v2_date_entered_102", "hubspot_owner_id")
+                    ],
+                },
+            },
+        },
+    }
+)
 
 CACHES = {
     "default": {
