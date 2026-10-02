@@ -241,10 +241,9 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
     Returns:
         True if assignment succeeded, False otherwise.
     """
-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
+    from apps.support.availability_runtime import may_assign
 
-    if not may_assign():
-        log_runtime_rejection("attempt_auto_assign")
+    if not may_assign(operation="attempt_auto_assign"):
         return False
 
     # Matchmaker is the sole automatic assignment implementation. Keeping this
