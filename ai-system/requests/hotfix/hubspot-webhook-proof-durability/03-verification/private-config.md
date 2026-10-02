@@ -10,6 +10,7 @@ Continuação sobre `62da400`, que já contém main/4ec547d e #134/952ca9f. Ambi
 - Hooks pre-commit dos nove arquivos de código alterados passaram.
 - Caso real Redis do proof confirmou `TTL=-1` e igualdade do snapshot relido.
 - Redis/Celery real com PostgreSQL local: **6 passed**, incluindo TTL, locks e entrega de tarefas.
+- CI no código `9dc459f742739119c4141b9dba21feda70e40a6f`: **todos os cinco jobs passaram**, incluindo Python completo, webapp, lint/typecheck, segurança e Django/drift. Run: https://github.com/ShanderPH/judah/actions/runs/37039194032.
 - Regressores direcionados iniciais: 93 passed, 2 skipped. A suíte completa posterior inclui os casos adicionais de subscriptions inválidas e ausência simultânea de configuração/readback.
 
 O runner `/tmp/judah-private-check.py` usa apenas placeholders e força SQLite local ou PostgreSQL local descartável `judah_ci_2026100218_135`. O sandbox bloqueou sockets locais e a aquisição dos hooks; esses checks foram repetidos com autorização de execução. Um primeiro nome de base descartável não satisfazia o regex do guard runtime; apenas o nome do banco de testes foi ajustado, sem alterar guards. A integração Celery com SQLite encontrou lock; a validação real usa PostgreSQL.

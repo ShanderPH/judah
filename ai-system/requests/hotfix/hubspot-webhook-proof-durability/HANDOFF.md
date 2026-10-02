@@ -9,6 +9,7 @@ Esta seção substitui o estado concluído da validação histórica abaixo. Che
 - Configuração inválida bloqueia assignment e informa readiness sem erro 500; erro simultâneo de configuração/export invalida a prova anterior.
 - Testes usam contrato sintético; TTL=-1 confirmado em Redis local real.
 - SQLite: 1.079 passed (91,05%). PostgreSQL: 1.122 passed (91,26%). Redis/Celery/PostgreSQL opt-ins: 6 passed. Ruff/format/mypy/Django/drift/hooks passaram.
+- CI do código publicado `9dc459f`: todos os gates passaram no run `37039194032`, incluindo webapp. PR #135 permanece draft pelos bloqueios de release abaixo.
 
 Arquivos alterados nesta continuação, relativos à raiz absoluta `/tmp/judah-proof-private`: `apps/integrations/hubspot/webhook_config.py`, `apps/support/{webhook_proof.py,provider_readiness.py,management/commands/record_hubspot_webhook_readback.py,tests/test_webhook_proof.py,tests/test_provider_contract_red.py}`, `apps/webhooks/tests/test_production_project_config.py`, `core/settings/{base.py,test.py}` e os artefatos da request. Status/handoff do release provider foram sincronizados.
 
