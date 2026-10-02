@@ -135,7 +135,11 @@ def record_proven_occurrence(
                     observation_id=observation_id[:128],
                     next_reconcile_at=(
                         timezone.now() + timedelta(seconds=30)
-                        if occurrence_type == SupportLifecycleOccurrence.Type.CLOSED
+                        if occurrence_type
+                        in {
+                            SupportLifecycleOccurrence.Type.CLOSED,
+                            SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE,
+                        }
                         else None
                     ),
                 )
