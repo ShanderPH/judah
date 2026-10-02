@@ -14,7 +14,7 @@ from apps.support.webhook_proof import invalidate_webhook_proof, record_publishe
 class Command(BaseCommand):
     """Store durable, versioned evidence from published configuration exports."""
 
-    help = "Compare published HubSpot app/webhook readback exports with versioned manifests"
+    help = "Compare published HubSpot app/webhook exports with the private desired contract"
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add paths to published HubSpot readback exports."""
@@ -30,14 +30,14 @@ class Command(BaseCommand):
             app = json.loads(published_app.read_text(encoding="utf-8"))
             if not isinstance(webhooks, dict) or not isinstance(app, dict):
                 raise ValueError("Published configurations must be JSON objects")
-        except (OSError, ValueError, TypeError) as exc:
+        except OSError, ValueError, TypeError:
             # An unreadable export cannot leave a previous successful proof active.
             invalidate_webhook_proof()
-            raise CommandError("Invalid HubSpot readback export") from exc
+            raise CommandError("Invalid HubSpot readback export") from None
         try:
             proof = record_published_configuration(webhooks, app)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise CommandError("Invalid HubSpot readback export") from exc
+        except OSError, ValueError, KeyError, TypeError, AttributeError:
+            raise CommandError("Invalid HubSpot configuration or readback") from None
         self.stdout.write(json.dumps(proof, sort_keys=True))
         if not proof["ready"]:
-            raise CommandError("Published HubSpot configuration differs from the versioned manifests")
+            raise CommandError("Published HubSpot configuration differs from the private desired contract")

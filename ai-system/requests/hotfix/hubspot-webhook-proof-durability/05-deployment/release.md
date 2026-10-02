@@ -4,7 +4,7 @@ Nenhuma ação deste runbook foi executada em produção. Nenhum deploy/configur
 
 ## Gate operacional indispensável
 
-A gravação inline legada do pre-deploy **não pode continuar escrevendo** `{ready, checked_at}` com TTL 86400: o novo reader rejeita proof sem fingerprint/schema. Usar o comando versionado após obter exports autoritativos atuais da configuração **publicada**, preservando as etapas existentes de migrations/preflight. O checkout do SHA final precisa fornecer ambos os manifests.
+A gravação inline legada do pre-deploy **não pode continuar escrevendo** `{ready, checked_at}` com TTL 86400: o novo reader rejeita proof sem fingerprint/schema. Usar o comando versionado após obter exports autoritativos atuais da configuração **publicada**, preservando as etapas existentes de migrations/preflight. API, worker e beat precisam receber a mesma revisão de `HUBSPOT_PROVIDER_CONFIG_JSON` em secret storage. Manifests reais ficam fora do checkout público. O formato e a preparação estão em `private-contract.md`.
 
 ```bash
 python manage.py record_hubspot_webhook_readback --published-webhooks /tmp/published-webhooks.json --published-app /tmp/published-app.json
@@ -34,5 +34,5 @@ Reverter o release completo (#134 + hotfix) para o SHA anterior conhecido em tod
 - Redis sem TTL remove a expiração arbitrária, mas flush, eviction ou perda de persistência continuam podendo apagar evidência; ausência bloqueia por segurança. Não há garantia de durabilidade de banco transacional.
 - Um snapshot validado não detecta alterações publicadas externas posteriores: stale gera warning e pede coleta autoritativa. Não foi criado readback runtime periódico.
 - Mudança em qualquer campo ou ordem de array dos manifests completos muda fingerprint e exige novo readback. Canonização ignora ordem das chaves e whitespace de JSON, não ordem dos arrays.
-- Em versões simultâneas com manifests diferentes, cada reader valida seu fingerprint; divergência bloqueia a versão incompatível. Evitar writers inline/legados durante rollout.
-- O comando deixa de imprimir os detalhes individuais das comparações no stdout; imprime o proof versionado e continua falhando nos mesmos mismatches. Comparação detalhada segue disponível no CLI `apps.integrations.hubspot.webhook_config`.
+- Em versões simultâneas com contratos privados diferentes, cada reader valida seu fingerprint; divergência bloqueia a versão incompatível. Evitar writers inline/legados durante rollout. O fingerprint agora inclui `contract_version`; obter readback novo antes da promoção, inclusive se app/webhooks não mudaram.
+- O comando imprime somente o proof. O CLI `apps.integrations.hubspot.webhook_config` também usa o contrato do ambiente e reporta drift por flags e contagens, sem nomes privados de scopes/propriedades.

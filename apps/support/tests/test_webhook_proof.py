@@ -263,10 +263,49 @@ def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason) 
     assert may_assign() is False
 
 
-def test_unreadable_desired_manifest_cannot_enable_assignment(provider_evidence, settings, tmp_path) -> None:
-    settings.BASE_DIR = tmp_path
+@pytest.mark.parametrize("raw", ["", "not-json", "[]", "{}", '{"contract_version": "1", "app": {}, "webhooks": {}}'])
+def test_invalid_private_configuration_cannot_enable_assignment(provider_evidence, settings, raw) -> None:
+    settings.HUBSPOT_PROVIDER_CONFIG_JSON = raw
     assert provider_assignment_allowed() is False
-    assert provider_assignment_rejection_reason() == "provider_evidence_unavailable"
+    assert provider_assignment_rejection_reason() == "provider_webhook_proof_invalid"
+    checks = provider_contract_checks()
+    assert checks["webhook_config_status"] == "desired_configuration_invalid"
+    assert "hubspot_webhook_config_invalid" in provider_contract_reasons(checks)
+
+
+@pytest.mark.parametrize("field", ["contract_version", "app", "webhooks"])
+def test_private_configuration_revision_invalidates_old_proof(provider_evidence, settings, field) -> None:
+    document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+    if field == "contract_version":
+        document[field] = "2"
+    else:
+        document[field]["uid"] += "_changed"
+    settings.HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(document)
+    assert provider_assignment_rejection_reason() == "provider_webhook_proof_fingerprint_mismatch"
+
+
+def test_missing_private_configuration_invalidates_prior_proof_on_record(provider_evidence, settings, tmp_path) -> None:
+    webhooks, app = load_desired_configuration()
+    webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
+    webhook_path.write_text(json.dumps(webhooks))
+    app_path.write_text(json.dumps(app))
+    settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
+    with pytest.raises(CommandError, match="Invalid HubSpot configuration or readback"):
+        call_command("record_hubspot_webhook_readback", published_webhooks=webhook_path, published_app=app_path)
+    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY)["ready"] is False
+
+
+def test_unreadable_export_invalidates_proof_even_without_private_configuration(
+    provider_evidence, settings, tmp_path
+) -> None:
+    settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
+    with pytest.raises(CommandError, match="Invalid HubSpot readback export"):
+        call_command(
+            "record_hubspot_webhook_readback",
+            published_webhooks=tmp_path / "missing.json",
+            published_app=tmp_path / "missing-app.json",
+        )
+    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY)["ready"] is False
 
 
 @pytest.mark.parametrize("hours", [0, 25])

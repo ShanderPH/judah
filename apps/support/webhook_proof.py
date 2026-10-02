@@ -12,7 +12,11 @@ from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
-from apps.integrations.hubspot.webhook_config import compare_app_config, compare_webhook_config
+from apps.integrations.hubspot.webhook_config import (
+    compare_app_config,
+    compare_webhook_config,
+    load_private_configuration,
+)
 
 WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
 WEBHOOK_PROOF_STALE_SECONDS = 86400
@@ -51,24 +55,28 @@ class WebhookProofEvaluation:
 
 
 def load_desired_configuration() -> tuple[dict[str, object], dict[str, object]]:
-    """Read the two versioned manifests used by both validation and runtime."""
-    root = settings.BASE_DIR / "hubspot-app/src/app"
-    webhooks = json.loads((root / "webhooks/judah-webhooks-hsmeta.json").read_text(encoding="utf-8"))
-    app = json.loads((root / "app-hsmeta.json").read_text(encoding="utf-8"))
-    if not isinstance(webhooks, dict) or not isinstance(app, dict):
-        raise ValueError("HubSpot manifests must be JSON objects")
+    """Read both desired manifests from the private deployment configuration."""
+    _, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     return webhooks, app
 
 
-def configuration_fingerprint(webhooks: dict[str, object], app: dict[str, object]) -> str:
-    """Hash both complete desired manifests with canonical JSON object ordering."""
-    canonical = json.dumps({"app": app, "webhooks": webhooks}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+def configuration_fingerprint(
+    webhooks: dict[str, object], app: dict[str, object], *, contract_version: str = "1"
+) -> str:
+    """Hash the private revision and both complete manifests with canonical ordering."""
+    canonical = json.dumps(
+        {"contract_version": contract_version, "app": app, "webhooks": webhooks},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def expected_configuration_fingerprint() -> str:
     """Compute the identity expected by this running version."""
-    return configuration_fingerprint(*load_desired_configuration())
+    version, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+    return configuration_fingerprint(webhooks, app, contract_version=version)
 
 
 def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
@@ -85,7 +93,11 @@ def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
 
 def invalidate_webhook_proof() -> WebhookProof:
     """Replace prior evidence when a published export cannot be read."""
-    return _store_proof(ready=False, fingerprint=expected_configuration_fingerprint())
+    try:
+        fingerprint = expected_configuration_fingerprint()
+    except ValueError:
+        fingerprint = ""
+    return _store_proof(ready=False, fingerprint=fingerprint)
 
 
 def record_published_configuration(
@@ -96,8 +108,12 @@ def record_published_configuration(
     Invalid exports also replace prior evidence with a fail-closed snapshot.
     The caller must fail its release gate when the returned proof is not ready.
     """
-    desired_webhooks, desired_app = load_desired_configuration()
-    fingerprint = configuration_fingerprint(desired_webhooks, desired_app)
+    try:
+        version, desired_webhooks, desired_app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+    except ValueError:
+        _store_proof(ready=False, fingerprint="")
+        raise
+    fingerprint = configuration_fingerprint(desired_webhooks, desired_app, contract_version=version)
     try:
         webhook_result = compare_webhook_config(desired_webhooks, published_webhooks)
         app_result = compare_app_config(desired_app, published_app)

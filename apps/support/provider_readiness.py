@@ -21,6 +21,7 @@ from apps.integrations.hubspot.platform_contract import (
 )
 from apps.support.webhook_proof import (
     WEBHOOK_CONFIG_CACHE_KEY,
+    WebhookProofEvaluation,
     evaluate_webhook_proof,
     expected_configuration_fingerprint,
 )
@@ -73,9 +74,14 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
     roster_at = datetime.fromisoformat(roster_at_raw) if roster_at_raw else None
     roster_age = max(0, int((now - roster_at).total_seconds())) if roster_at else None
     roster_fresh = roster_age is not None and roster_age <= settings.HUBSPOT_ROSTER_MAX_AGE_SECONDS
-    webhook_proof = evaluate_webhook_proof(
-        cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=expected_configuration_fingerprint(), now=now
-    )
+    try:
+        fingerprint = expected_configuration_fingerprint()
+    except ValueError:
+        webhook_proof = WebhookProofEvaluation("desired_configuration_invalid")
+    else:
+        webhook_proof = evaluate_webhook_proof(
+            cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=fingerprint, now=now
+        )
 
     return {
         "mode": mode,

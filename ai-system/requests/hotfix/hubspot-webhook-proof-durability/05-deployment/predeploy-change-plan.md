@@ -1,5 +1,7 @@
 # Proposta concreta de preparação do release — sem aplicação
 
+> Documento histórico, substituído por `private-contract.md`. A proposta de restaurar manifests reais no backend público foi retirada; não executar a sequência abaixo.
+
 ## Estado relido em 2026-10-02
 
 - main remoto avançou de 0ca25b8 para 4ec547df0f3e21d9da727bec8a58b36cfdf0492c: `Delete hubspot-app directory`.

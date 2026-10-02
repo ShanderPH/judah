@@ -1,5 +1,23 @@
 # Passagem para verificação
 
+## Continuação atual — contrato privado
+
+Esta seção substitui o estado concluído da validação histórica abaixo. Checkout atual: `/tmp/judah-proof-private`, branch `hotfix/hubspot-webhook-proof-durability`, integrada com main/4ec547d e #134/952ca9f.
+
+- Manifests desejados vêm somente de `HUBSPOT_PROVIDER_CONFIG_JSON`; dados reais ficam fora do checkout público.
+- Fingerprint inclui revisão e ambos os manifests completos; writer e runtime compartilham a fonte validada.
+- Configuração inválida bloqueia assignment e informa readiness sem erro 500; erro simultâneo de configuração/export invalida a prova anterior.
+- Testes usam contrato sintético; TTL=-1 confirmado em Redis local real.
+- SQLite: 1.079 passed (91,05%). PostgreSQL: 1.122 passed (91,26%). Redis/Celery/PostgreSQL opt-ins: 6 passed. Ruff/format/mypy/Django/drift/hooks passaram.
+
+Arquivos alterados nesta continuação, relativos à raiz absoluta `/tmp/judah-proof-private`: `apps/integrations/hubspot/webhook_config.py`, `apps/support/{webhook_proof.py,provider_readiness.py,management/commands/record_hubspot_webhook_readback.py,tests/test_webhook_proof.py,tests/test_provider_contract_red.py}`, `apps/webhooks/tests/test_production_project_config.py`, `core/settings/{base.py,test.py}` e os artefatos da request. Status/handoff do release provider foram sincronizados.
+
+Comandos locais completos em `03-verification/private-config.md`, executados com placeholders e bases locais descartáveis. Primeiro VERIFY: configuração ausente/malformed, incompatibilidade de revisão/app/webhooks, invalidação conjunta e gravação sem TTL. Nenhum HMAC foi alterado; nenhuma leitura/escrita produtiva foi realizada.
+
+Bloqueio independente do release: `reproduce-entry-overlap.py` confirma que uma execução atrasada de #134 abre um ciclo e troca `repair_required` por `processed`. Os módulos lifecycle de #134 permanecem intactos nesta continuação. Manter PR em draft até esse achado ser resolvido ou decidido explicitamente, além dos gates operacionais de `05-deployment/private-contract.md`.
+
+## Evidência histórica anterior à remoção dos manifests
+
 ## Implementado
 
 - Proof versionado, SHA-256 dos manifests de app e webhooks, Redis sem TTL.

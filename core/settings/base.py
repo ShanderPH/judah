@@ -414,6 +414,7 @@ HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
 HUBSPOT_ROSTER_MAX_AGE_SECONDS = config("HUBSPOT_ROSTER_MAX_AGE_SECONDS", default=90000, cast=int)
 HUBSPOT_TICKETS_WRITE_VERIFIED = config("HUBSPOT_TICKETS_WRITE_VERIFIED", default=False, cast=bool)
 HUBSPOT_PROVIDER_CONTRACT_MODE = config("HUBSPOT_PROVIDER_CONTRACT_MODE", default="off")
+HUBSPOT_PROVIDER_CONFIG_JSON = config("HUBSPOT_PROVIDER_CONFIG_JSON", default="")
 if HUBSPOT_PROVIDER_CONTRACT_MODE not in {"off", "shadow", "enforce"}:
     raise ImproperlyConfigured("HUBSPOT_PROVIDER_CONTRACT_MODE must be one of: off, shadow, enforce")
 SUPPORT_CAPACITY_MODE = config("SUPPORT_CAPACITY_MODE", default="off")

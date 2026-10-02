@@ -1,14 +1,61 @@
-"""Compare desired HubSpot project webhooks with a published readback export."""
+"""Validate private desired HubSpot configuration against published exports."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 # Manifest and readback are untyped JSON documents at this boundary.
+
+
+def load_private_configuration(raw: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Parse the private contract without exposing its contents in errors.
+
+    Returns:
+        The contract revision, desired webhooks and desired app metadata.
+
+    Raises:
+        ValueError: If any required configuration section is absent or malformed.
+    """
+    try:
+        document = json.loads(raw)
+        version, webhooks, app = document["contract_version"], document["webhooks"], document["app"]
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError
+        for manifest in (webhooks, app):
+            if (
+                not isinstance(manifest, dict)
+                or not isinstance(manifest.get("uid"), str)
+                or not manifest["uid"].strip()
+            ):
+                raise ValueError
+            if not isinstance(manifest.get("config"), dict):
+                raise ValueError
+        webhook_settings = webhooks["config"]["settings"]
+        target = webhook_settings["targetUrl"]
+        concurrency = webhook_settings["maxConcurrentRequests"]
+        if not isinstance(target, str) or urlsplit(target).scheme != "https" or not urlsplit(target).hostname:
+            raise ValueError
+        if type(concurrency) is not int or concurrency <= 0 or not _subscriptions(webhooks["config"]):
+            raise ValueError
+        subscriptions = webhooks["config"]["subscriptions"]["legacyCrmObjects"]
+        if any(not isinstance(entry, dict) or type(entry.get("active")) is not bool for entry in subscriptions):
+            raise ValueError
+        scopes = app["config"]["auth"]["requiredScopes"]
+        if (
+            not isinstance(scopes, list)
+            or not scopes
+            or any(not isinstance(scope, str) or not scope.strip() for scope in scopes)
+        ):
+            raise ValueError
+    except ValueError, KeyError, TypeError, AttributeError:
+        raise ValueError("Invalid private HubSpot provider configuration") from None
+    return version, webhooks, app
 
 
 def _config(document: dict[str, Any]) -> dict[str, Any]:
@@ -83,30 +130,25 @@ def compare_app_config(desired: dict[str, Any], published: dict[str, Any]) -> di
 
 
 def main() -> int:
-    """Compare a HubSpot published export to the versioned desired manifest."""
+    """Compare published exports to the private desired contract from the environment."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("published", type=Path, help="JSON readback exported from the published HubSpot app")
     parser.add_argument("--published-app", type=Path, required=True, help="Published app metadata JSON readback")
-    parser.add_argument(
-        "--desired",
-        type=Path,
-        default=Path(__file__).resolve().parents[3] / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json",
-    )
-    parser.add_argument(
-        "--desired-app",
-        type=Path,
-        default=Path(__file__).resolve().parents[3] / "hubspot-app/src/app/app-hsmeta.json",
-    )
     args = parser.parse_args()
+    _, desired_webhooks, desired_app = load_private_configuration(os.environ.get("HUBSPOT_PROVIDER_CONFIG_JSON", ""))
     result = compare_webhook_config(
-        json.loads(args.desired.read_text(encoding="utf-8")),
+        desired_webhooks,
         json.loads(args.published.read_text(encoding="utf-8")),
     )
     result["app"] = compare_app_config(
-        json.loads(args.desired_app.read_text(encoding="utf-8")),
+        desired_app,
         json.loads(args.published_app.read_text(encoding="utf-8")),
     )
     result["ready"] = result["ready"] and result["app"]["ready"]
+    # Drift observations must not expose private scopes or subscription properties.
+    result["missing_active_subscription_count"] = len(result.pop("missing_active_subscriptions"))
+    for field in ("missing_required_scopes", "unexpected_required_scopes"):
+        result["app"][f"{field}_count"] = len(result["app"].pop(field))
     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
     return 0 if result["ready"] else 1
 
