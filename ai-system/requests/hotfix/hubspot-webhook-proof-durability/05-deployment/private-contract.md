@@ -22,6 +22,12 @@ Esse comando lê o contrato privado do ambiente, compara ambos os exports e grav
 
 Substituir o writer inline legado do worker por essa etapa, preservando migrations/preflight existentes. O writer antigo depende dos arquivos removidos e grava proof legado com TTL de 24h. A aquisição dos exports ainda precisa ser preparada no ambiente operacional; o comando de gravação não consulta o HubSpot por conta própria.
 
+## Disciplina de publicação e gravação
+
+Felipe coordena as publicações do contrato e as execuções autorizadas do writer. Serializar esse conjunto: uma publicação/readback por vez, sem writer legado ou outra revisão escrevendo a mesma chave. Após qualquer mudança na configuração realmente publicada no HubSpot, adquirir exports oficiais novos, validar a identidade do build antes/depois da aquisição e executar novamente o comando, mesmo se o contrato desejado não mudou. Uma leitura incompatível deve bloquear a promoção até a convergência; nunca renovar checked_at com exports históricos.
+
+O runtime compara a prova com o contrato desejado, mas não consulta periodicamente a configuração publicada. Uma mudança externa fora desse procedimento pode deixar prova antiga compatível com desired; o warning de idade não constitui detecção desse drift. Esta é uma limitação operacional aceita no desenho sem TTL, não resolvida pelo cache do fingerprint.
+
 ## Gate de release
 
 Felipe deve autorizar e preparar o contrato privado, a aquisição autoritativa de exports e o release conjunto. Antes de liberar a versão, confirmar por leitura própria `schema_version=1`, `ready=true`, fingerprint correspondente ao contrato privado e Redis `TTL=-1`. API, worker e beat precisam executar o mesmo SHA e revisão do contrato.

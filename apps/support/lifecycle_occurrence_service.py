@@ -193,6 +193,7 @@ def mark_processed(occurrence_id: UUID) -> None:
     SupportLifecycleOccurrence.objects.filter(
         pk=occurrence_id,
         evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVEN,
+        processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
     ).update(processing_status=SupportLifecycleOccurrence.ProcessingStatus.PROCESSED, next_reconcile_at=None)
 
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import TypedDict
 
 from django.conf import settings
@@ -73,10 +74,16 @@ def configuration_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def expected_configuration_fingerprint() -> str:
-    """Compute the identity expected by this running version."""
-    version, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+@lru_cache(maxsize=1)
+def _fingerprint_for_configuration(raw: str) -> str:
+    """Reuse the hash only while the complete private configuration stays identical."""
+    version, webhooks, app = load_private_configuration(raw)
     return configuration_fingerprint(webhooks, app, contract_version=version)
+
+
+def expected_configuration_fingerprint() -> str:
+    """Get this process's cached identity, keyed by the current private contract."""
+    return _fingerprint_for_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
 
 
 def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:

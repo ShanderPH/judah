@@ -2,7 +2,7 @@
 
 ## Release conjunto #134/#135 — continuação do proof
 
-Não promover #134 isoladamente. A fonte desejada agora é contrato privado de `HUBSPOT_PROVIDER_CONFIG_JSON`; antes de promover, validar contrato privado, readback publicado novo, substituição do writer legado e todos os gates do SHA final. A continuação também reproduziu concorrência terminal na entrada de #134; resolver antes do release. Evidências atuais: `ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/private-config.md`, relativo à raiz do checkout.
+Não promover #134 isoladamente. A fonte desejada agora é contrato privado de `HUBSPOT_PROVIDER_CONFIG_JSON`; antes de promover, validar contrato privado, readback publicado novo, substituição do writer legado e todos os gates do SHA final. A concorrência terminal na entrada de #134 foi corrigida na revisão de #135, com regressão permanente e contenção real PostgreSQL. Evidências atuais: `ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/review-comments.md`, relativo à raiz do checkout.
 
 ## Hotfix do PR #134 — 2026-10-02
 

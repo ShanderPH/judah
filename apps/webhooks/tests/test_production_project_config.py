@@ -8,6 +8,7 @@ from apps.integrations.hubspot.webhook_config import load_private_configuration,
 
 
 def test_synthetic_contract_contains_only_operational_subscriptions(settings) -> None:
+    """Keep synthetic subscriptions restricted to the operational contract."""
     _, webhooks, _ = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     config = webhooks["config"]
     properties = {item["propertyName"] for item in config["subscriptions"]["legacyCrmObjects"]}
@@ -32,6 +33,7 @@ def test_synthetic_contract_contains_only_operational_subscriptions(settings) ->
     ],
 )
 def test_incomplete_private_contract_is_rejected(settings, section, field, value) -> None:
+    """Reject missing or invalid required private contract sections."""
     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     document[section][field] = value
     with pytest.raises(ValueError, match=r"^Invalid private HubSpot provider configuration$"):
@@ -43,6 +45,7 @@ def test_incomplete_private_contract_is_rejected(settings, section, field, value
     [("targetUrl", ""), ("targetUrl", "https://"), ("maxConcurrentRequests", True), ("maxConcurrentRequests", 0)],
 )
 def test_invalid_webhook_settings_are_rejected(settings, field, value) -> None:
+    """Reject invalid webhook targets and concurrency limits."""
     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     document["webhooks"]["config"]["settings"][field] = value
     with pytest.raises(ValueError):
@@ -51,6 +54,7 @@ def test_invalid_webhook_settings_are_rejected(settings, field, value) -> None:
 
 @pytest.mark.parametrize("entries", [[], [None], [{"active": "true"}], [{"active": True}], [{"active": False}]])
 def test_invalid_private_subscriptions_are_rejected(settings, entries) -> None:
+    """Require valid active subscriptions in the private contract."""
     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     document["webhooks"]["config"]["subscriptions"]["legacyCrmObjects"] = entries
     with pytest.raises(ValueError):
@@ -58,6 +62,7 @@ def test_invalid_private_subscriptions_are_rejected(settings, entries) -> None:
 
 
 def test_cli_uses_private_environment_contract(settings, monkeypatch, tmp_path, capsys) -> None:
+    """Compare private environment configuration without exposing scope values."""
     _, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
     webhook_path.write_text(json.dumps(webhooks))

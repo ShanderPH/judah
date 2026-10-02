@@ -30,3 +30,11 @@ Escopo reavaliado (>5 arquivos): seis arquivos de produção são necessários p
 7. Nenhum deploy/mutation/configuração externa.
 8. Configuração privada ausente ou malformada bloqueia; readiness explica o motivo sem expor conteúdo.
 9. Testes locais/CI usam somente contrato sintético; nenhuma leitura de `hubspot-app/` permanece no código.
+
+## Revisão do PR #135
+
+Escopo autorizado em 2026-10-02: validar comentários e corrigir achados confirmados. Correção em três módulos de produção existentes, sem mudança arquitetural: lock/revalidação da ocorrência durante projeção da entrada, transição para processed restrita a pending, cache de fingerprint limitado à configuração privada atual. Testes/documentação complementam o patch. Nenhuma alteração de HMAC, replay ou base produtiva.
+
+10. Uma execução atrasada não projeta entrada após decisão terminal; execuções PostgreSQL concorrentes aguardam a projeção e observam o resultado confirmado.
+11. mark_processed preserva repair_required; budget e scanner continuam limitados como antes.
+12. Verificações repetidas reutilizam o hash; mudança ou invalidade do contrato privado não reutiliza identidade antiga.

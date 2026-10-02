@@ -1,0 +1,471 @@
+diff --git a/ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/reproduce-entry-overlap.py b/ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/reproduce-entry-overlap.py
+index 035798b..8a23489 100644
+--- a/ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/reproduce-entry-overlap.py
++++ b/ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/reproduce-entry-overlap.py
+@@ -1,30 +1,12 @@
+-"""Release blocker reproducer, explicitly invoked outside the normal test suite."""
++"""Explicit replay of the concurrency regression now included in the test suite."""
+
+-from unittest.mock import patch
++from pytest_django.fixtures import Settings
+
+-from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence
+-from apps.support.models import SupportConversationCycle, SupportLifecycleOccurrence
+-from apps.support.tasks import task_reconcile_lifecycle_occurrence
+-from apps.support.tests.test_lifecycle_entry_recovery import record_entry
++from apps.support.tests.test_lifecycle_entry_recovery import (
++    test_terminal_entry_is_not_projected_by_an_earlier_execution as verify_terminal_entry,
++)
+
+
+-def test_terminal_entry_is_not_projected_by_an_earlier_execution(settings) -> None:
+-    """Simulate two executions reaching projection and budget exhaustion in order."""
+-    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
+-    occurrence = record_entry("synthetic-overlap")
+-    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+-
+-    def exhaust_before_projection(**kwargs):
+-        # Deterministically simulate the next due task arriving while the first pauses.
+-        SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+-        assert task_reconcile_lifecycle_occurrence.run(str(occurrence.pk)) == "repair_required"
+-        return open_from_proven_occurrence(**kwargs)
+-
+-    with patch(
+-        "apps.support.lifecycle_occurrence_service.open_from_proven_occurrence", side_effect=exhaust_before_projection
+-    ):
+-        task_reconcile_lifecycle_occurrence.run(str(occurrence.pk))
+-
+-    occurrence.refresh_from_db()
+-    assert occurrence.processing_status == "repair_required"
+-    assert not SupportConversationCycle.objects.filter(hubspot_ticket_id="synthetic-overlap").exists()
++def test_terminal_entry_is_not_projected_by_an_earlier_execution(settings: Settings) -> None:
++    """Revalidate the repaired interleaving through its permanent regression."""
++    verify_terminal_entry(settings)
+diff --git a/apps/support/lifecycle_occurrence_service.py b/apps/support/lifecycle_occurrence_service.py
+index e0ece75..a827999 100644
+--- a/apps/support/lifecycle_occurrence_service.py
++++ b/apps/support/lifecycle_occurrence_service.py
+@@ -193,6 +193,7 @@ def mark_processed(occurrence_id: UUID) -> None:
+     SupportLifecycleOccurrence.objects.filter(
+         pk=occurrence_id,
+         evidence_status=SupportLifecycleOccurrence.EvidenceStatus.PROVEN,
++        processing_status=SupportLifecycleOccurrence.ProcessingStatus.PENDING,
+     ).update(processing_status=SupportLifecycleOccurrence.ProcessingStatus.PROCESSED, next_reconcile_at=None)
+
+
+diff --git a/apps/support/tasks.py b/apps/support/tasks.py
+index 9129e95..5ed83d2 100644
+--- a/apps/support/tasks.py
++++ b/apps/support/tasks.py
+@@ -548,20 +548,24 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
+     if occurrence.occurrence_type == SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE:
+         from apps.support.conversation_cycle_service import CycleClassification
+
+-        if (
+-            occurrence.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN
+-            or occurrence.occurred_at is None
+-        ):
+-            return retry_later("entry_evidence_unproven")
+         try:
+-            entry_result = open_from_proven_occurrence(
+-                ticket_id=occurrence.hubspot_ticket_id,
+-                entered_at=occurrence.occurred_at,
+-                account_id=occurrence.source_account_id,
+-                evidence_source=occurrence.evidence_source,
+-                source_event_id=occurrence.source_event_id,
+-                observation_id=occurrence.observation_id,
+-            )
++            with transaction.atomic():
++                current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
++                if current.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
++                    return current.processing_status
++                if (
++                    current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN
++                    or current.occurred_at is None
++                ):
++                    return retry_later("entry_evidence_unproven")
++                entry_result = open_from_proven_occurrence(
++                    ticket_id=current.hubspot_ticket_id,
++                    entered_at=current.occurred_at,
++                    account_id=current.source_account_id,
++                    evidence_source=current.evidence_source,
++                    source_event_id=current.source_event_id,
++                    observation_id=current.observation_id,
++                )
+         except Exception as exc:
+             return retry_later(type(exc).__name__)
+         if entry_result.admission.classification in {CycleClassification.CREATED, CycleClassification.DUPLICATE}:
+diff --git a/apps/support/tests/test_lifecycle_entry_recovery.py b/apps/support/tests/test_lifecycle_entry_recovery.py
+index a1fdb0a..6e85d9f 100644
+--- a/apps/support/tests/test_lifecycle_entry_recovery.py
++++ b/apps/support/tests/test_lifecycle_entry_recovery.py
+@@ -1,13 +1,22 @@
+ """Regressions for bounded recovery of proven queue-entry occurrences."""
+
++import time
++from concurrent.futures import ThreadPoolExecutor
+ from datetime import UTC, datetime, timedelta
++from threading import Event
+ from unittest.mock import patch
+
+ import pytest
++from django.db import close_old_connections, connection
+ from django.utils import timezone
++from pytest_django.fixtures import Settings
+
+ from apps.support.conversation_cycle_service import open_or_get_cycle
+-from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence, record_proven_occurrence
++from apps.support.lifecycle_occurrence_service import (
++    mark_processed,
++    open_from_proven_occurrence,
++    record_proven_occurrence,
++)
+ from apps.support.models import SupportConversationCycle, SupportLifecycleOccurrence
+ from apps.support.tasks import task_reconcile_lifecycle_occurrence, task_scan_lifecycle_occurrences
+
+@@ -24,6 +33,104 @@ def record_entry(ticket_id: str = "entry-recovery") -> SupportLifecycleOccurrenc
+     )
+
+
++def test_terminal_entry_is_not_projected_by_an_earlier_execution(settings: Settings) -> None:
++    """Preserve a terminal decision committed between claim and projection."""
++    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
++    occurrence = record_entry("entry-overlap")
++    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
++    select_for_update = SupportLifecycleOccurrence.objects.select_for_update
++    lock_count = 0
++
++    def exhaust_before_lock():
++        """Interleave the competing due task before the next lock acquisition."""
++        nonlocal lock_count
++        lock_count += 1
++        if lock_count == 2:
++            SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
++            assert task_reconcile_lifecycle_occurrence.run(str(occurrence.pk)) == "repair_required"
++        return select_for_update()
++
++    with patch.object(SupportLifecycleOccurrence.objects, "select_for_update", side_effect=exhaust_before_lock):
++        result = task_reconcile_lifecycle_occurrence.run(str(occurrence.pk))
++
++    occurrence.refresh_from_db()
++    assert result == "repair_required"
++    assert occurrence.processing_status == "repair_required"
++    assert not SupportConversationCycle.objects.filter(hubspot_ticket_id="entry-overlap").exists()
++
++
++def test_mark_processed_never_overwrites_a_terminal_repair_decision() -> None:
++    """A delayed acknowledgement cannot reset a terminal occurrence."""
++    occurrence = record_entry("entry-terminal")
++    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(
++        processing_status="repair_required", next_reconcile_at=None
++    )
++    mark_processed(occurrence.pk)
++    occurrence.refresh_from_db()
++    assert occurrence.processing_status == "repair_required"
++
++
++@pytest.mark.django_db(transaction=True)
++def test_overlapping_postgres_entry_tasks_serialize_projection(settings: Settings) -> None:
++    """A competing due task waits for projection and observes its committed result."""
++    if connection.vendor != "postgresql":
++        pytest.skip("PostgreSQL row locks required")
++    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
++    occurrence = record_entry("entry-postgres-overlap")
++    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
++    projection_started, release_projection, second_connected = Event(), Event(), Event()
++    second_pids: list[int] = []
++
++    def pause_projection(**kwargs):
++        """Pause at the guarded writer boundary while a second connection arrives."""
++        projection_started.set()
++        assert release_projection.wait(timeout=10)
++        return open_from_proven_occurrence(**kwargs)
++
++    def reconcile(second: bool) -> str:
++        close_old_connections()
++        try:
++            if second:
++                with connection.cursor() as cursor:
++                    cursor.execute("SELECT pg_backend_pid()")
++                    second_pids.append(cursor.fetchone()[0])
++                second_connected.set()
++            return task_reconcile_lifecycle_occurrence.run(str(occurrence.pk))
++        finally:
++            close_old_connections()
++
++    blocked = False
++    with (
++        patch("apps.support.lifecycle_occurrence_service.open_from_proven_occurrence", side_effect=pause_projection),
++        ThreadPoolExecutor(max_workers=2) as pool,
++    ):
++        first = pool.submit(reconcile, False)
++        try:
++            assert projection_started.wait(timeout=10)
++            with patch("apps.support.tasks.timezone.now", return_value=timezone.now() + timedelta(minutes=1)):
++                second = pool.submit(reconcile, True)
++                assert second_connected.wait(timeout=10)
++                deadline = time.monotonic() + 5
++                while time.monotonic() < deadline and not second.done():
++                    with connection.cursor() as cursor:
++                        cursor.execute("SELECT cardinality(pg_blocking_pids(%s))", [second_pids[0]])
++                        blocked = cursor.fetchone()[0] > 0
++                    if blocked:
++                        break
++                    time.sleep(0.01)
++                release_projection.set()
++                results = (first.result(timeout=10), second.result(timeout=10))
++        finally:
++            release_projection.set()
++
++    assert blocked, "The occurrence lock must cover eligibility and projection"
++    assert results == ("processed", "processed")
++    occurrence.refresh_from_db()
++    assert occurrence.processing_status == "processed"
++    assert occurrence.retry_count == 1
++    assert SupportConversationCycle.objects.filter(hubspot_ticket_id="entry-postgres-overlap").count() == 1
++
++
+ def test_proven_entry_is_scheduled_without_resetting_duplicate_budget() -> None:
+     """A repeated delivery must preserve the original schedule and retry count."""
+     occurrence = record_entry()
+diff --git a/apps/support/tests/test_webhook_proof.py b/apps/support/tests/test_webhook_proof.py
+index 4f178d8..0aa7351 100644
+--- a/apps/support/tests/test_webhook_proof.py
++++ b/apps/support/tests/test_webhook_proof.py
+@@ -14,6 +14,7 @@ from django.core.cache import cache
+ from django.core.management import call_command
+ from django.core.management.base import CommandError
+ from django.utils import timezone
++from pytest_django.fixtures import Settings
+
+ from apps.support.availability_runtime import assignment_gate_rejection_reason, may_assign
+ from apps.support.matchmaker_service import matchmaker_drain_queue, process_queue_item
+@@ -27,6 +28,7 @@ from apps.support.provider_readiness import (
+ )
+ from apps.support.webhook_proof import (
+     WEBHOOK_CONFIG_CACHE_KEY,
++    _fingerprint_for_configuration,
+     configuration_fingerprint,
+     evaluate_webhook_proof,
+     expected_configuration_fingerprint,
+@@ -69,6 +71,7 @@ def provider_evidence(settings):
+
+ @pytest.mark.parametrize("hours, stale", [(0, False), (24, False), (25, True), (2400, True)])
+ def test_proof_validity_does_not_expire(provider_evidence, hours, stale) -> None:
++    """Keep compatible evidence valid regardless of age and expose stale warnings."""
+     now = timezone.now()
+     provider_evidence["checked_at"] = (now - timedelta(hours=hours)).isoformat()
+     cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
+@@ -102,6 +105,7 @@ def test_proof_validity_does_not_expire(provider_evidence, hours, stale) -> None
+ def test_rejected_proof_is_fail_closed_and_has_specific_reason(
+     provider_evidence, condition, status, reason, monkeypatch
+ ) -> None:
++    """Reject unusable evidence with its distinct readiness reason."""
+     monkeypatch.setenv("DJANGO_ENV", "production")
+     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+     if condition == "missing":
+@@ -134,12 +138,14 @@ def test_rejected_proof_is_fail_closed_and_has_specific_reason(
+
+ def test_proof_survives_the_previous_destructive_timeout(provider_evidence) -> None:
+     # Move only the cache clock; capability/roster expiry must remain independent.
++    """Keep the stored proof after the former expiry deadline."""
+     with patch("time.time", return_value=time.time() + 86401):
+         assert cache.get(WEBHOOK_CONFIG_CACHE_KEY) == provider_evidence
+     assert cache._expire_info[cache.make_key(WEBHOOK_CONFIG_CACHE_KEY)] is None
+
+
+ def test_fingerprint_is_canonical_and_binds_both_manifests() -> None:
++    """Bind both manifests while ignoring dictionary key order."""
+     webhooks, app = load_desired_configuration()
+     fingerprint = configuration_fingerprint(webhooks, app)
+     assert len(fingerprint) == 64
+@@ -150,8 +156,32 @@ def test_fingerprint_is_canonical_and_binds_both_manifests() -> None:
+         assert configuration_fingerprint(modified["webhooks"], modified["app"]) != fingerprint
+
+
++def test_expected_fingerprint_is_cached_by_current_private_configuration(settings: Settings) -> None:
++    """Repeated gates reuse parsing, while a changed contract gets a fresh hash."""
++    from apps.integrations.hubspot.webhook_config import load_private_configuration
++
++    _fingerprint_for_configuration.cache_clear()
++    try:
++        with patch("apps.support.webhook_proof.load_private_configuration", wraps=load_private_configuration) as load:
++            original = expected_configuration_fingerprint()
++            assert expected_configuration_fingerprint() == original
++            assert load.call_count == 1
++            document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++            document["contract_version"] = "2"
++            settings.HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(document)
++            assert expected_configuration_fingerprint() != original
++            assert load.call_count == 2
++            settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
++            with pytest.raises(ValueError):
++                expected_configuration_fingerprint()
++            assert load.call_count == 3
++    finally:
++        _fingerprint_for_configuration.cache_clear()
++
++
+ @pytest.mark.parametrize("change", ["webhooks", "app", "both", "malformed", "missing_file", "json_list"])
+ def test_command_invalidates_prior_proof_and_fails_on_any_bad_export(provider_evidence, tmp_path, change) -> None:
++    """Replace prior evidence when either published export is unusable."""
+     webhooks, app = load_desired_configuration()
+     if change in {"webhooks", "both"}:
+         webhooks["uid"] = "wrong"
+@@ -173,6 +203,7 @@ def test_command_invalidates_prior_proof_and_fails_on_any_bad_export(provider_ev
+
+
+ def test_command_records_success_only_after_both_exports_match(provider_evidence, tmp_path) -> None:
++    """Record ready evidence only after both published manifests match."""
+     webhooks, app = load_desired_configuration()
+     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
+     webhook_path.write_text(json.dumps(webhooks))
+@@ -190,12 +221,14 @@ def test_command_records_success_only_after_both_exports_match(provider_evidence
+
+ @pytest.mark.parametrize("snapshot", [{}, [], "bad", {"checked_at": "2026-10-01T00:00:00"}])
+ def test_malformed_proof_is_invalid(snapshot) -> None:
++    """Reject malformed stored proof instead of enabling assignment."""
+     evaluation = evaluate_webhook_proof(snapshot, expected_fingerprint="expected", now=timezone.now())
+     assert evaluation.verified is False
+     assert evaluation.rejection_reason == "invalid"
+
+
+ def test_real_runtime_rejection_remains_distinct(provider_evidence, monkeypatch) -> None:
++    """Preserve the runtime authority rejection reason independently of proof."""
+     monkeypatch.setenv("DJANGO_ENV", "staging")
+     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
+     with patch("apps.support.availability_runtime.logger") as logger:
+@@ -206,6 +239,7 @@ def test_real_runtime_rejection_remains_distinct(provider_evidence, monkeypatch)
+
+
+ def test_provider_block_preserves_queue_and_never_logs_runtime_rejection(provider_evidence) -> None:
++    """Leave queued work untouched and report the provider rejection."""
+     row = NewConversation.objects.create(
+         hubspot_ticket_id="proof-blocked", entered_queue_at=timezone.now(), automatic_assignment_eligible=True
+     )
+@@ -227,6 +261,7 @@ def test_provider_block_preserves_queue_and_never_logs_runtime_rejection(provide
+
+
+ def test_stale_proof_does_not_disable_matchmaker(provider_evidence) -> None:
++    """Allow the matchmaker to drain with compatible stale evidence."""
+     provider_evidence["checked_at"] = (timezone.now() - timedelta(days=2)).isoformat()
+     cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
+     result = matchmaker_drain_queue()
+@@ -246,6 +281,7 @@ def test_stale_proof_does_not_disable_matchmaker(provider_evidence) -> None:
+     ],
+ )
+ def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason) -> None:
++    """Retain each independent assignment gate with valid provider evidence."""
+     if gate == "capabilities":
+         cache.delete(CAPABILITY_CACHE_KEY)
+     elif gate == "roster":
+@@ -265,6 +301,7 @@ def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason)
+
+ @pytest.mark.parametrize("raw", ["", "not-json", "[]", "{}", '{"contract_version": "1", "app": {}, "webhooks": {}}'])
+ def test_invalid_private_configuration_cannot_enable_assignment(provider_evidence, settings, raw) -> None:
++    """Fail closed when the private deployment contract is invalid."""
+     settings.HUBSPOT_PROVIDER_CONFIG_JSON = raw
+     assert provider_assignment_allowed() is False
+     assert provider_assignment_rejection_reason() == "provider_webhook_proof_invalid"
+@@ -275,6 +312,7 @@ def test_invalid_private_configuration_cannot_enable_assignment(provider_evidenc
+
+ @pytest.mark.parametrize("field", ["contract_version", "app", "webhooks"])
+ def test_private_configuration_revision_invalidates_old_proof(provider_evidence, settings, field) -> None:
++    """Require new evidence when any bound contract component changes."""
+     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     if field == "contract_version":
+         document[field] = "2"
+@@ -285,6 +323,7 @@ def test_private_configuration_revision_invalidates_old_proof(provider_evidence,
+
+
+ def test_missing_private_configuration_invalidates_prior_proof_on_record(provider_evidence, settings, tmp_path) -> None:
++    """Invalidate stored evidence when the writer lacks its desired contract."""
+     webhooks, app = load_desired_configuration()
+     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
+     webhook_path.write_text(json.dumps(webhooks))
+@@ -298,6 +337,7 @@ def test_missing_private_configuration_invalidates_prior_proof_on_record(provide
+ def test_unreadable_export_invalidates_proof_even_without_private_configuration(
+     provider_evidence, settings, tmp_path
+ ) -> None:
++    """Invalidate prior evidence when both export and configuration fail."""
+     settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
+     with pytest.raises(CommandError, match="Invalid HubSpot readback export"):
+         call_command(
+diff --git a/apps/support/webhook_proof.py b/apps/support/webhook_proof.py
+index ceb92c6..4316129 100644
+--- a/apps/support/webhook_proof.py
++++ b/apps/support/webhook_proof.py
+@@ -6,6 +6,7 @@ import hashlib
+ import json
+ from dataclasses import dataclass
+ from datetime import datetime
++from functools import lru_cache
+ from typing import TypedDict
+
+ from django.conf import settings
+@@ -73,12 +74,18 @@ def configuration_fingerprint(
+     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+-def expected_configuration_fingerprint() -> str:
+-    """Compute the identity expected by this running version."""
+-    version, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++@lru_cache(maxsize=1)
++def _fingerprint_for_configuration(raw: str) -> str:
++    """Reuse the hash only while the complete private configuration stays identical."""
++    version, webhooks, app = load_private_configuration(raw)
+     return configuration_fingerprint(webhooks, app, contract_version=version)
+
+
++def expected_configuration_fingerprint() -> str:
++    """Get this process's cached identity, keyed by the current private contract."""
++    return _fingerprint_for_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++
++
+ def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
+     """Persist a new observation without a destructive cache timeout."""
+     proof: WebhookProof = {
+diff --git a/apps/webhooks/tests/test_production_project_config.py b/apps/webhooks/tests/test_production_project_config.py
+index 3d1a891..b27c94a 100644
+--- a/apps/webhooks/tests/test_production_project_config.py
++++ b/apps/webhooks/tests/test_production_project_config.py
+@@ -8,6 +8,7 @@ from apps.integrations.hubspot.webhook_config import load_private_configuration,
+
+
+ def test_synthetic_contract_contains_only_operational_subscriptions(settings) -> None:
++    """Keep synthetic subscriptions restricted to the operational contract."""
+     _, webhooks, _ = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     config = webhooks["config"]
+     properties = {item["propertyName"] for item in config["subscriptions"]["legacyCrmObjects"]}
+@@ -32,6 +33,7 @@ def test_synthetic_contract_contains_only_operational_subscriptions(settings) ->
+     ],
+ )
+ def test_incomplete_private_contract_is_rejected(settings, section, field, value) -> None:
++    """Reject missing or invalid required private contract sections."""
+     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     document[section][field] = value
+     with pytest.raises(ValueError, match=r"^Invalid private HubSpot provider configuration$"):
+@@ -43,6 +45,7 @@ def test_incomplete_private_contract_is_rejected(settings, section, field, value
+     [("targetUrl", ""), ("targetUrl", "https://"), ("maxConcurrentRequests", True), ("maxConcurrentRequests", 0)],
+ )
+ def test_invalid_webhook_settings_are_rejected(settings, field, value) -> None:
++    """Reject invalid webhook targets and concurrency limits."""
+     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     document["webhooks"]["config"]["settings"][field] = value
+     with pytest.raises(ValueError):
+@@ -51,6 +54,7 @@ def test_invalid_webhook_settings_are_rejected(settings, field, value) -> None:
+
+ @pytest.mark.parametrize("entries", [[], [None], [{"active": "true"}], [{"active": True}], [{"active": False}]])
+ def test_invalid_private_subscriptions_are_rejected(settings, entries) -> None:
++    """Require valid active subscriptions in the private contract."""
+     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     document["webhooks"]["config"]["subscriptions"]["legacyCrmObjects"] = entries
+     with pytest.raises(ValueError):
+@@ -58,6 +62,7 @@ def test_invalid_private_subscriptions_are_rejected(settings, entries) -> None:
+
+
+ def test_cli_uses_private_environment_contract(settings, monkeypatch, tmp_path, capsys) -> None:
++    """Compare private environment configuration without exposing scope values."""
+     _, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
+     webhook_path.write_text(json.dumps(webhooks))

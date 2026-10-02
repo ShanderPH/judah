@@ -1,6 +1,22 @@
 # Passagem para verificação
 
-## Continuação atual — contrato privado
+## Revisão atual do PR #135
+
+Esta seção substitui o estado de validação das seções históricas abaixo. Checkout: `/tmp/judah-proof-private`.
+
+- A projeção da entrada relê a ocorrência sob lock e mantém o lock até a confirmação transacional, preservando decisões terminais concorrentes.
+- mark_processed só confirma ocorrências pending; repair_required permanece terminal.
+- O fingerprint é cacheado pela string atual da configuração, com uma única entrada; alterações e configuração inválida continuam fail-closed.
+- Fixture do replay tipada, cronologia do status corrigida e docstrings dos testes alterados completadas.
+- Veredictos por comentário, evidências red/green e resultados completos: `03-verification/review-comments.md`.
+
+Arquivos relativos à raiz absoluta `/tmp/judah-proof-private`: `apps/support/{tasks.py,lifecycle_occurrence_service.py,webhook_proof.py,tests/test_lifecycle_entry_recovery.py,tests/test_webhook_proof.py}`, `apps/webhooks/tests/test_production_project_config.py` e artefatos de revisão. O diff desta iteração está em `04-iteration/02-review-fixes.v3.diff`.
+
+Como testar neste host: comandos exatos em `03-verification/review-comments.md`, usando Python 3.14.7, placeholders e bases locais descartáveis. Primeiro VERIFY: interleaving terminal e contenção real PostgreSQL, depois invalidade/mudança de configuração e suites completas. A transação nova contém somente operações no banco, sem HTTP. SQLite não verifica row locks; esse caso exige PostgreSQL.
+
+Riscos conhecidos: nenhuma detecção automática de drift publicado após o readback; a disciplina de publicação/recoleta autoritativa continua necessária. Redis pode perder a prova por flush/eviction, permanecendo fail-closed. Preparação privada, writer operacional e merge/deploy dependem de Felipe; nenhum release foi executado.
+
+## Continuação anterior — contrato privado
 
 Esta seção substitui o estado concluído da validação histórica abaixo. Checkout atual: `/tmp/judah-proof-private`, branch `hotfix/hubspot-webhook-proof-durability`, integrada com main/4ec547d e #134/952ca9f.
 
@@ -9,13 +25,13 @@ Esta seção substitui o estado concluído da validação histórica abaixo. Che
 - Configuração inválida bloqueia assignment e informa readiness sem erro 500; erro simultâneo de configuração/export invalida a prova anterior.
 - Testes usam contrato sintético; TTL=-1 confirmado em Redis local real.
 - SQLite: 1.079 passed (91,05%). PostgreSQL: 1.122 passed (91,26%). Redis/Celery/PostgreSQL opt-ins: 6 passed. Ruff/format/mypy/Django/drift/hooks passaram.
-- CI do código publicado `9dc459f`: todos os gates passaram no run `37039194032`, incluindo webapp. PR #135 permanece draft pelos bloqueios de release abaixo.
+- CI do código publicado `9dc459f`: todos os gates passaram no run `37039194032`, incluindo webapp. Esse resultado precede as correções da revisão; o PR foi aberto para revisão pelo usuário.
 
 Arquivos alterados nesta continuação, relativos à raiz absoluta `/tmp/judah-proof-private`: `apps/integrations/hubspot/webhook_config.py`, `apps/support/{webhook_proof.py,provider_readiness.py,management/commands/record_hubspot_webhook_readback.py,tests/test_webhook_proof.py,tests/test_provider_contract_red.py}`, `apps/webhooks/tests/test_production_project_config.py`, `core/settings/{base.py,test.py}` e os artefatos da request. Status/handoff do release provider foram sincronizados.
 
 Comandos locais completos em `03-verification/private-config.md`, executados com placeholders e bases locais descartáveis. Primeiro VERIFY: configuração ausente/malformed, incompatibilidade de revisão/app/webhooks, invalidação conjunta e gravação sem TTL. Nenhum HMAC foi alterado; nenhuma leitura/escrita produtiva foi realizada.
 
-Bloqueio independente do release: `reproduce-entry-overlap.py` confirma que uma execução atrasada de #134 abre um ciclo e troca `repair_required` por `processed`. Os módulos lifecycle de #134 permanecem intactos nesta continuação. Manter PR em draft até esse achado ser resolvido ou decidido explicitamente, além dos gates operacionais de `05-deployment/private-contract.md`.
+O defeito de concorrência originalmente reproduzido foi corrigido na revisão do PR #135. O replay explícito agora verifica a regressão permanente. Os gates operacionais de `05-deployment/private-contract.md` continuam necessários para o release autorizado.
 
 ## Evidência histórica anterior à remoção dos manifests
 

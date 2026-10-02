@@ -14,6 +14,7 @@ from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
+from pytest_django.fixtures import Settings
 
 from apps.support.availability_runtime import assignment_gate_rejection_reason, may_assign
 from apps.support.matchmaker_service import matchmaker_drain_queue, process_queue_item
@@ -27,6 +28,7 @@ from apps.support.provider_readiness import (
 )
 from apps.support.webhook_proof import (
     WEBHOOK_CONFIG_CACHE_KEY,
+    _fingerprint_for_configuration,
     configuration_fingerprint,
     evaluate_webhook_proof,
     expected_configuration_fingerprint,
@@ -69,6 +71,7 @@ def provider_evidence(settings):
 
 @pytest.mark.parametrize("hours, stale", [(0, False), (24, False), (25, True), (2400, True)])
 def test_proof_validity_does_not_expire(provider_evidence, hours, stale) -> None:
+    """Keep compatible evidence valid regardless of age and expose stale warnings."""
     now = timezone.now()
     provider_evidence["checked_at"] = (now - timedelta(hours=hours)).isoformat()
     cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
@@ -102,6 +105,7 @@ def test_proof_validity_does_not_expire(provider_evidence, hours, stale) -> None
 def test_rejected_proof_is_fail_closed_and_has_specific_reason(
     provider_evidence, condition, status, reason, monkeypatch
 ) -> None:
+    """Reject unusable evidence with its distinct readiness reason."""
     monkeypatch.setenv("DJANGO_ENV", "production")
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
     if condition == "missing":
@@ -134,12 +138,14 @@ def test_rejected_proof_is_fail_closed_and_has_specific_reason(
 
 def test_proof_survives_the_previous_destructive_timeout(provider_evidence) -> None:
     # Move only the cache clock; capability/roster expiry must remain independent.
+    """Keep the stored proof after the former expiry deadline."""
     with patch("time.time", return_value=time.time() + 86401):
         assert cache.get(WEBHOOK_CONFIG_CACHE_KEY) == provider_evidence
     assert cache._expire_info[cache.make_key(WEBHOOK_CONFIG_CACHE_KEY)] is None
 
 
 def test_fingerprint_is_canonical_and_binds_both_manifests() -> None:
+    """Bind both manifests while ignoring dictionary key order."""
     webhooks, app = load_desired_configuration()
     fingerprint = configuration_fingerprint(webhooks, app)
     assert len(fingerprint) == 64
@@ -150,8 +156,32 @@ def test_fingerprint_is_canonical_and_binds_both_manifests() -> None:
         assert configuration_fingerprint(modified["webhooks"], modified["app"]) != fingerprint
 
 
+def test_expected_fingerprint_is_cached_by_current_private_configuration(settings: Settings) -> None:
+    """Repeated gates reuse parsing, while a changed contract gets a fresh hash."""
+    from apps.integrations.hubspot.webhook_config import load_private_configuration
+
+    _fingerprint_for_configuration.cache_clear()
+    try:
+        with patch("apps.support.webhook_proof.load_private_configuration", wraps=load_private_configuration) as load:
+            original = expected_configuration_fingerprint()
+            assert expected_configuration_fingerprint() == original
+            assert load.call_count == 1
+            document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+            document["contract_version"] = "2"
+            settings.HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(document)
+            assert expected_configuration_fingerprint() != original
+            assert load.call_count == 2
+            settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
+            with pytest.raises(ValueError):
+                expected_configuration_fingerprint()
+            assert load.call_count == 3
+    finally:
+        _fingerprint_for_configuration.cache_clear()
+
+
 @pytest.mark.parametrize("change", ["webhooks", "app", "both", "malformed", "missing_file", "json_list"])
 def test_command_invalidates_prior_proof_and_fails_on_any_bad_export(provider_evidence, tmp_path, change) -> None:
+    """Replace prior evidence when either published export is unusable."""
     webhooks, app = load_desired_configuration()
     if change in {"webhooks", "both"}:
         webhooks["uid"] = "wrong"
@@ -173,6 +203,7 @@ def test_command_invalidates_prior_proof_and_fails_on_any_bad_export(provider_ev
 
 
 def test_command_records_success_only_after_both_exports_match(provider_evidence, tmp_path) -> None:
+    """Record ready evidence only after both published manifests match."""
     webhooks, app = load_desired_configuration()
     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
     webhook_path.write_text(json.dumps(webhooks))
@@ -190,12 +221,14 @@ def test_command_records_success_only_after_both_exports_match(provider_evidence
 
 @pytest.mark.parametrize("snapshot", [{}, [], "bad", {"checked_at": "2026-10-01T00:00:00"}])
 def test_malformed_proof_is_invalid(snapshot) -> None:
+    """Reject malformed stored proof instead of enabling assignment."""
     evaluation = evaluate_webhook_proof(snapshot, expected_fingerprint="expected", now=timezone.now())
     assert evaluation.verified is False
     assert evaluation.rejection_reason == "invalid"
 
 
 def test_real_runtime_rejection_remains_distinct(provider_evidence, monkeypatch) -> None:
+    """Preserve the runtime authority rejection reason independently of proof."""
     monkeypatch.setenv("DJANGO_ENV", "staging")
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
     with patch("apps.support.availability_runtime.logger") as logger:
@@ -206,6 +239,7 @@ def test_real_runtime_rejection_remains_distinct(provider_evidence, monkeypatch)
 
 
 def test_provider_block_preserves_queue_and_never_logs_runtime_rejection(provider_evidence) -> None:
+    """Leave queued work untouched and report the provider rejection."""
     row = NewConversation.objects.create(
         hubspot_ticket_id="proof-blocked", entered_queue_at=timezone.now(), automatic_assignment_eligible=True
     )
@@ -227,6 +261,7 @@ def test_provider_block_preserves_queue_and_never_logs_runtime_rejection(provide
 
 
 def test_stale_proof_does_not_disable_matchmaker(provider_evidence) -> None:
+    """Allow the matchmaker to drain with compatible stale evidence."""
     provider_evidence["checked_at"] = (timezone.now() - timedelta(days=2)).isoformat()
     cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
     result = matchmaker_drain_queue()
@@ -246,6 +281,7 @@ def test_stale_proof_does_not_disable_matchmaker(provider_evidence) -> None:
     ],
 )
 def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason) -> None:
+    """Retain each independent assignment gate with valid provider evidence."""
     if gate == "capabilities":
         cache.delete(CAPABILITY_CACHE_KEY)
     elif gate == "roster":
@@ -265,6 +301,7 @@ def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason) 
 
 @pytest.mark.parametrize("raw", ["", "not-json", "[]", "{}", '{"contract_version": "1", "app": {}, "webhooks": {}}'])
 def test_invalid_private_configuration_cannot_enable_assignment(provider_evidence, settings, raw) -> None:
+    """Fail closed when the private deployment contract is invalid."""
     settings.HUBSPOT_PROVIDER_CONFIG_JSON = raw
     assert provider_assignment_allowed() is False
     assert provider_assignment_rejection_reason() == "provider_webhook_proof_invalid"
@@ -275,6 +312,7 @@ def test_invalid_private_configuration_cannot_enable_assignment(provider_evidenc
 
 @pytest.mark.parametrize("field", ["contract_version", "app", "webhooks"])
 def test_private_configuration_revision_invalidates_old_proof(provider_evidence, settings, field) -> None:
+    """Require new evidence when any bound contract component changes."""
     document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
     if field == "contract_version":
         document[field] = "2"
@@ -285,6 +323,7 @@ def test_private_configuration_revision_invalidates_old_proof(provider_evidence,
 
 
 def test_missing_private_configuration_invalidates_prior_proof_on_record(provider_evidence, settings, tmp_path) -> None:
+    """Invalidate stored evidence when the writer lacks its desired contract."""
     webhooks, app = load_desired_configuration()
     webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
     webhook_path.write_text(json.dumps(webhooks))
@@ -298,6 +337,7 @@ def test_missing_private_configuration_invalidates_prior_proof_on_record(provide
 def test_unreadable_export_invalidates_proof_even_without_private_configuration(
     provider_evidence, settings, tmp_path
 ) -> None:
+    """Invalidate prior evidence when both export and configuration fail."""
     settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
     with pytest.raises(CommandError, match="Invalid HubSpot readback export"):
         call_command(

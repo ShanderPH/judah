@@ -21,17 +21,17 @@ O runner `/tmp/judah-private-check.py` usa apenas placeholders e força SQLite l
 
 O hash canônico inclui a revisão e ambos os manifests completos. Provas antigas, incompatíveis, inválidas ou ausentes continuam bloqueando; age não invalida prova compatível. Readiness informa `desired_configuration_invalid` em vez de lançar 500. Writer invalida a prova anterior mesmo quando configuração e exports são inválidos simultaneamente. Erros são genéricos e o CLI não expõe nomes privados de scopes/propriedades.
 
-## Revisão da integração
+## Revisão da integração — estado histórico anterior à revisão do PR
 
 Sem diff em relação a #134/952ca9f nos módulos lifecycle e dependências do webapp. A verificação local do webapp anterior continua como evidência histórica; CI deverá reexecutá-la no SHA publicado desta continuação. Não houve mudança de UI.
 
 O comentário de performance sobre leitura de arquivos por item deixa de aplicar à fonte atual, que não faz IO de arquivos. O hash ainda é recalculado a partir das settings em cada verificação; não foi acrescentado cache que pudesse reutilizar identidade após mudança de configuração.
 
-## Bloqueio independente encontrado
+## Defeito independente reproduzido — corrigido na revisão do PR #135
 
 O alerta de concorrência no ramo de entrada herdado de #134 foi reproduzido por `reproduce-entry-overlap.py`, executado explicitamente fora da suíte padrão. Uma execução pausa antes da projeção; outra consome o budget e grava `repair_required`; a primeira abre o ciclo e sobrescreve o terminal como `processed`. A assertion de preservação terminal falha: `assert 'processed' == 'repair_required'`.
 
-Esse reproducer é evidência de defeito preexistente na integração, não uma aprovação de release. O proof está validado, mas o release conjunto precisa resolver esse alerta ou de uma decisão explícita de Felipe. A origem privada, aquisição publicada nova, substituição do writer legado e autorização operacional também continuam necessárias.
+A revisão solicitada pelo usuário corrigiu esse defeito com lock/revalidação e preservação terminal. O replay agora chama a regressão permanente e passa; a contenção foi validada em PostgreSQL real. Resultados atuais em `review-comments.md`. Origem privada, aquisição publicada nova, substituição do writer legado e autorização operacional continuam necessárias.
 
 ## Comandos reproduzíveis neste host
 
@@ -47,4 +47,4 @@ Esse reproducer é evidência de defeito preexistente na integração, não uma 
 /usr/bin/python3 /tmp/judah-private-check.py -m pytest ai-system/requests/hotfix/hubspot-webhook-proof-durability/03-verification/reproduce-entry-overlap.py --no-cov -q
 ```
 
-O último comando é uma reprodução negativa e deve falhar na árvore atual. Todos os testes conectam somente bases locais descartáveis. Nenhuma execução em base não-local foi realizada.
+O último comando falhava no baseline edc5030; após a revisão ele deve passar. Todos os testes conectam somente bases locais descartáveis. Nenhuma execução em base não-local foi realizada.
