@@ -340,3 +340,30 @@ def test_real_redis_stores_proof_without_ttl(settings) -> None:
         finally:
             client.delete(key)
             client.close()
+
+
+@pytest.mark.parametrize("proof_state", ["missing", "stale"])
+def test_pr134_entry_recovery_does_not_bypass_or_disable_assignment_gate(provider_evidence, proof_state) -> None:
+    """Recovery of proven entry evidence is independent of permission to assign."""
+    from apps.support.models import SupportConversationCycle, SupportLifecycleOccurrence
+    from apps.support.tasks import task_reconcile_lifecycle_occurrence, task_scan_lifecycle_occurrences
+    from apps.support.tests.test_lifecycle_entry_recovery import record_entry
+
+    if proof_state == "missing":
+        cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
+    else:
+        provider_evidence["checked_at"] = (timezone.now() - timedelta(days=2)).isoformat()
+        cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
+    occurrence = record_entry("proof-entry-recovery")
+    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+    with patch("apps.support.tasks.task_reconcile_lifecycle_occurrence.delay") as dispatch:
+        assert task_scan_lifecycle_occurrences.run() == 1
+    dispatch.assert_called_once_with(str(occurrence.pk))
+    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
+        assert task_reconcile_lifecycle_occurrence.run(str(occurrence.pk)) == "processed"
+    provider.assert_not_called()
+    assert SupportConversationCycle.objects.get(hubspot_ticket_id="proof-entry-recovery").state == "queued"
+    occurrence.refresh_from_db()
+    assert occurrence.retry_count == 1
+    assert occurrence.processing_status == "processed"
+    assert may_assign() is (proof_state == "stale")
