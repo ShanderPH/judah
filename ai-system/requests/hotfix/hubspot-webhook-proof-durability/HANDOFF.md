@@ -42,3 +42,7 @@ Atacar primeiro TTL Redis, estado legacy, validação de ambos os manifests e du
 Nenhuma migration. Redis pode ainda perder evidência por flush/eviction/falha de persistência: continua fail-closed. Stale não garante ausência de drift publicado após o readback; warning operacional pede nova coleta autoritativa. Durante release, substituir gravação inline antiga pela chamada do comando versionado com exports publicados atuais. Não executar nesta etapa.
 
 Hooks all-files têm pendências antigas em install.cmd e cinco SVGs. Sem alterações nesses arquivos; hooks dos arquivos da request precisam passar.
+
+## Resultado concluído
+
+Request DONE no código 433106f, integrado com #134/952ca9f, sem conflitos. Suite SQLite: 1.054 passed (90,91%). PostgreSQL: 1.097 passed (91,12%). Sete opt-ins Redis/Celery executados separadamente e passaram. Webapp: lint/typecheck/66 testes/build padrão/audit passaram, ressalvas anteriores documentadas. Relatório completo: 03-verification/combined.md. Próximo passo de Felipe: revisar release.md e autorizar operação de release separadamente.
