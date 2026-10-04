@@ -1,13 +1,22 @@
 """Regressions for bounded recovery of proven queue-entry occurrences."""
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from unittest.mock import patch
 
 import pytest
+from django.db import close_old_connections, connection
 from django.utils import timezone
+from pytest_django.fixtures import Settings
 
 from apps.support.conversation_cycle_service import open_or_get_cycle
-from apps.support.lifecycle_occurrence_service import open_from_proven_occurrence, record_proven_occurrence
+from apps.support.lifecycle_occurrence_service import (
+    mark_processed,
+    open_from_proven_occurrence,
+    record_proven_occurrence,
+)
 from apps.support.models import SupportConversationCycle, SupportLifecycleOccurrence
 from apps.support.tasks import task_reconcile_lifecycle_occurrence, task_scan_lifecycle_occurrences
 
@@ -22,6 +31,104 @@ def record_entry(ticket_id: str = "entry-recovery") -> SupportLifecycleOccurrenc
         evidence_source="webhook_property",
         source_event_id="entry-event",
     )
+
+
+def test_terminal_entry_is_not_projected_by_an_earlier_execution(settings: Settings) -> None:
+    """Preserve a terminal decision committed between claim and projection."""
+    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
+    occurrence = record_entry("entry-overlap")
+    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+    select_for_update = SupportLifecycleOccurrence.objects.select_for_update
+    lock_count = 0
+
+    def exhaust_before_lock():
+        """Interleave the competing due task before the next lock acquisition."""
+        nonlocal lock_count
+        lock_count += 1
+        if lock_count == 2:
+            SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+            assert task_reconcile_lifecycle_occurrence.run(str(occurrence.pk)) == "repair_required"
+        return select_for_update()
+
+    with patch.object(SupportLifecycleOccurrence.objects, "select_for_update", side_effect=exhaust_before_lock):
+        result = task_reconcile_lifecycle_occurrence.run(str(occurrence.pk))
+
+    occurrence.refresh_from_db()
+    assert result == "repair_required"
+    assert occurrence.processing_status == "repair_required"
+    assert not SupportConversationCycle.objects.filter(hubspot_ticket_id="entry-overlap").exists()
+
+
+def test_mark_processed_never_overwrites_a_terminal_repair_decision() -> None:
+    """A delayed acknowledgement cannot reset a terminal occurrence."""
+    occurrence = record_entry("entry-terminal")
+    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(
+        processing_status="repair_required", next_reconcile_at=None
+    )
+    mark_processed(occurrence.pk)
+    occurrence.refresh_from_db()
+    assert occurrence.processing_status == "repair_required"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_overlapping_postgres_entry_tasks_serialize_projection(settings: Settings) -> None:
+    """A competing due task waits for projection and observes its committed result."""
+    if connection.vendor != "postgresql":
+        pytest.skip("PostgreSQL row locks required")
+    settings.SUPPORT_LIFECYCLE_RECONCILE_MAX_ATTEMPTS = 1
+    occurrence = record_entry("entry-postgres-overlap")
+    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
+    projection_started, release_projection, second_connected = Event(), Event(), Event()
+    second_pids: list[int] = []
+
+    def pause_projection(**kwargs):
+        """Pause at the guarded writer boundary while a second connection arrives."""
+        projection_started.set()
+        assert release_projection.wait(timeout=10)
+        return open_from_proven_occurrence(**kwargs)
+
+    def reconcile(second: bool) -> str:
+        close_old_connections()
+        try:
+            if second:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    second_pids.append(cursor.fetchone()[0])
+                second_connected.set()
+            return task_reconcile_lifecycle_occurrence.run(str(occurrence.pk))
+        finally:
+            close_old_connections()
+
+    blocked = False
+    with (
+        patch("apps.support.lifecycle_occurrence_service.open_from_proven_occurrence", side_effect=pause_projection),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first = pool.submit(reconcile, False)
+        try:
+            assert projection_started.wait(timeout=10)
+            with patch("apps.support.tasks.timezone.now", return_value=timezone.now() + timedelta(minutes=1)):
+                second = pool.submit(reconcile, True)
+                assert second_connected.wait(timeout=10)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not second.done():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT cardinality(pg_blocking_pids(%s))", [second_pids[0]])
+                        blocked = cursor.fetchone()[0] > 0
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                release_projection.set()
+                results = (first.result(timeout=10), second.result(timeout=10))
+        finally:
+            release_projection.set()
+
+    assert blocked, "The occurrence lock must cover eligibility and projection"
+    assert results == ("processed", "processed")
+    occurrence.refresh_from_db()
+    assert occurrence.processing_status == "processed"
+    assert occurrence.retry_count == 1
+    assert SupportConversationCycle.objects.filter(hubspot_ticket_id="entry-postgres-overlap").count() == 1
 
 
 def test_proven_entry_is_scheduled_without_resetting_duplicate_budget() -> None:

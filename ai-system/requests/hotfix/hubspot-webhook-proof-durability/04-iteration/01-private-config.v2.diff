@@ -1,0 +1,488 @@
+diff --git a/apps/integrations/hubspot/webhook_config.py b/apps/integrations/hubspot/webhook_config.py
+index 3a9f4f5..8ba824e 100644
+--- a/apps/integrations/hubspot/webhook_config.py
++++ b/apps/integrations/hubspot/webhook_config.py
+@@ -1,16 +1,63 @@
+-"""Compare desired HubSpot project webhooks with a published readback export."""
++"""Validate private desired HubSpot configuration against published exports."""
+
+ from __future__ import annotations
+
+ import argparse
+ import json
++import os
+ import sys
+ from pathlib import Path
+ from typing import Any
++from urllib.parse import urlsplit
+
+ # Manifest and readback are untyped JSON documents at this boundary.
+
+
++def load_private_configuration(raw: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
++    """Parse the private contract without exposing its contents in errors.
++
++    Returns:
++        The contract revision, desired webhooks and desired app metadata.
++
++    Raises:
++        ValueError: If any required configuration section is absent or malformed.
++    """
++    try:
++        document = json.loads(raw)
++        version, webhooks, app = document["contract_version"], document["webhooks"], document["app"]
++        if not isinstance(version, str) or not version.strip():
++            raise ValueError
++        for manifest in (webhooks, app):
++            if (
++                not isinstance(manifest, dict)
++                or not isinstance(manifest.get("uid"), str)
++                or not manifest["uid"].strip()
++            ):
++                raise ValueError
++            if not isinstance(manifest.get("config"), dict):
++                raise ValueError
++        webhook_settings = webhooks["config"]["settings"]
++        target = webhook_settings["targetUrl"]
++        concurrency = webhook_settings["maxConcurrentRequests"]
++        if not isinstance(target, str) or urlsplit(target).scheme != "https" or not urlsplit(target).hostname:
++            raise ValueError
++        if type(concurrency) is not int or concurrency <= 0 or not _subscriptions(webhooks["config"]):
++            raise ValueError
++        subscriptions = webhooks["config"]["subscriptions"]["legacyCrmObjects"]
++        if any(not isinstance(entry, dict) or type(entry.get("active")) is not bool for entry in subscriptions):
++            raise ValueError
++        scopes = app["config"]["auth"]["requiredScopes"]
++        if (
++            not isinstance(scopes, list)
++            or not scopes
++            or any(not isinstance(scope, str) or not scope.strip() for scope in scopes)
++        ):
++            raise ValueError
++    except ValueError, KeyError, TypeError, AttributeError:
++        raise ValueError("Invalid private HubSpot provider configuration") from None
++    return version, webhooks, app
++
++
+ def _config(document: dict[str, Any]) -> dict[str, Any]:
+     """Extract the configuration section from either supported export shape."""
+     config = document.get("config", document)
+@@ -83,30 +130,25 @@ def compare_app_config(desired: dict[str, Any], published: dict[str, Any]) -> di
+
+
+ def main() -> int:
+-    """Compare a HubSpot published export to the versioned desired manifest."""
++    """Compare published exports to the private desired contract from the environment."""
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("published", type=Path, help="JSON readback exported from the published HubSpot app")
+     parser.add_argument("--published-app", type=Path, required=True, help="Published app metadata JSON readback")
+-    parser.add_argument(
+-        "--desired",
+-        type=Path,
+-        default=Path(__file__).resolve().parents[3] / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json",
+-    )
+-    parser.add_argument(
+-        "--desired-app",
+-        type=Path,
+-        default=Path(__file__).resolve().parents[3] / "hubspot-app/src/app/app-hsmeta.json",
+-    )
+     args = parser.parse_args()
++    _, desired_webhooks, desired_app = load_private_configuration(os.environ.get("HUBSPOT_PROVIDER_CONFIG_JSON", ""))
+     result = compare_webhook_config(
+-        json.loads(args.desired.read_text(encoding="utf-8")),
++        desired_webhooks,
+         json.loads(args.published.read_text(encoding="utf-8")),
+     )
+     result["app"] = compare_app_config(
+-        json.loads(args.desired_app.read_text(encoding="utf-8")),
++        desired_app,
+         json.loads(args.published_app.read_text(encoding="utf-8")),
+     )
+     result["ready"] = result["ready"] and result["app"]["ready"]
++    # Drift observations must not expose private scopes or subscription properties.
++    result["missing_active_subscription_count"] = len(result.pop("missing_active_subscriptions"))
++    for field in ("missing_required_scopes", "unexpected_required_scopes"):
++        result["app"][f"{field}_count"] = len(result["app"].pop(field))
+     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+     return 0 if result["ready"] else 1
+
+diff --git a/apps/support/management/commands/record_hubspot_webhook_readback.py b/apps/support/management/commands/record_hubspot_webhook_readback.py
+index dab0795..a3c371a 100644
+--- a/apps/support/management/commands/record_hubspot_webhook_readback.py
++++ b/apps/support/management/commands/record_hubspot_webhook_readback.py
+@@ -14,7 +14,7 @@ from apps.support.webhook_proof import invalidate_webhook_proof, record_publishe
+ class Command(BaseCommand):
+     """Store durable, versioned evidence from published configuration exports."""
+
+-    help = "Compare published HubSpot app/webhook readback exports with versioned manifests"
++    help = "Compare published HubSpot app/webhook exports with the private desired contract"
+
+     def add_arguments(self, parser: CommandParser) -> None:
+         """Add paths to published HubSpot readback exports."""
+@@ -30,14 +30,14 @@ class Command(BaseCommand):
+             app = json.loads(published_app.read_text(encoding="utf-8"))
+             if not isinstance(webhooks, dict) or not isinstance(app, dict):
+                 raise ValueError("Published configurations must be JSON objects")
+-        except (OSError, ValueError, TypeError) as exc:
++        except OSError, ValueError, TypeError:
+             # An unreadable export cannot leave a previous successful proof active.
+             invalidate_webhook_proof()
+-            raise CommandError("Invalid HubSpot readback export") from exc
++            raise CommandError("Invalid HubSpot readback export") from None
+         try:
+             proof = record_published_configuration(webhooks, app)
+-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+-            raise CommandError("Invalid HubSpot readback export") from exc
++        except OSError, ValueError, KeyError, TypeError, AttributeError:
++            raise CommandError("Invalid HubSpot configuration or readback") from None
+         self.stdout.write(json.dumps(proof, sort_keys=True))
+         if not proof["ready"]:
+-            raise CommandError("Published HubSpot configuration differs from the versioned manifests")
++            raise CommandError("Published HubSpot configuration differs from the private desired contract")
+diff --git a/apps/support/provider_readiness.py b/apps/support/provider_readiness.py
+index 6dde4e4..9349ac9 100644
+--- a/apps/support/provider_readiness.py
++++ b/apps/support/provider_readiness.py
+@@ -21,6 +21,7 @@ from apps.integrations.hubspot.platform_contract import (
+ )
+ from apps.support.webhook_proof import (
+     WEBHOOK_CONFIG_CACHE_KEY,
++    WebhookProofEvaluation,
+     evaluate_webhook_proof,
+     expected_configuration_fingerprint,
+ )
+@@ -73,9 +74,14 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
+     roster_at = datetime.fromisoformat(roster_at_raw) if roster_at_raw else None
+     roster_age = max(0, int((now - roster_at).total_seconds())) if roster_at else None
+     roster_fresh = roster_age is not None and roster_age <= settings.HUBSPOT_ROSTER_MAX_AGE_SECONDS
+-    webhook_proof = evaluate_webhook_proof(
+-        cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=expected_configuration_fingerprint(), now=now
+-    )
++    try:
++        fingerprint = expected_configuration_fingerprint()
++    except ValueError:
++        webhook_proof = WebhookProofEvaluation("desired_configuration_invalid")
++    else:
++        webhook_proof = evaluate_webhook_proof(
++            cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=fingerprint, now=now
++        )
+
+     return {
+         "mode": mode,
+diff --git a/apps/support/tests/test_provider_contract_red.py b/apps/support/tests/test_provider_contract_red.py
+index 0c216dc..faec1af 100644
+--- a/apps/support/tests/test_provider_contract_red.py
++++ b/apps/support/tests/test_provider_contract_red.py
+@@ -2,6 +2,7 @@
+
+ from __future__ import annotations
+
++import json
+ from datetime import UTC, datetime, time, timedelta
+ from decimal import Decimal
+ from unittest.mock import Mock, patch
+@@ -57,6 +58,7 @@ from apps.support.tasks import (
+     task_reconcile_lifecycle_occurrence,
+     task_scan_lifecycle_occurrences,
+ )
++from apps.support.webhook_proof import load_desired_configuration
+ from apps.webhooks.handlers.hubspot_handler import _handle_pipeline_stage_change
+ from apps.webhooks.models import WebhookEvent
+ from common.exceptions import ExternalServiceError, ValidationError
+@@ -227,12 +229,11 @@ def test_published_webhook_readback_controls_enforce_gate(settings, tmp_path) ->
+     cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
+     assert provider_assignment_allowed() is False
+
+-    desired_webhooks = settings.BASE_DIR / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json"
+-    desired_app = settings.BASE_DIR / "hubspot-app/src/app/app-hsmeta.json"
++    desired_webhooks, desired_app = load_desired_configuration()
+     published_webhooks = tmp_path / "published-webhooks.json"
+     published_app = tmp_path / "published-app.json"
+-    published_webhooks.write_text(desired_webhooks.read_text(encoding="utf-8"), encoding="utf-8")
+-    published_app.write_text(desired_app.read_text(encoding="utf-8"), encoding="utf-8")
++    published_webhooks.write_text(json.dumps(desired_webhooks), encoding="utf-8")
++    published_app.write_text(json.dumps(desired_app), encoding="utf-8")
+     call_command(
+         "record_hubspot_webhook_readback",
+         published_webhooks=published_webhooks,
+diff --git a/apps/support/tests/test_webhook_proof.py b/apps/support/tests/test_webhook_proof.py
+index 6405c20..4f178d8 100644
+--- a/apps/support/tests/test_webhook_proof.py
++++ b/apps/support/tests/test_webhook_proof.py
+@@ -263,10 +263,49 @@ def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason)
+     assert may_assign() is False
+
+
+-def test_unreadable_desired_manifest_cannot_enable_assignment(provider_evidence, settings, tmp_path) -> None:
+-    settings.BASE_DIR = tmp_path
++@pytest.mark.parametrize("raw", ["", "not-json", "[]", "{}", '{"contract_version": "1", "app": {}, "webhooks": {}}'])
++def test_invalid_private_configuration_cannot_enable_assignment(provider_evidence, settings, raw) -> None:
++    settings.HUBSPOT_PROVIDER_CONFIG_JSON = raw
+     assert provider_assignment_allowed() is False
+-    assert provider_assignment_rejection_reason() == "provider_evidence_unavailable"
++    assert provider_assignment_rejection_reason() == "provider_webhook_proof_invalid"
++    checks = provider_contract_checks()
++    assert checks["webhook_config_status"] == "desired_configuration_invalid"
++    assert "hubspot_webhook_config_invalid" in provider_contract_reasons(checks)
++
++
++@pytest.mark.parametrize("field", ["contract_version", "app", "webhooks"])
++def test_private_configuration_revision_invalidates_old_proof(provider_evidence, settings, field) -> None:
++    document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    if field == "contract_version":
++        document[field] = "2"
++    else:
++        document[field]["uid"] += "_changed"
++    settings.HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(document)
++    assert provider_assignment_rejection_reason() == "provider_webhook_proof_fingerprint_mismatch"
++
++
++def test_missing_private_configuration_invalidates_prior_proof_on_record(provider_evidence, settings, tmp_path) -> None:
++    webhooks, app = load_desired_configuration()
++    webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
++    webhook_path.write_text(json.dumps(webhooks))
++    app_path.write_text(json.dumps(app))
++    settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
++    with pytest.raises(CommandError, match="Invalid HubSpot configuration or readback"):
++        call_command("record_hubspot_webhook_readback", published_webhooks=webhook_path, published_app=app_path)
++    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY)["ready"] is False
++
++
++def test_unreadable_export_invalidates_proof_even_without_private_configuration(
++    provider_evidence, settings, tmp_path
++) -> None:
++    settings.HUBSPOT_PROVIDER_CONFIG_JSON = ""
++    with pytest.raises(CommandError, match="Invalid HubSpot readback export"):
++        call_command(
++            "record_hubspot_webhook_readback",
++            published_webhooks=tmp_path / "missing.json",
++            published_app=tmp_path / "missing-app.json",
++        )
++    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY)["ready"] is False
+
+
+ @pytest.mark.parametrize("hours", [0, 25])
+diff --git a/apps/support/webhook_proof.py b/apps/support/webhook_proof.py
+index 250ee48..ceb92c6 100644
+--- a/apps/support/webhook_proof.py
++++ b/apps/support/webhook_proof.py
+@@ -12,7 +12,11 @@ from django.conf import settings
+ from django.core.cache import cache
+ from django.utils import timezone
+
+-from apps.integrations.hubspot.webhook_config import compare_app_config, compare_webhook_config
++from apps.integrations.hubspot.webhook_config import (
++    compare_app_config,
++    compare_webhook_config,
++    load_private_configuration,
++)
+
+ WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
+ WEBHOOK_PROOF_STALE_SECONDS = 86400
+@@ -51,24 +55,28 @@ class WebhookProofEvaluation:
+
+
+ def load_desired_configuration() -> tuple[dict[str, object], dict[str, object]]:
+-    """Read the two versioned manifests used by both validation and runtime."""
+-    root = settings.BASE_DIR / "hubspot-app/src/app"
+-    webhooks = json.loads((root / "webhooks/judah-webhooks-hsmeta.json").read_text(encoding="utf-8"))
+-    app = json.loads((root / "app-hsmeta.json").read_text(encoding="utf-8"))
+-    if not isinstance(webhooks, dict) or not isinstance(app, dict):
+-        raise ValueError("HubSpot manifests must be JSON objects")
++    """Read both desired manifests from the private deployment configuration."""
++    _, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
+     return webhooks, app
+
+
+-def configuration_fingerprint(webhooks: dict[str, object], app: dict[str, object]) -> str:
+-    """Hash both complete desired manifests with canonical JSON object ordering."""
+-    canonical = json.dumps({"app": app, "webhooks": webhooks}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
++def configuration_fingerprint(
++    webhooks: dict[str, object], app: dict[str, object], *, contract_version: str = "1"
++) -> str:
++    """Hash the private revision and both complete manifests with canonical ordering."""
++    canonical = json.dumps(
++        {"contract_version": contract_version, "app": app, "webhooks": webhooks},
++        sort_keys=True,
++        separators=(",", ":"),
++        ensure_ascii=True,
++    )
+     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+ def expected_configuration_fingerprint() -> str:
+     """Compute the identity expected by this running version."""
+-    return configuration_fingerprint(*load_desired_configuration())
++    version, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    return configuration_fingerprint(webhooks, app, contract_version=version)
+
+
+ def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
+@@ -85,7 +93,11 @@ def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
+
+ def invalidate_webhook_proof() -> WebhookProof:
+     """Replace prior evidence when a published export cannot be read."""
+-    return _store_proof(ready=False, fingerprint=expected_configuration_fingerprint())
++    try:
++        fingerprint = expected_configuration_fingerprint()
++    except ValueError:
++        fingerprint = ""
++    return _store_proof(ready=False, fingerprint=fingerprint)
+
+
+ def record_published_configuration(
+@@ -96,8 +108,12 @@ def record_published_configuration(
+     Invalid exports also replace prior evidence with a fail-closed snapshot.
+     The caller must fail its release gate when the returned proof is not ready.
+     """
+-    desired_webhooks, desired_app = load_desired_configuration()
+-    fingerprint = configuration_fingerprint(desired_webhooks, desired_app)
++    try:
++        version, desired_webhooks, desired_app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    except ValueError:
++        _store_proof(ready=False, fingerprint="")
++        raise
++    fingerprint = configuration_fingerprint(desired_webhooks, desired_app, contract_version=version)
+     try:
+         webhook_result = compare_webhook_config(desired_webhooks, published_webhooks)
+         app_result = compare_app_config(desired_app, published_app)
+diff --git a/apps/webhooks/tests/test_production_project_config.py b/apps/webhooks/tests/test_production_project_config.py
+index 6692b05..3d1a891 100644
+--- a/apps/webhooks/tests/test_production_project_config.py
++++ b/apps/webhooks/tests/test_production_project_config.py
+@@ -1,19 +1,75 @@
+-"""Contract checks for the production HubSpot webhook project."""
++"""Contract checks using synthetic HubSpot webhook deployment configuration."""
+
+ import json
+-from pathlib import Path
+
++import pytest
+
+-def test_production_manifest_contains_only_operational_subscriptions() -> None:
+-    root = Path(__file__).resolve().parents[3]
+-    config = json.loads(
+-        (root / "hubspot-app" / "src" / "app" / "webhooks" / "judah-webhooks-hsmeta.json").read_text(encoding="utf-8")
+-    )["config"]
++from apps.integrations.hubspot.webhook_config import load_private_configuration, main
++
++
++def test_synthetic_contract_contains_only_operational_subscriptions(settings) -> None:
++    _, webhooks, _ = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    config = webhooks["config"]
+     properties = {item["propertyName"] for item in config["subscriptions"]["legacyCrmObjects"]}
+
+     assert config["subscriptions"]["hubEvents"] == []
+     assert properties == {
+-        "hs_v2_date_entered_939275049",
+-        "hs_v2_date_entered_939275052",
++        "hs_v2_date_entered_101",
++        "hs_v2_date_entered_102",
+         "hubspot_owner_id",
+     }
++
++
++@pytest.mark.parametrize(
++    "section, field, value",
++    [
++        ("app", "uid", ""),
++        ("webhooks", "uid", None),
++        ("app", "config", {}),
++        ("webhooks", "config", []),
++        ("app", "config", {"auth": {"requiredScopes": "tickets"}}),
++        ("app", "config", {"auth": {"requiredScopes": []}}),
++    ],
++)
++def test_incomplete_private_contract_is_rejected(settings, section, field, value) -> None:
++    document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    document[section][field] = value
++    with pytest.raises(ValueError, match=r"^Invalid private HubSpot provider configuration$"):
++        load_private_configuration(json.dumps(document))
++
++
++@pytest.mark.parametrize(
++    "field, value",
++    [("targetUrl", ""), ("targetUrl", "https://"), ("maxConcurrentRequests", True), ("maxConcurrentRequests", 0)],
++)
++def test_invalid_webhook_settings_are_rejected(settings, field, value) -> None:
++    document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    document["webhooks"]["config"]["settings"][field] = value
++    with pytest.raises(ValueError):
++        load_private_configuration(json.dumps(document))
++
++
++@pytest.mark.parametrize("entries", [[], [None], [{"active": "true"}], [{"active": True}], [{"active": False}]])
++def test_invalid_private_subscriptions_are_rejected(settings, entries) -> None:
++    document = json.loads(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    document["webhooks"]["config"]["subscriptions"]["legacyCrmObjects"] = entries
++    with pytest.raises(ValueError):
++        load_private_configuration(json.dumps(document))
++
++
++def test_cli_uses_private_environment_contract(settings, monkeypatch, tmp_path, capsys) -> None:
++    _, webhooks, app = load_private_configuration(settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
++    webhook_path.write_text(json.dumps(webhooks))
++    app_path.write_text(json.dumps(app))
++    monkeypatch.setenv("HUBSPOT_PROVIDER_CONFIG_JSON", settings.HUBSPOT_PROVIDER_CONFIG_JSON)
++    monkeypatch.setattr("sys.argv", ["webhook_config", str(webhook_path), "--published-app", str(app_path)])
++    assert main() == 0
++    assert json.loads(capsys.readouterr().out)["ready"] is True
++    app["uid"] = "wrong"
++    app["config"]["auth"]["requiredScopes"] = ["private-scope"]
++    app_path.write_text(json.dumps(app))
++    assert main() == 1
++    output = capsys.readouterr().out
++    assert json.loads(output)["ready"] is False
++    assert "private-scope" not in output
+diff --git a/core/settings/base.py b/core/settings/base.py
+index 0f95983..04ddcaa 100644
+--- a/core/settings/base.py
++++ b/core/settings/base.py
+@@ -414,6 +414,7 @@ HUBSPOT_PORTAL_ID = config("HUBSPOT_PORTAL_ID", default="")
+ HUBSPOT_ROSTER_MAX_AGE_SECONDS = config("HUBSPOT_ROSTER_MAX_AGE_SECONDS", default=90000, cast=int)
+ HUBSPOT_TICKETS_WRITE_VERIFIED = config("HUBSPOT_TICKETS_WRITE_VERIFIED", default=False, cast=bool)
+ HUBSPOT_PROVIDER_CONTRACT_MODE = config("HUBSPOT_PROVIDER_CONTRACT_MODE", default="off")
++HUBSPOT_PROVIDER_CONFIG_JSON = config("HUBSPOT_PROVIDER_CONFIG_JSON", default="")
+ if HUBSPOT_PROVIDER_CONTRACT_MODE not in {"off", "shadow", "enforce"}:
+     raise ImproperlyConfigured("HUBSPOT_PROVIDER_CONTRACT_MODE must be one of: off, shadow, enforce")
+ SUPPORT_CAPACITY_MODE = config("SUPPORT_CAPACITY_MODE", default="off")
+diff --git a/core/settings/test.py b/core/settings/test.py
+index c80c9ea..bf640ed 100644
+--- a/core/settings/test.py
++++ b/core/settings/test.py
+@@ -1,11 +1,34 @@
+ """Test settings — optimised for speed."""
+
++import json
++
+ from .base import *
+
+ SECRET_KEY = "test-secret-key-not-for-production"
+
+ DEBUG = False
+
++# Synthetic provider contract: tests never load deployed configuration or manifests.
++HUBSPOT_PROVIDER_CONFIG_JSON = json.dumps(
++    {
++        "contract_version": "1",
++        "app": {"uid": "test_app", "config": {"auth": {"requiredScopes": ["tickets", "settings.users.read"]}}},
++        "webhooks": {
++            "uid": "test_webhooks",
++            "config": {
++                "settings": {"targetUrl": "https://example.test/webhooks/hubspot", "maxConcurrentRequests": 10},
++                "subscriptions": {
++                    "hubEvents": [],
++                    "legacyCrmObjects": [
++                        {"subscriptionType": "ticket.propertyChange", "propertyName": name, "active": True}
++                        for name in ("hs_v2_date_entered_101", "hs_v2_date_entered_102", "hubspot_owner_id")
++                    ],
++                },
++            },
++        },
++    }
++)
++
+ CACHES = {
+     "default": {
+         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",

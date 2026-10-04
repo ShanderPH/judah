@@ -118,27 +118,37 @@ def is_automatic_assignment_canary_configured() -> bool:
     return bool(_configured_canary_values())
 
 
-def may_assign() -> bool:
-    """Return whether automatic owner mutation is enabled and safe."""
-    if not is_authoritative_availability_runtime():
-        return False
+def assignment_gate_rejection_reason() -> str | None:
+    """Return the first failed assignment control after runtime authority."""
     if not bool(settings.AUTO_ASSIGNMENT_ENABLED):
-        return False
+        return "auto_assignment_disabled"
     if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
-        from apps.support.provider_readiness import provider_assignment_allowed
+        from apps.support.provider_readiness import provider_assignment_rejection_reason
 
-        if not provider_assignment_allowed():
-            return False
-
+        provider_reason = provider_assignment_rejection_reason()
+        if provider_reason:
+            return provider_reason
     configured_canary = _configured_canary_values()
     canary_ids = automatic_assignment_canary_agent_ids()
     if configured_canary and len(canary_ids) != len(configured_canary):
+        return "invalid_canary_configuration"
+    if (
+        settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW or configured_canary
+    ) and not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
+        return "absence_safe_not_enforced"
+    return None
+
+
+def may_assign(*, operation: str = "automatic_assignment") -> bool:
+    """Check authority and log the exact control that prevents owner mutation."""
+    if not is_authoritative_availability_runtime():
+        log_runtime_rejection(operation)
         return False
-    shadow_without_enforcement = bool(settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW) and not bool(
-        settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED
-    )
-    canary_without_enforcement = bool(configured_canary) and not bool(settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED)
-    return not shadow_without_enforcement and not canary_without_enforcement
+    reason = assignment_gate_rejection_reason()
+    if reason:
+        logger.warning("assignment_gate_rejected", operation=operation, reason=reason)
+        return False
+    return True
 
 
 def may_write_routing_state() -> bool:

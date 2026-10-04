@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import structlog
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
@@ -18,11 +19,18 @@ from apps.integrations.hubspot.platform_contract import (
     HubSpotTransport,
     check_hubspot_capabilities,
 )
+from apps.support.webhook_proof import (
+    WEBHOOK_CONFIG_CACHE_KEY,
+    WebhookProofEvaluation,
+    evaluate_webhook_proof,
+    expected_configuration_fingerprint,
+)
+
+logger = structlog.get_logger(__name__)
 
 # Cache snapshots and provider probes contain JSON values without a shared schema.
 
 CAPABILITY_CACHE_KEY = "hubspot_capabilities_snapshot"
-WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
 
 
 def refresh_hubspot_capabilities() -> dict[str, str]:
@@ -66,12 +74,14 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
     roster_at = datetime.fromisoformat(roster_at_raw) if roster_at_raw else None
     roster_age = max(0, int((now - roster_at).total_seconds())) if roster_at else None
     roster_fresh = roster_age is not None and roster_age <= settings.HUBSPOT_ROSTER_MAX_AGE_SECONDS
-    webhook_snapshot = cache.get(WEBHOOK_CONFIG_CACHE_KEY) or {}
-    webhook_checked_at = (
-        datetime.fromisoformat(webhook_snapshot["checked_at"]) if webhook_snapshot.get("checked_at") else None
-    )
-    webhook_age = max(0, int((now - webhook_checked_at).total_seconds())) if webhook_checked_at else None
-    webhook_ready = bool(webhook_snapshot.get("ready")) and webhook_age is not None and webhook_age <= 86400
+    try:
+        fingerprint = expected_configuration_fingerprint()
+    except ValueError:
+        webhook_proof = WebhookProofEvaluation("desired_configuration_invalid")
+    else:
+        webhook_proof = evaluate_webhook_proof(
+            cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=fingerprint, now=now
+        )
 
     return {
         "mode": mode,
@@ -83,25 +93,36 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
         and capability_age <= 900,
         "roster_last_complete_age_seconds": roster_age,
         "roster_fresh": roster_fresh,
-        "webhook_config_readback_age_seconds": webhook_age,
-        "webhook_config_verified": webhook_ready,
+        "webhook_config_readback_age_seconds": webhook_proof.age_seconds,
+        "webhook_config_stale": webhook_proof.stale,
+        "webhook_config_status": webhook_proof.status,
+        "webhook_config_rejection_reason": webhook_proof.rejection_reason,
+        "webhook_config_verified": webhook_proof.verified,
     }
 
 
-def provider_assignment_allowed() -> bool:
-    """Fail closed before an owner PATCH when mandatory provider evidence is stale."""
+def provider_assignment_rejection_reason() -> str | None:
+    """Return the first failed provider gate without lifecycle/readiness coupling."""
     if settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "enforce":
-        return True
+        return None
     try:
         checks = _provider_access_checks(timezone.now())
-    except ValueError, TypeError, RedisError:
-        return False
-    return bool(
-        checks["canonical_capacity_writer"]
-        and checks["mandatory_capabilities_available"]
-        and checks["roster_fresh"]
-        and checks["webhook_config_verified"]
-    )
+    except ValueError, TypeError, KeyError, OSError, RedisError:
+        return "provider_evidence_unavailable"
+    if not checks["canonical_capacity_writer"]:
+        return "canonical_capacity_writer_inactive"
+    if not checks["mandatory_capabilities_available"]:
+        return "provider_capabilities_unavailable"
+    if not checks["roster_fresh"]:
+        return "provider_roster_stale"
+    if not checks["webhook_config_verified"]:
+        return f"provider_webhook_proof_{checks['webhook_config_rejection_reason']}"
+    return None
+
+
+def provider_assignment_allowed() -> bool:
+    """Fail closed before an owner PATCH when required provider evidence is invalid."""
+    return provider_assignment_rejection_reason() is None
 
 
 def provider_contract_checks(now: datetime | None = None) -> dict[str, Any]:
@@ -110,6 +131,13 @@ def provider_contract_checks(now: datetime | None = None) -> dict[str, Any]:
     checks = _provider_access_checks(now)
     if checks["mode"] == "off":
         return checks
+    checks["warnings"] = []
+    if checks["webhook_config_verified"] and checks["webhook_config_stale"]:
+        checks["warnings"].append("hubspot_webhook_config_stale")
+        logger.warning(
+            "hubspot_webhook_proof_stale",
+            age_seconds=checks["webhook_config_readback_age_seconds"],
+        )
     checks["occurrence_migration_applied"] = False
     migrated = (
         MigrationRecorder(connection)
@@ -150,7 +178,7 @@ def provider_contract_reasons(checks: dict[str, Any]) -> tuple[str, ...]:
     if not checks.get("roster_fresh"):
         reasons.append("hubspot_roster_stale")
     if not checks.get("webhook_config_verified"):
-        reasons.append("hubspot_webhook_config_unverified")
+        reasons.append(f"hubspot_webhook_config_{checks.get('webhook_config_rejection_reason') or 'invalid'}")
     if not checks.get("occurrence_migration_applied"):
         reasons.append("lifecycle_occurrence_migration_missing")
     if checks.get("repair_required_count", 0):

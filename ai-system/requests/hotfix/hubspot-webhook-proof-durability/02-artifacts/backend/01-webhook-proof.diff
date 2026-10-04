@@ -1,0 +1,817 @@
+diff --git a/apps/support/auto_assign_service.py b/apps/support/auto_assign_service.py
+index c2e1e91..28f0d02 100644
+--- a/apps/support/auto_assign_service.py
++++ b/apps/support/auto_assign_service.py
+@@ -241,10 +241,9 @@ def attempt_auto_assign(new_conv: NewConversation, ticket_data: dict | None = No
+     Returns:
+         True if assignment succeeded, False otherwise.
+     """
+-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
++    from apps.support.availability_runtime import may_assign
+
+-    if not may_assign():
+-        log_runtime_rejection("attempt_auto_assign")
++    if not may_assign(operation="attempt_auto_assign"):
+         return False
+
+     # Matchmaker is the sole automatic assignment implementation. Keeping this
+diff --git a/apps/support/availability_runtime.py b/apps/support/availability_runtime.py
+index 1d2004d..f996a9d 100644
+--- a/apps/support/availability_runtime.py
++++ b/apps/support/availability_runtime.py
+@@ -118,27 +118,37 @@ def is_automatic_assignment_canary_configured() -> bool:
+     return bool(_configured_canary_values())
+
+
+-def may_assign() -> bool:
+-    """Return whether automatic owner mutation is enabled and safe."""
+-    if not is_authoritative_availability_runtime():
+-        return False
++def assignment_gate_rejection_reason() -> str | None:
++    """Return the first failed assignment control after runtime authority."""
+     if not bool(settings.AUTO_ASSIGNMENT_ENABLED):
+-        return False
++        return "auto_assignment_disabled"
+     if settings.HUBSPOT_PROVIDER_CONTRACT_MODE == "enforce":
+-        from apps.support.provider_readiness import provider_assignment_allowed
+-
+-        if not provider_assignment_allowed():
+-            return False
++        from apps.support.provider_readiness import provider_assignment_rejection_reason
+
++        provider_reason = provider_assignment_rejection_reason()
++        if provider_reason:
++            return provider_reason
+     configured_canary = _configured_canary_values()
+     canary_ids = automatic_assignment_canary_agent_ids()
+     if configured_canary and len(canary_ids) != len(configured_canary):
++        return "invalid_canary_configuration"
++    if (
++        settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW or configured_canary
++    ) and not settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED:
++        return "absence_safe_not_enforced"
++    return None
++
++
++def may_assign(*, operation: str = "automatic_assignment") -> bool:
++    """Check authority and log the exact control that prevents owner mutation."""
++    if not is_authoritative_availability_runtime():
++        log_runtime_rejection(operation)
+         return False
+-    shadow_without_enforcement = bool(settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW) and not bool(
+-        settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED
+-    )
+-    canary_without_enforcement = bool(configured_canary) and not bool(settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED)
+-    return not shadow_without_enforcement and not canary_without_enforcement
++    reason = assignment_gate_rejection_reason()
++    if reason:
++        logger.warning("assignment_gate_rejected", operation=operation, reason=reason)
++        return False
++    return True
+
+
+ def may_write_routing_state() -> bool:
+diff --git a/apps/support/management/commands/record_hubspot_webhook_readback.py b/apps/support/management/commands/record_hubspot_webhook_readback.py
+index ea40808..dab0795 100644
+--- a/apps/support/management/commands/record_hubspot_webhook_readback.py
++++ b/apps/support/management/commands/record_hubspot_webhook_readback.py
+@@ -6,57 +6,38 @@ import json
+ from pathlib import Path
+ from typing import cast
+
+-from django.conf import settings
+-from django.core.cache import cache
+ from django.core.management.base import BaseCommand, CommandError, CommandParser
+-from django.utils import timezone
+
+-from apps.integrations.hubspot.webhook_config import compare_app_config, compare_webhook_config
+-from apps.support.provider_readiness import WEBHOOK_CONFIG_CACHE_KEY
++from apps.support.webhook_proof import invalidate_webhook_proof, record_published_configuration
+
+
+ class Command(BaseCommand):
+-    """Store a bounded readiness proof from externally obtained published JSON."""
++    """Store durable, versioned evidence from published configuration exports."""
+
+     help = "Compare published HubSpot app/webhook readback exports with versioned manifests"
+
+     def add_arguments(self, parser: CommandParser) -> None:
+-        """Add paths to published HubSpot readback exports.
+-
+-        Args:
+-            parser: Django command argument parser.
+-        """
++        """Add paths to published HubSpot readback exports."""
+         parser.add_argument("--published-webhooks", type=Path, required=True)
+         parser.add_argument("--published-app", type=Path, required=True)
+
+     def handle(self, *args: object, **options: object) -> None:
+-        """Compare published exports and cache readiness.
+-
+-        Args:
+-            *args: Positional command arguments.
+-            **options: Parsed command options.
+-        """
+-        desired_webhooks = settings.BASE_DIR / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json"
+-        desired_app = settings.BASE_DIR / "hubspot-app/src/app/app-hsmeta.json"
++        """Validate both published exports and fail the release gate on drift."""
+         published_webhooks = cast(Path, options["published_webhooks"])
+         published_app = cast(Path, options["published_app"])
+         try:
+-            webhook_result = compare_webhook_config(
+-                json.loads(desired_webhooks.read_text(encoding="utf-8")),
+-                json.loads(published_webhooks.read_text(encoding="utf-8")),
+-            )
+-            app_result = compare_app_config(
+-                json.loads(desired_app.read_text(encoding="utf-8")),
+-                json.loads(published_app.read_text(encoding="utf-8")),
+-            )
+-        except (OSError, ValueError, KeyError, TypeError) as exc:
++            webhooks = json.loads(published_webhooks.read_text(encoding="utf-8"))
++            app = json.loads(published_app.read_text(encoding="utf-8"))
++            if not isinstance(webhooks, dict) or not isinstance(app, dict):
++                raise ValueError("Published configurations must be JSON objects")
++        except (OSError, ValueError, TypeError) as exc:
++            # An unreadable export cannot leave a previous successful proof active.
++            invalidate_webhook_proof()
++            raise CommandError("Invalid HubSpot readback export") from exc
++        try:
++            proof = record_published_configuration(webhooks, app)
++        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+             raise CommandError("Invalid HubSpot readback export") from exc
+-        ready = bool(webhook_result["ready"] and app_result["ready"])
+-        cache.set(
+-            WEBHOOK_CONFIG_CACHE_KEY,
+-            {"checked_at": timezone.now().isoformat(), "ready": ready},
+-            timeout=86400,
+-        )
+-        self.stdout.write(json.dumps({"webhooks": webhook_result, "app": app_result, "ready": ready}, sort_keys=True))
+-        if not ready:
++        self.stdout.write(json.dumps(proof, sort_keys=True))
++        if not proof["ready"]:
+             raise CommandError("Published HubSpot configuration differs from the versioned manifests")
+diff --git a/apps/support/matchmaker_service.py b/apps/support/matchmaker_service.py
+index 3dbbd1c..1df86d0 100644
+--- a/apps/support/matchmaker_service.py
++++ b/apps/support/matchmaker_service.py
+@@ -141,14 +141,13 @@ def process_queue_item(
+     exclude_queue_row_ids: set[uuid.UUID] | None = None,
+ ) -> QueueItemResult:
+     """Process one distinct queue row and return an exhaustive result."""
+-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
++    from apps.support.availability_runtime import may_assign
+     from apps.support.durable_assignment_service import (
+         execute_assignment_attempt,
+         reserve_next_assignment,
+     )
+
+-    if not may_assign():
+-        log_runtime_rejection("matchmaker_assign_next")
++    if not may_assign(operation="matchmaker_assign_next"):
+         return QueueItemResult(QueueItemOutcome.DEFERRED_NO_AGENT, None, None, False)
+     reservation = reserve_next_assignment(ticket_id, exclude_queue_row_ids=exclude_queue_row_ids)
+     row_id = reservation.queue_row_id
+@@ -224,11 +223,10 @@ def matchmaker_assign_next(ticket_id: str | None = None) -> AssignmentOutcome:
+
+ def matchmaker_drain_queue() -> dict:
+     """Process ready conversations in FIFO order with a bounded loop."""
+-    from apps.support.availability_runtime import log_runtime_rejection, may_assign
++    from apps.support.availability_runtime import may_assign
+     from apps.support.queue_service import get_eligible_agents
+
+-    if not may_assign():
+-        log_runtime_rejection("matchmaker_drain_queue")
++    if not may_assign(operation="matchmaker_drain_queue"):
+         total_pending = _active_queue().count()
+         return {
+             "assigned": 0,
+diff --git a/apps/support/provider_readiness.py b/apps/support/provider_readiness.py
+index cda0c5b..6dde4e4 100644
+--- a/apps/support/provider_readiness.py
++++ b/apps/support/provider_readiness.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ from datetime import datetime
+ from typing import Any
+
++import structlog
+ from django.conf import settings
+ from django.core.cache import cache
+ from django.db import connection
+@@ -18,11 +19,17 @@ from apps.integrations.hubspot.platform_contract import (
+     HubSpotTransport,
+     check_hubspot_capabilities,
+ )
++from apps.support.webhook_proof import (
++    WEBHOOK_CONFIG_CACHE_KEY,
++    evaluate_webhook_proof,
++    expected_configuration_fingerprint,
++)
++
++logger = structlog.get_logger(__name__)
+
+ # Cache snapshots and provider probes contain JSON values without a shared schema.
+
+ CAPABILITY_CACHE_KEY = "hubspot_capabilities_snapshot"
+-WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
+
+
+ def refresh_hubspot_capabilities() -> dict[str, str]:
+@@ -66,12 +73,9 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
+     roster_at = datetime.fromisoformat(roster_at_raw) if roster_at_raw else None
+     roster_age = max(0, int((now - roster_at).total_seconds())) if roster_at else None
+     roster_fresh = roster_age is not None and roster_age <= settings.HUBSPOT_ROSTER_MAX_AGE_SECONDS
+-    webhook_snapshot = cache.get(WEBHOOK_CONFIG_CACHE_KEY) or {}
+-    webhook_checked_at = (
+-        datetime.fromisoformat(webhook_snapshot["checked_at"]) if webhook_snapshot.get("checked_at") else None
++    webhook_proof = evaluate_webhook_proof(
++        cache.get(WEBHOOK_CONFIG_CACHE_KEY), expected_fingerprint=expected_configuration_fingerprint(), now=now
+     )
+-    webhook_age = max(0, int((now - webhook_checked_at).total_seconds())) if webhook_checked_at else None
+-    webhook_ready = bool(webhook_snapshot.get("ready")) and webhook_age is not None and webhook_age <= 86400
+
+     return {
+         "mode": mode,
+@@ -83,25 +87,36 @@ def _provider_access_checks(now: datetime) -> dict[str, Any]:
+         and capability_age <= 900,
+         "roster_last_complete_age_seconds": roster_age,
+         "roster_fresh": roster_fresh,
+-        "webhook_config_readback_age_seconds": webhook_age,
+-        "webhook_config_verified": webhook_ready,
++        "webhook_config_readback_age_seconds": webhook_proof.age_seconds,
++        "webhook_config_stale": webhook_proof.stale,
++        "webhook_config_status": webhook_proof.status,
++        "webhook_config_rejection_reason": webhook_proof.rejection_reason,
++        "webhook_config_verified": webhook_proof.verified,
+     }
+
+
+-def provider_assignment_allowed() -> bool:
+-    """Fail closed before an owner PATCH when mandatory provider evidence is stale."""
++def provider_assignment_rejection_reason() -> str | None:
++    """Return the first failed provider gate without lifecycle/readiness coupling."""
+     if settings.HUBSPOT_PROVIDER_CONTRACT_MODE != "enforce":
+-        return True
++        return None
+     try:
+         checks = _provider_access_checks(timezone.now())
+-    except ValueError, TypeError, RedisError:
+-        return False
+-    return bool(
+-        checks["canonical_capacity_writer"]
+-        and checks["mandatory_capabilities_available"]
+-        and checks["roster_fresh"]
+-        and checks["webhook_config_verified"]
+-    )
++    except ValueError, TypeError, KeyError, OSError, RedisError:
++        return "provider_evidence_unavailable"
++    if not checks["canonical_capacity_writer"]:
++        return "canonical_capacity_writer_inactive"
++    if not checks["mandatory_capabilities_available"]:
++        return "provider_capabilities_unavailable"
++    if not checks["roster_fresh"]:
++        return "provider_roster_stale"
++    if not checks["webhook_config_verified"]:
++        return f"provider_webhook_proof_{checks['webhook_config_rejection_reason']}"
++    return None
++
++
++def provider_assignment_allowed() -> bool:
++    """Fail closed before an owner PATCH when required provider evidence is invalid."""
++    return provider_assignment_rejection_reason() is None
+
+
+ def provider_contract_checks(now: datetime | None = None) -> dict[str, Any]:
+@@ -110,6 +125,13 @@ def provider_contract_checks(now: datetime | None = None) -> dict[str, Any]:
+     checks = _provider_access_checks(now)
+     if checks["mode"] == "off":
+         return checks
++    checks["warnings"] = []
++    if checks["webhook_config_verified"] and checks["webhook_config_stale"]:
++        checks["warnings"].append("hubspot_webhook_config_stale")
++        logger.warning(
++            "hubspot_webhook_proof_stale",
++            age_seconds=checks["webhook_config_readback_age_seconds"],
++        )
+     checks["occurrence_migration_applied"] = False
+     migrated = (
+         MigrationRecorder(connection)
+@@ -150,7 +172,7 @@ def provider_contract_reasons(checks: dict[str, Any]) -> tuple[str, ...]:
+     if not checks.get("roster_fresh"):
+         reasons.append("hubspot_roster_stale")
+     if not checks.get("webhook_config_verified"):
+-        reasons.append("hubspot_webhook_config_unverified")
++        reasons.append(f"hubspot_webhook_config_{checks.get('webhook_config_rejection_reason') or 'invalid'}")
+     if not checks.get("occurrence_migration_applied"):
+         reasons.append("lifecycle_occurrence_migration_missing")
+     if checks.get("repair_required_count", 0):
+diff --git a/apps/support/tests/test_webhook_proof.py b/apps/support/tests/test_webhook_proof.py
+new file mode 100644
+index 0000000..6405c20
+--- /dev/null
++++ b/apps/support/tests/test_webhook_proof.py
+@@ -0,0 +1,369 @@
++"""Regression coverage for durable, configuration-bound HubSpot evidence."""
++
++from __future__ import annotations
++
++import json
++import os
++import time
++from datetime import timedelta
++from io import StringIO
++from unittest.mock import patch
++
++import pytest
++from django.core.cache import cache
++from django.core.management import call_command
++from django.core.management.base import CommandError
++from django.utils import timezone
++
++from apps.support.availability_runtime import assignment_gate_rejection_reason, may_assign
++from apps.support.matchmaker_service import matchmaker_drain_queue, process_queue_item
++from apps.support.models import NewConversation
++from apps.support.provider_readiness import (
++    CAPABILITY_CACHE_KEY,
++    provider_assignment_allowed,
++    provider_assignment_rejection_reason,
++    provider_contract_checks,
++    provider_contract_reasons,
++)
++from apps.support.webhook_proof import (
++    WEBHOOK_CONFIG_CACHE_KEY,
++    configuration_fingerprint,
++    evaluate_webhook_proof,
++    expected_configuration_fingerprint,
++    load_desired_configuration,
++    record_published_configuration,
++)
++
++
++@pytest.fixture
++def provider_evidence(settings):
++    """Enable enforce with valid capability/roster and a fresh versioned proof."""
++    settings.HUBSPOT_PROVIDER_CONTRACT_MODE = "enforce"
++    settings.SUPPORT_CAPACITY_MODE = "enforce"
++    settings.HUBSPOT_N1_TEAM_ID = "8"
++    settings.AUTO_ASSIGNMENT_ENABLED = True
++    settings.AUTO_ASSIGNMENT_CANARY_AGENT_IDS = ()
++    settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW = False
++    settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED = True
++    cache.clear()
++    now = timezone.now()
++    cache.set(
++        CAPABILITY_CACHE_KEY,
++        {
++            "checked_at": now.isoformat(),
++            "outcomes": {
++                "tickets_read": "available",
++                "tickets_write": "verified_in_sandbox",
++                "owners_read": "available",
++                "teams_membership": "available",
++                "users_read": "available",
++            },
++        },
++        timeout=900,
++    )
++    cache.set("hubspot_roster_complete_at:8", now.isoformat(), timeout=900)
++    proof = record_published_configuration(*load_desired_configuration())
++    yield proof
++    cache.clear()
++
++
++@pytest.mark.parametrize("hours, stale", [(0, False), (24, False), (25, True), (2400, True)])
++def test_proof_validity_does_not_expire(provider_evidence, hours, stale) -> None:
++    now = timezone.now()
++    provider_evidence["checked_at"] = (now - timedelta(hours=hours)).isoformat()
++    cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
++    original = cache.get(WEBHOOK_CONFIG_CACHE_KEY)
++    assert provider_assignment_allowed() is True
++    assert may_assign() is True
++    with patch("apps.support.provider_readiness.logger") as logger:
++        checks = provider_contract_checks(now)
++    assert checks["webhook_config_verified"] is True
++    assert checks["webhook_config_status"] == "valid"
++    assert checks["webhook_config_stale"] is stale
++    assert checks["webhook_config_readback_age_seconds"] == hours * 3600
++    assert not any("webhook" in reason for reason in provider_contract_reasons(checks))
++    assert checks["warnings"] == (["hubspot_webhook_config_stale"] if stale else [])
++    assert logger.warning.called is stale
++    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY) == original
++
++
++@pytest.mark.parametrize(
++    "condition, status, reason",
++    [
++        ("missing", "missing", "missing"),
++        ("invalid", "invalid", "invalid"),
++        ("mismatch", "fingerprint_mismatch", "fingerprint_mismatch"),
++        ("legacy", "fingerprint_missing", "invalid"),
++        ("wrong_version", "invalid", "invalid"),
++        ("bad_date", "invalid", "invalid"),
++        ("not_boolean", "invalid", "invalid"),
++    ],
++)
++def test_rejected_proof_is_fail_closed_and_has_specific_reason(
++    provider_evidence, condition, status, reason, monkeypatch
++) -> None:
++    monkeypatch.setenv("DJANGO_ENV", "production")
++    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
++    if condition == "missing":
++        cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
++    else:
++        if condition == "invalid":
++            provider_evidence["ready"] = False
++        elif condition == "mismatch":
++            provider_evidence["config_fingerprint"] = "different"
++        elif condition == "legacy":
++            provider_evidence.pop("config_fingerprint")
++            provider_evidence.pop("schema_version")
++        elif condition == "wrong_version":
++            provider_evidence["schema_version"] = 2
++        elif condition == "not_boolean":
++            provider_evidence["ready"] = "true"
++        else:
++            provider_evidence["checked_at"] = "invalid"
++        cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
++    assert provider_assignment_allowed() is False
++    with patch("apps.support.availability_runtime.logger") as logger:
++        assert may_assign(operation="test_proof") is False
++    logger.warning.assert_called_once_with(
++        "assignment_gate_rejected", operation="test_proof", reason=f"provider_webhook_proof_{reason}"
++    )
++    checks = provider_contract_checks()
++    assert checks["webhook_config_status"] == status
++    assert f"hubspot_webhook_config_{reason}" in provider_contract_reasons(checks)
++
++
++def test_proof_survives_the_previous_destructive_timeout(provider_evidence) -> None:
++    # Move only the cache clock; capability/roster expiry must remain independent.
++    with patch("time.time", return_value=time.time() + 86401):
++        assert cache.get(WEBHOOK_CONFIG_CACHE_KEY) == provider_evidence
++    assert cache._expire_info[cache.make_key(WEBHOOK_CONFIG_CACHE_KEY)] is None
++
++
++def test_fingerprint_is_canonical_and_binds_both_manifests() -> None:
++    webhooks, app = load_desired_configuration()
++    fingerprint = configuration_fingerprint(webhooks, app)
++    assert len(fingerprint) == 64
++    assert fingerprint == configuration_fingerprint(dict(reversed(list(webhooks.items()))), app)
++    for changed in ("app", "webhooks"):
++        modified = json.loads(json.dumps({"app": app, "webhooks": webhooks}))
++        modified[changed]["uid"] += "_changed"
++        assert configuration_fingerprint(modified["webhooks"], modified["app"]) != fingerprint
++
++
++@pytest.mark.parametrize("change", ["webhooks", "app", "both", "malformed", "missing_file", "json_list"])
++def test_command_invalidates_prior_proof_and_fails_on_any_bad_export(provider_evidence, tmp_path, change) -> None:
++    webhooks, app = load_desired_configuration()
++    if change in {"webhooks", "both"}:
++        webhooks["uid"] = "wrong"
++    if change in {"app", "both"}:
++        app["uid"] = "wrong"
++    webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
++    webhook_path.write_text(json.dumps(webhooks))
++    app_path.write_text(json.dumps(app))
++    if change == "malformed":
++        webhook_path.write_text("broken")
++    elif change == "missing_file":
++        webhook_path.unlink()
++    elif change == "json_list":
++        webhook_path.write_text("[]")
++    with pytest.raises(CommandError):
++        call_command("record_hubspot_webhook_readback", published_webhooks=webhook_path, published_app=app_path)
++    assert cache.get(WEBHOOK_CONFIG_CACHE_KEY)["ready"] is False
++    assert provider_assignment_allowed() is False
++
++
++def test_command_records_success_only_after_both_exports_match(provider_evidence, tmp_path) -> None:
++    webhooks, app = load_desired_configuration()
++    webhook_path, app_path = tmp_path / "webhooks.json", tmp_path / "app.json"
++    webhook_path.write_text(json.dumps(webhooks))
++    app_path.write_text(json.dumps(app))
++    output = StringIO()
++    call_command(
++        "record_hubspot_webhook_readback", published_webhooks=webhook_path, published_app=app_path, stdout=output
++    )
++    proof = json.loads(output.getvalue())
++    assert proof == cache.get(WEBHOOK_CONFIG_CACHE_KEY)
++    assert proof["ready"] is True
++    assert proof["config_fingerprint"] == expected_configuration_fingerprint()
++    assert proof["schema_version"] == 1
++
++
++@pytest.mark.parametrize("snapshot", [{}, [], "bad", {"checked_at": "2026-10-01T00:00:00"}])
++def test_malformed_proof_is_invalid(snapshot) -> None:
++    evaluation = evaluate_webhook_proof(snapshot, expected_fingerprint="expected", now=timezone.now())
++    assert evaluation.verified is False
++    assert evaluation.rejection_reason == "invalid"
++
++
++def test_real_runtime_rejection_remains_distinct(provider_evidence, monkeypatch) -> None:
++    monkeypatch.setenv("DJANGO_ENV", "staging")
++    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
++    with patch("apps.support.availability_runtime.logger") as logger:
++        assert may_assign(operation="test_authority") is False
++    assert logger.warning.call_count == 1
++    assert logger.warning.call_args.args == ("runtime_authority_rejected",)
++    assert logger.warning.call_args.kwargs["operation"] == "test_authority"
++
++
++def test_provider_block_preserves_queue_and_never_logs_runtime_rejection(provider_evidence) -> None:
++    row = NewConversation.objects.create(
++        hubspot_ticket_id="proof-blocked", entered_queue_at=timezone.now(), automatic_assignment_eligible=True
++    )
++    cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
++    with (
++        patch("apps.support.availability_runtime.logger") as logger,
++        patch("apps.support.durable_assignment_service.reserve_next_assignment") as reserve,
++        patch("apps.support.durable_assignment_service.get_hubspot_client") as provider,
++    ):
++        assert process_queue_item().made_progress is False
++        result = matchmaker_drain_queue()
++    assert result["skipped_assignment_disabled"] is True
++    assert result["remaining"] == 1
++    row.refresh_from_db()
++    assert row.automatic_assignment_eligible is True
++    reserve.assert_not_called()
++    provider.assert_not_called()
++    assert [call.args[0] for call in logger.warning.call_args_list] == ["assignment_gate_rejected"] * 2
++
++
++def test_stale_proof_does_not_disable_matchmaker(provider_evidence) -> None:
++    provider_evidence["checked_at"] = (timezone.now() - timedelta(days=2)).isoformat()
++    cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
++    result = matchmaker_drain_queue()
++    assert result["assigned"] == 0
++    assert "skipped_assignment_disabled" not in result
++
++
++@pytest.mark.parametrize(
++    "gate, reason",
++    [
++        ("capabilities", "provider_capabilities_unavailable"),
++        ("roster", "provider_roster_stale"),
++        ("capacity", "canonical_capacity_writer_inactive"),
++        ("disabled", "auto_assignment_disabled"),
++        ("canary", "invalid_canary_configuration"),
++        ("absence", "absence_safe_not_enforced"),
++    ],
++)
++def test_other_gates_remain_enforced(provider_evidence, settings, gate, reason) -> None:
++    if gate == "capabilities":
++        cache.delete(CAPABILITY_CACHE_KEY)
++    elif gate == "roster":
++        cache.delete("hubspot_roster_complete_at:8")
++    elif gate == "capacity":
++        settings.SUPPORT_CAPACITY_MODE = "off"
++    elif gate == "disabled":
++        settings.AUTO_ASSIGNMENT_ENABLED = False
++    elif gate == "canary":
++        settings.AUTO_ASSIGNMENT_CANARY_AGENT_IDS = ("invalid",)
++    else:
++        settings.ABSENCE_SAFE_ELIGIBILITY_SHADOW = True
++        settings.ABSENCE_SAFE_ELIGIBILITY_ENFORCED = False
++    assert assignment_gate_rejection_reason() == reason
++    assert may_assign() is False
++
++
++def test_unreadable_desired_manifest_cannot_enable_assignment(provider_evidence, settings, tmp_path) -> None:
++    settings.BASE_DIR = tmp_path
++    assert provider_assignment_allowed() is False
++    assert provider_assignment_rejection_reason() == "provider_evidence_unavailable"
++
++
++@pytest.mark.parametrize("hours", [0, 25])
++def test_real_assignment_completes_with_current_or_stale_proof(provider_evidence, settings, hours) -> None:
++    """Exercise reservation, owner readback and canonical capacity with enforce."""
++    from apps.support.models import Agent, AgentCapacityReservation, AssignedConversation, AssignmentAttempt
++    from apps.support.tests.test_manual_assignment_capacity import agent, queue, ticket
++
++    settings.HUBSPOT_PORTAL_ID = "test-portal"
++    provider_evidence["checked_at"] = (timezone.now() - timedelta(hours=hours)).isoformat()
++    cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
++    target = agent(200)
++    Agent.objects.filter(pk=target.pk).update(
++        hubspot_user_id="200",
++        availability_observed_at=timezone.now(),
++        eligibility_state="eligible",
++        eligibility_reason="eligible",
++    )
++    queue()
++    with (
++        patch("apps.integrations.hubspot.client.get_hubspot_client") as integrations,
++        patch("apps.support.durable_assignment_service.get_hubspot_client") as assignments,
++        patch("apps.support.sat_service.is_business_hours", return_value=True),
++    ):
++        provider = integrations.return_value
++        assignments.return_value = provider
++        provider.get_user_by_id.return_value = {
++            "id": "200",
++            "hs_availability_status": "available",
++            "hs_out_of_office_hours": "[]",
++        }
++        provider.list_active_ticket_ids_by_owner.return_value = ((), True)
++        provider.get_ticket_details.return_value = ticket("")
++        provider.assign_ticket_owner.side_effect = lambda *args: setattr(
++            provider.get_ticket_details, "return_value", ticket(200)
++        )
++        result = matchmaker_drain_queue()
++    assert result["assigned"] == 1
++    assert "skipped_assignment_disabled" not in result
++    assert AssignedConversation.objects.get().agent_id == target.pk
++    assert AssignmentAttempt.objects.get().state == "completed"
++    assert AgentCapacityReservation.objects.get().state == "converted"
++    assert Agent.objects.get(pk=target.pk).current_simultaneous_chats == 1
++    provider.assign_ticket_owner.assert_called_once_with("cap-1", 200)
++
++
++@pytest.mark.skipif(os.environ.get("JUDAH_PROOF_LOCAL_REDIS_TEST") != "1", reason="Explicit local Redis gate")
++def test_real_redis_stores_proof_without_ttl(settings) -> None:
++    """Confirm Redis persistence semantics using an isolated local test key."""
++    from uuid import uuid4
++
++    from django.test import override_settings
++    from redis import Redis
++
++    redis_url = "redis://127.0.0.1:6379/15"
++    with override_settings(
++        CACHES={
++            "default": {
++                "BACKEND": "django.core.cache.backends.redis.RedisCache",
++                "LOCATION": redis_url,
++                "KEY_PREFIX": f"judah-webhook-proof-test-{uuid4()}",
++            }
++        }
++    ):
++        client = Redis.from_url(redis_url)
++        key = cache.make_key(WEBHOOK_CONFIG_CACHE_KEY)
++        try:
++            proof = record_published_configuration(*load_desired_configuration())
++            assert client.ttl(key) == -1
++            assert cache.get(WEBHOOK_CONFIG_CACHE_KEY) == proof
++        finally:
++            client.delete(key)
++            client.close()
++
++
++@pytest.mark.parametrize("proof_state", ["missing", "stale"])
++def test_pr134_entry_recovery_does_not_bypass_or_disable_assignment_gate(provider_evidence, proof_state) -> None:
++    """Recovery of proven entry evidence is independent of permission to assign."""
++    from apps.support.models import SupportConversationCycle, SupportLifecycleOccurrence
++    from apps.support.tasks import task_reconcile_lifecycle_occurrence, task_scan_lifecycle_occurrences
++    from apps.support.tests.test_lifecycle_entry_recovery import record_entry
++
++    if proof_state == "missing":
++        cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
++    else:
++        provider_evidence["checked_at"] = (timezone.now() - timedelta(days=2)).isoformat()
++        cache.set(WEBHOOK_CONFIG_CACHE_KEY, provider_evidence, timeout=None)
++    occurrence = record_entry("proof-entry-recovery")
++    SupportLifecycleOccurrence.objects.filter(pk=occurrence.pk).update(next_reconcile_at=None)
++    with patch("apps.support.tasks.task_reconcile_lifecycle_occurrence.delay") as dispatch:
++        assert task_scan_lifecycle_occurrences.run() == 1
++    dispatch.assert_called_once_with(str(occurrence.pk))
++    with patch("apps.integrations.hubspot.client.get_hubspot_client") as provider:
++        assert task_reconcile_lifecycle_occurrence.run(str(occurrence.pk)) == "processed"
++    provider.assert_not_called()
++    assert SupportConversationCycle.objects.get(hubspot_ticket_id="proof-entry-recovery").state == "queued"
++    occurrence.refresh_from_db()
++    assert occurrence.retry_count == 1
++    assert occurrence.processing_status == "processed"
++    assert may_assign() is (proof_state == "stale")
+diff --git a/apps/support/webhook_proof.py b/apps/support/webhook_proof.py
+new file mode 100644
+index 0000000..250ee48
+--- /dev/null
++++ b/apps/support/webhook_proof.py
+@@ -0,0 +1,130 @@
++"""Durable evidence of published HubSpot configuration, independent of freshness."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++from dataclasses import dataclass
++from datetime import datetime
++from typing import TypedDict
++
++from django.conf import settings
++from django.core.cache import cache
++from django.utils import timezone
++
++from apps.integrations.hubspot.webhook_config import compare_app_config, compare_webhook_config
++
++WEBHOOK_CONFIG_CACHE_KEY = "hubspot_webhook_config_readback"
++WEBHOOK_PROOF_STALE_SECONDS = 86400
++
++
++class WebhookProof(TypedDict):
++    """Versioned snapshot written only after comparing both published exports."""
++
++    schema_version: int
++    checked_at: str
++    ready: bool
++    config_fingerprint: str
++
++
++@dataclass(frozen=True, slots=True)
++class WebhookProofEvaluation:
++    """Validity and freshness are separate observations of the same evidence."""
++
++    status: str
++    age_seconds: int | None = None
++    stale: bool = False
++
++    @property
++    def verified(self) -> bool:
++        """Return whether evidence applies to the current configuration."""
++        return self.status == "valid"
++
++    @property
++    def rejection_reason(self) -> str | None:
++        """Return the bounded, PII-free reason for rejecting this proof."""
++        if self.verified:
++            return None
++        if self.status in {"missing", "fingerprint_mismatch"}:
++            return self.status
++        return "invalid"
++
++
++def load_desired_configuration() -> tuple[dict[str, object], dict[str, object]]:
++    """Read the two versioned manifests used by both validation and runtime."""
++    root = settings.BASE_DIR / "hubspot-app/src/app"
++    webhooks = json.loads((root / "webhooks/judah-webhooks-hsmeta.json").read_text(encoding="utf-8"))
++    app = json.loads((root / "app-hsmeta.json").read_text(encoding="utf-8"))
++    if not isinstance(webhooks, dict) or not isinstance(app, dict):
++        raise ValueError("HubSpot manifests must be JSON objects")
++    return webhooks, app
++
++
++def configuration_fingerprint(webhooks: dict[str, object], app: dict[str, object]) -> str:
++    """Hash both complete desired manifests with canonical JSON object ordering."""
++    canonical = json.dumps({"app": app, "webhooks": webhooks}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
++    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
++
++
++def expected_configuration_fingerprint() -> str:
++    """Compute the identity expected by this running version."""
++    return configuration_fingerprint(*load_desired_configuration())
++
++
++def _store_proof(*, ready: bool, fingerprint: str) -> WebhookProof:
++    """Persist a new observation without a destructive cache timeout."""
++    proof: WebhookProof = {
++        "schema_version": 1,
++        "checked_at": timezone.now().isoformat(),
++        "ready": ready,
++        "config_fingerprint": fingerprint,
++    }
++    cache.set(WEBHOOK_CONFIG_CACHE_KEY, proof, timeout=None)
++    return proof
++
++
++def invalidate_webhook_proof() -> WebhookProof:
++    """Replace prior evidence when a published export cannot be read."""
++    return _store_proof(ready=False, fingerprint=expected_configuration_fingerprint())
++
++
++def record_published_configuration(
++    published_webhooks: dict[str, object], published_app: dict[str, object]
++) -> WebhookProof:
++    """Compare both exports and persist the outcome without an expiration timer.
++
++    Invalid exports also replace prior evidence with a fail-closed snapshot.
++    The caller must fail its release gate when the returned proof is not ready.
++    """
++    desired_webhooks, desired_app = load_desired_configuration()
++    fingerprint = configuration_fingerprint(desired_webhooks, desired_app)
++    try:
++        webhook_result = compare_webhook_config(desired_webhooks, published_webhooks)
++        app_result = compare_app_config(desired_app, published_app)
++    except ValueError, KeyError, TypeError, AttributeError:
++        _store_proof(ready=False, fingerprint=fingerprint)
++        raise
++    return _store_proof(ready=webhook_result["ready"] is True and app_result["ready"] is True, fingerprint=fingerprint)
++
++
++def evaluate_webhook_proof(snapshot: object, *, expected_fingerprint: str, now: datetime) -> WebhookProofEvaluation:
++    """Reject absent, invalid, legacy or incompatible evidence, never age alone."""
++    if snapshot is None:
++        return WebhookProofEvaluation("missing")
++    if not isinstance(snapshot, dict):
++        return WebhookProofEvaluation("invalid")
++    try:
++        checked_at = datetime.fromisoformat(snapshot["checked_at"])
++        age = max(0, int((now - checked_at).total_seconds()))
++    except KeyError, ValueError, TypeError, OverflowError:
++        return WebhookProofEvaluation("invalid")
++    stale = age > WEBHOOK_PROOF_STALE_SECONDS
++    if snapshot.get("ready") is not True:
++        return WebhookProofEvaluation("invalid", age, stale)
++    if not snapshot.get("config_fingerprint"):
++        return WebhookProofEvaluation("fingerprint_missing", age, stale)
++    if snapshot.get("schema_version") != 1:
++        return WebhookProofEvaluation("invalid", age, stale)
++    if snapshot["config_fingerprint"] != expected_fingerprint:
++        return WebhookProofEvaluation("fingerprint_mismatch", age, stale)
++    return WebhookProofEvaluation("valid", age, stale)

@@ -548,20 +548,24 @@ def task_reconcile_lifecycle_occurrence(occurrence_id: str) -> str:
     if occurrence.occurrence_type == SupportLifecycleOccurrence.Type.ENTERED_SUPPORT_QUEUE:
         from apps.support.conversation_cycle_service import CycleClassification
 
-        if (
-            occurrence.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN
-            or occurrence.occurred_at is None
-        ):
-            return retry_later("entry_evidence_unproven")
         try:
-            entry_result = open_from_proven_occurrence(
-                ticket_id=occurrence.hubspot_ticket_id,
-                entered_at=occurrence.occurred_at,
-                account_id=occurrence.source_account_id,
-                evidence_source=occurrence.evidence_source,
-                source_event_id=occurrence.source_event_id,
-                observation_id=occurrence.observation_id,
-            )
+            with transaction.atomic():
+                current = SupportLifecycleOccurrence.objects.select_for_update().get(pk=occurrence.pk)
+                if current.processing_status != SupportLifecycleOccurrence.ProcessingStatus.PENDING:
+                    return current.processing_status
+                if (
+                    current.evidence_status != SupportLifecycleOccurrence.EvidenceStatus.PROVEN
+                    or current.occurred_at is None
+                ):
+                    return retry_later("entry_evidence_unproven")
+                entry_result = open_from_proven_occurrence(
+                    ticket_id=current.hubspot_ticket_id,
+                    entered_at=current.occurred_at,
+                    account_id=current.source_account_id,
+                    evidence_source=current.evidence_source,
+                    source_event_id=current.source_event_id,
+                    observation_id=current.observation_id,
+                )
         except Exception as exc:
             return retry_later(type(exc).__name__)
         if entry_result.admission.classification in {CycleClassification.CREATED, CycleClassification.DUPLICATE}:

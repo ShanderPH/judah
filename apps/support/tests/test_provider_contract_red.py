@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
@@ -57,6 +58,7 @@ from apps.support.tasks import (
     task_reconcile_lifecycle_occurrence,
     task_scan_lifecycle_occurrences,
 )
+from apps.support.webhook_proof import load_desired_configuration
 from apps.webhooks.handlers.hubspot_handler import _handle_pipeline_stage_change
 from apps.webhooks.models import WebhookEvent
 from common.exceptions import ExternalServiceError, ValidationError
@@ -227,12 +229,11 @@ def test_published_webhook_readback_controls_enforce_gate(settings, tmp_path) ->
     cache.delete(WEBHOOK_CONFIG_CACHE_KEY)
     assert provider_assignment_allowed() is False
 
-    desired_webhooks = settings.BASE_DIR / "hubspot-app/src/app/webhooks/judah-webhooks-hsmeta.json"
-    desired_app = settings.BASE_DIR / "hubspot-app/src/app/app-hsmeta.json"
+    desired_webhooks, desired_app = load_desired_configuration()
     published_webhooks = tmp_path / "published-webhooks.json"
     published_app = tmp_path / "published-app.json"
-    published_webhooks.write_text(desired_webhooks.read_text(encoding="utf-8"), encoding="utf-8")
-    published_app.write_text(desired_app.read_text(encoding="utf-8"), encoding="utf-8")
+    published_webhooks.write_text(json.dumps(desired_webhooks), encoding="utf-8")
+    published_app.write_text(json.dumps(desired_app), encoding="utf-8")
     call_command(
         "record_hubspot_webhook_readback",
         published_webhooks=published_webhooks,
